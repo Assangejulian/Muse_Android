@@ -1,4 +1,4 @@
-# Android Agent MVP 0.3
+# Android Agent MVP 0.3.11
 
 A private, sideloaded Android 13 automation agent. It observes the active UI through an accessibility service, asks DeepSeek for one constrained action, validates that action locally, executes it, and observes again.
 
@@ -21,6 +21,7 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 - Automatic target app selection from the installed app catalog
 - GitHub Release update checks on app launch
 - User-confirmed APK download and installation
+- Live node-ID clicking with clickable-parent and safe center-tap fallbacks
 
 Scheduling, screen wake, screenshots, Room logs, foreground service, and visual planning are intentionally deferred until the target tablet passes the capability probe.
 

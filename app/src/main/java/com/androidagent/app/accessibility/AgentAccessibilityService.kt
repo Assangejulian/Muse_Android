@@ -95,10 +95,47 @@ class AgentAccessibilityService : AccessibilityService() {
         return clickNodeOrParent(node)
     }
 
-    private fun clickNode(nodeId: Int, observation: Observation): Boolean {
-        val snapshot = observation.nodes.firstOrNull { it.id == nodeId } ?: return false
-        val text = snapshot.text.ifBlank { snapshot.description }
-        return text.isNotBlank() && clickText(text)
+    private suspend fun clickNode(nodeId: Int, observation: Observation): Boolean {
+        if (observation.nodes.none { it.id == nodeId }) return false
+        val liveNode = findLiveNode(nodeId) ?: return false
+        if (!liveNode.isVisibleToUser || !liveNode.isEnabled) return false
+        if (clickNodeOrParent(liveNode)) return true
+
+        val bounds = Rect().also(liveNode::getBoundsInScreen)
+        if (!NodeClickPolicy.isSafeBounds(
+                left = bounds.left,
+                top = bounds.top,
+                right = bounds.right,
+                bottom = bounds.bottom,
+                screenWidth = resources.displayMetrics.widthPixels,
+                screenHeight = resources.displayMetrics.heightPixels,
+            )) return false
+        return tap(bounds.exactCenterX(), bounds.exactCenterY())
+    }
+
+    private fun findLiveNode(targetId: Int): AccessibilityNodeInfo? {
+        val counter = AtomicInteger(1)
+        windows.sortedByDescending { it.layer }.forEach { window ->
+            window.root?.let { root ->
+                findLiveNode(root, targetId, counter, 0)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun findLiveNode(
+        node: AccessibilityNodeInfo,
+        targetId: Int,
+        counter: AtomicInteger,
+        depth: Int,
+    ): AccessibilityNodeInfo? {
+        if (depth > MAX_DEPTH || counter.get() > MAX_NODES) return null
+        if (counter.getAndIncrement() == targetId) return node
+        for (index in 0 until node.childCount) {
+            val child = node.getChild(index) ?: continue
+            findLiveNode(child, targetId, counter, depth + 1)?.let { return it }
+        }
+        return null
     }
 
     private fun clickNodeOrParent(start: AccessibilityNodeInfo): Boolean {
@@ -108,6 +145,19 @@ class AgentAccessibilityService : AccessibilityService() {
             node = node?.parent
         }
         return false
+    }
+
+    private suspend fun tap(x: Float, y: Float): Boolean {
+        val path = Path().apply { moveTo(x, y) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
+            .build()
+        val result = CompletableDeferred<Boolean>()
+        dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) { result.complete(true) }
+            override fun onCancelled(gestureDescription: GestureDescription?) { result.complete(false) }
+        }, null)
+        return result.await()
     }
 
     private fun inputText(text: String): Boolean {
