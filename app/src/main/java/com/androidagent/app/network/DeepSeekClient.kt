@@ -124,6 +124,9 @@ class DeepSeekClient {
             directly advance the stated goal.
             HARNESS STATE is authoritative. Never mutate its query, append digits, redo a listed milestone, or
             choose an action rejected in history. If loopDetected=true, choose a genuinely different route.
+            Never click IME keyboard character keys, hot-search terms, trending terms, or query suggestions.
+            After the locked query is entered, use submit_input. On a result-selection milestone, only open an
+            element whose own text or nearby row context matches the locked entity; otherwise use Back or a filter.
             When a screenshot is supplied, red Set-of-Mark labels correspond to node IDs in the Screen list.
             Use tap_point only with a supplied screenshot, only when the exact non-sensitive target is visibly clear
             but has no usable red node mark or text. Coordinates are normalized over the full screenshot from 0 to 1000.
@@ -175,8 +178,8 @@ class DeepSeekClient {
             ordered milestones. The Worker will see only one current milestone at a time. Never mutate canonical
             user values. Return one JSON object:
             {"summary":"...","targetAppHint":"...","canonicalQuery":"...","milestones":[
-              {"id":"m1","objective":"...","successPredicates":[
-                {"kind":"PACKAGE_FOREGROUND|TEXT_PRESENT|EDITABLE_EQUALS|TOGGLE_ON|SEMANTIC_CLAIM",
+              {"id":"m1","kind":"LAUNCH_APP|ENTER_QUERY|SELECT_ENTITY|OPEN_CONTENT|FINAL_ACTION|GENERIC","objective":"...","successPredicates":[
+                {"kind":"PACKAGE_FOREGROUND|TEXT_PRESENT|EDITABLE_EQUALS|IME_HIDDEN|PROFILE_IDENTITY|CONTENT_CREATOR|TOGGLE_ON|SEMANTIC_CLAIM",
                  "valueRef":"canonical_query","literal":"optional","description":"observable fact"}
               ]}
             ]}

@@ -1,4 +1,4 @@
-# Muse Android Agent 0.6.0
+# Muse Android Agent 0.6.1
 
 A private, sideloaded Android 13 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, executes it, and independently checks the result.
 
@@ -44,6 +44,10 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 - Set-of-Mark screenshots and guarded normalized visual point taps for inaccessible controls
 - Stale-observation rejection before state-dependent actions
 - Visual before/after Critic checks with hard deterministic predicate gates
+- Typed locked-search stages with one-shot semantic IME submission and exact query repair
+- Input-method windows excluded from Actor observations and Set-of-Mark screenshots
+- Locked creator/profile/content gates that reject hot searches, wrong users, wrong videos, and home/search loops
+- Pre-tool target proof plus idempotent one-shot final toggles for state-changing actions
 - App-private SQLite run traces available through `/trace`
 
 Foreground service and exact-alarm special access are intentionally deferred. Scheduled work uses WorkManager and may run later than the parsed time under Android battery optimization.

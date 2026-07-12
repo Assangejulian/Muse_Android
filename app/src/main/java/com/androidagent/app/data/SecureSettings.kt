@@ -35,6 +35,8 @@ class SecureSettings(context: Context) {
         get() = prefs.getString("api_key_${currentProvider}", "").orEmpty()
         set(value) = prefs.edit().putString("api_key_${currentProvider}", value.trim()).apply()
 
+    fun apiKeyFor(provider: String): String = prefs.getString("api_key_$provider", "").orEmpty()
+
     var targetPackage: String
         get() = prefs.getString("target_package", "").orEmpty()
         set(value) = prefs.edit().putString("target_package", value.trim()).apply()

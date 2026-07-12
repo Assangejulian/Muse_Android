@@ -7,11 +7,14 @@ data class TaskMilestone(
     val id: String,
     val objective: String,
     val successPredicates: List<UiPredicate>,
+    val kind: TaskMilestoneKind = TaskMilestoneKind.GENERIC,
 ) {
     val successEvidence: String get() = successPredicates.joinToString("; ") { it.description }
 }
 
-enum class UiPredicateKind { PACKAGE_FOREGROUND, TEXT_PRESENT, EDITABLE_EQUALS, TOGGLE_ON, SEMANTIC_CLAIM }
+enum class TaskMilestoneKind { LAUNCH_APP, ENTER_QUERY, SELECT_ENTITY, OPEN_CONTENT, FINAL_ACTION, GENERIC }
+
+enum class UiPredicateKind { PACKAGE_FOREGROUND, TEXT_PRESENT, EDITABLE_EQUALS, IME_HIDDEN, PROFILE_IDENTITY, CONTENT_CREATOR, TOGGLE_ON, SEMANTIC_CLAIM }
 
 data class UiPredicate(
     val kind: UiPredicateKind,
@@ -40,7 +43,7 @@ data class TaskPlan(
                 index == currentIndex -> "current"
                 else -> "pending"
             }
-            appendLine("${milestone.id} [$status] ${milestone.objective}; evidence=${milestone.successEvidence}")
+            appendLine("${milestone.id} [$status/${milestone.kind}] ${milestone.objective}; evidence=${milestone.successEvidence}")
         }
     }
 
@@ -57,6 +60,8 @@ data class TaskPlan(
         }
         return if (semanticIndex >= 0) semanticIndex else milestones.lastIndex.coerceAtLeast(0)
     }
+
+    fun indexOfKind(kind: TaskMilestoneKind): Int = milestones.indexOfFirst { it.kind == kind }
 }
 
 enum class TransitionJudgement { NO_PROGRESS, PROGRESS, MILESTONE_COMPLETE }
@@ -79,6 +84,8 @@ object TaskPlanParser {
                         id = item.optString("id", "m${index + 1}").ifBlank { "m${index + 1}" },
                         objective = objective,
                         successPredicates = parsePredicates(item, canonicalQuery),
+                        kind = runCatching { TaskMilestoneKind.valueOf(item.optString("kind", "GENERIC").uppercase()) }
+                            .getOrDefault(TaskMilestoneKind.GENERIC),
                     ),
                 )
             }
@@ -94,18 +101,51 @@ object TaskPlanParser {
 
     fun fallback(goal: String, targetAppHint: String, canonicalQuery: String?): TaskPlan {
         val milestones = buildList {
-            add(TaskMilestone("m1", "Launch the requested target app", listOf(UiPredicate(UiPredicateKind.PACKAGE_FOREGROUND, description = "The foreground package is the target app"))))
+            add(TaskMilestone("m1", "Launch the requested target app", listOf(UiPredicate(UiPredicateKind.PACKAGE_FOREGROUND, description = "The foreground package is the target app")), TaskMilestoneKind.LAUNCH_APP))
             if (canonicalQuery != null) {
-                add(TaskMilestone("m2", "Open the app search interface and enter the canonical query exactly", listOf(UiPredicate(UiPredicateKind.EDITABLE_EQUALS, valueRef = "canonical_query", description = "The search field exactly equals the canonical query"))))
-                add(TaskMilestone("m3", "Open the result that exactly matches the requested entity", listOf(UiPredicate(UiPredicateKind.SEMANTIC_CLAIM, valueRef = "canonical_query", description = "The requested entity page or matching result is visibly open"))))
+                add(TaskMilestone("m2", "Open the app search interface and enter the canonical query exactly", listOf(UiPredicate(UiPredicateKind.EDITABLE_EQUALS, valueRef = "canonical_query", description = "The search field exactly equals the canonical query")), TaskMilestoneKind.ENTER_QUERY))
+                add(
+                    TaskMilestone(
+                        "m3",
+                        "Open the creator profile that exactly matches '$canonicalQuery'",
+                        listOf(
+                            UiPredicate(UiPredicateKind.PROFILE_IDENTITY, valueRef = "canonical_query", description = "The profile header is structurally identified as '$canonicalQuery'"),
+                            UiPredicate(UiPredicateKind.IME_HIDDEN, description = "The input method is no longer covering search results"),
+                            UiPredicate(UiPredicateKind.SEMANTIC_CLAIM, valueRef = "canonical_query", description = "The '$canonicalQuery' creator profile is visibly open with profile characteristics such as avatar, followers, or a content list"),
+                        ),
+                        TaskMilestoneKind.SELECT_ENTITY,
+                    ),
+                )
             }
-            if (goal.contains("最新")) add(TaskMilestone("m4", "Open the newest requested content", listOf(UiPredicate(UiPredicateKind.SEMANTIC_CLAIM, description = "The requested newest content is open"))))
+            if (goal.contains("最新")) {
+                add(
+                    TaskMilestone(
+                        "m4",
+                        "Open the newest requested content${canonicalQuery?.let { " from '$it'" }.orEmpty()}",
+                        listOfNotNull(
+                            canonicalQuery?.let { UiPredicate(UiPredicateKind.CONTENT_CREATOR, valueRef = "canonical_query", description = "The opened content's creator region is structurally identified as '$canonicalQuery'") },
+                            UiPredicate(UiPredicateKind.SEMANTIC_CLAIM, description = "The newest requested content is visibly open rather than the profile or search page"),
+                        ),
+                        TaskMilestoneKind.OPEN_CONTENT,
+                    ),
+                )
+            }
             val finalPredicate = if (goal.contains("点赞")) {
                 UiPredicate(UiPredicateKind.TOGGLE_ON, literal = "like", description = "The like control is visibly in the ON state")
             } else {
                 UiPredicate(UiPredicateKind.SEMANTIC_CLAIM, description = "The screen visibly proves the requested result")
             }
-            add(TaskMilestone("m${size + 1}", "Perform the final requested interaction", listOf(finalPredicate)))
+            add(
+                TaskMilestone(
+                    "m${size + 1}",
+                    "Perform the final requested interaction${canonicalQuery?.let { " on '$it' content" }.orEmpty()}",
+                    listOfNotNull(
+                        canonicalQuery?.let { UiPredicate(UiPredicateKind.CONTENT_CREATOR, valueRef = "canonical_query", description = "The current content's creator region remains structurally identified as '$canonicalQuery'") },
+                        finalPredicate,
+                    ),
+                    TaskMilestoneKind.FINAL_ACTION,
+                ),
+            )
         }
         return TaskPlan(goal, targetAppHint, canonicalQuery, milestones)
     }
@@ -131,7 +171,7 @@ object TaskPlanParser {
                 val literal = predicate.optString("literal").trim().ifBlank { null }
                 require(valueRef == null || valueRef == "canonical_query") { "Unknown predicate valueRef" }
                 if (valueRef == "canonical_query") require(canonicalQuery != null) { "canonical_query is unavailable" }
-                if (kind == UiPredicateKind.TEXT_PRESENT || kind == UiPredicateKind.EDITABLE_EQUALS) {
+                if (kind == UiPredicateKind.TEXT_PRESENT || kind == UiPredicateKind.EDITABLE_EQUALS || kind == UiPredicateKind.PROFILE_IDENTITY || kind == UiPredicateKind.CONTENT_CREATOR) {
                     require(valueRef != null || literal != null) { "$kind requires a value" }
                 }
                 if (kind == UiPredicateKind.TOGGLE_ON) require(literal != null) { "TOGGLE_ON requires a semantic target" }

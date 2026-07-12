@@ -17,11 +17,13 @@ data class UiNodeSnapshot(
     val selected: Boolean = false,
     val scrollable: Boolean = false,
     val packageName: String = "",
+    val isInputMethod: Boolean = false,
 )
 
 data class Observation(
     val packageName: String,
     val nodes: List<UiNodeSnapshot>,
+    val imeVisible: Boolean = false,
 ) {
     val observationId: String get() = stateFingerprint()
 
@@ -31,18 +33,20 @@ data class Observation(
             val description = node.description.replace(Regex("\\d+"), "#").take(80)
             "${node.viewId}:${node.className}:$text:$description:${node.enabled}:${node.focused}:${node.checked}:${node.selected}:${node.bounds}"
         }
-        return "$packageName:${stableContent.hashCode().toUInt().toString(16)}"
+        return "$packageName:$imeVisible:${stableContent.hashCode().toUInt().toString(16)}"
     }
 
     fun visibleText(): String = nodes.joinToString(" ") { "${it.text} ${it.description}" }
 
     fun compactText(): String = buildString {
         appendLine("package=$packageName")
+        appendLine("imeVisible=$imeVisible")
         nodes.take(80).forEach { node ->
             append("#${node.id} ${node.className}")
             if (node.text.isNotBlank()) append(" text=${node.text.take(80)}")
             if (node.description.isNotBlank()) append(" description=${node.description.take(80)}")
             append(" clickable=${node.clickable} editable=${node.editable} bounds=${node.bounds}")
+            if (node.packageName.isNotBlank() && node.packageName != packageName) append(" package=${node.packageName}")
             if (node.viewId.isNotBlank()) append(" viewId=${node.viewId}")
             append(" key=${node.stableKey} focused=${node.focused}")
             node.checked?.let { append(" checked=$it") }
