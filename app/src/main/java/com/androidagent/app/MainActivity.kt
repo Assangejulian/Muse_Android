@@ -57,6 +57,8 @@ import com.androidagent.app.chat.ChatMessage
 import com.androidagent.app.chat.ChatStore
 import com.androidagent.app.chat.Conversation
 import com.androidagent.app.data.SecureSettings
+import com.androidagent.app.network.DeepSeekClient
+import com.androidagent.app.network.InteractionDecision
 import com.androidagent.app.update.GitHubUpdater
 import com.androidagent.app.update.UpdateInfo
 import kotlinx.coroutines.launch
@@ -278,6 +280,8 @@ private fun ChatWorkspace(
     val context = LocalContext.current
     val state by AgentController.state.collectAsState()
     var input by remember(conversation.id) { mutableStateOf("") }
+    var sending by remember(conversation.id) { mutableStateOf(false) }
+    val interactionScope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
 
     LaunchedEffect(conversation.messages.size, state.logs.size) {
@@ -326,30 +330,52 @@ private fun ChatWorkspace(
                 value = input,
                 onValueChange = { input = it },
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("输入任务，或输入 /list 查看应用") },
+                placeholder = { Text("聊天或交代任务；/chat 只聊天，/run 强制执行") },
                 minLines = 2,
                 maxLines = 5,
             )
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("自动识别应用 · 本地安全校验", color = Muted, style = MaterialTheme.typography.labelSmall)
+                Text(if (sending) "正在理解你的意思…" else "自动判断聊天或操作 · 本地安全校验", color = Muted, style = MaterialTheme.typography.labelSmall)
                 Button(
-                    enabled = input.isNotBlank() && !state.running,
+                    enabled = input.isNotBlank() && !state.running && !sending,
                     onClick = {
                         val text = input.trim()
-                        val response = if (text.equals("/list", true)) {
-                            "已发现 ${appCatalog.list().size} 个可启动应用：\n\n" + appCatalog.list().joinToString("\n") { "• ${it.label}  (${it.packageName})" }
-                        } else {
-                            settings.taskGoal = text
-                            AgentController.start(context, settings)
-                            "任务已提交。应用将从本机目录中自动识别；识别后会锁定为本次任务白名单。"
-                        }
                         val title = if (conversation.messages.isEmpty()) text.removePrefix("/list").ifBlank { "应用列表" }.take(18) else conversation.title
-                        updateConversation(conversation.copy(
+                        val withUser = conversation.copy(
                             title = title,
                             updatedAt = System.currentTimeMillis(),
-                            messages = conversation.messages + ChatMessage("user", text) + ChatMessage("assistant", response),
-                        ))
+                            messages = conversation.messages + ChatMessage("user", text),
+                        )
+                        updateConversation(withUser)
                         input = ""
+                        if (text.equals("/list", true)) {
+                            val response = "已发现 ${appCatalog.list().size} 个可启动应用：\n\n" + appCatalog.list().joinToString("\n") { "• ${it.label}  (${it.packageName})" }
+                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
+                        } else if (settings.apiKey.isBlank()) {
+                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先在侧栏配置 DeepSeek API Key。")))
+                        } else {
+                            sending = true
+                            interactionScope.launch {
+                                val result = runCatching { DeepSeekClient().route(settings.apiKey, text, appCatalog.compactList()) }
+                                result.onSuccess { decision ->
+                                    val response = when (decision) {
+                                        is InteractionDecision.Chat -> decision.reply
+                                        is InteractionDecision.Action -> {
+                                            settings.taskGoal = decision.goal
+                                            AgentController.start(context, settings)
+                                            decision.reply
+                                        }
+                                    }
+                                    updateConversation(withUser.copy(
+                                        updatedAt = System.currentTimeMillis(),
+                                        messages = withUser.messages + ChatMessage("assistant", response),
+                                    ))
+                                }.onFailure { error ->
+                                    updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "我暂时没理解成功：${error.message}")))
+                                }
+                                sending = false
+                            }
+                        }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Accent),
                 ) { Text("发送") }
