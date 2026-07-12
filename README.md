@@ -1,4 +1,4 @@
-# Android Agent MVP 0.4.7
+# Android Agent MVP 0.4.8
 
 A private, sideloaded Android 13 automation agent. It observes the active UI through an accessibility service, asks DeepSeek for one constrained action, validates that action locally, executes it, and observes again.
 
@@ -34,8 +34,12 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 - Conversation context selected from a one-million-token memory budget
 - Larger model output budgets for chat and action planning
 - App-private SQLite conversation storage with automatic legacy migration
+- OCR-derived next-day scheduling through Android WorkManager
+- Strict completion verification and repeated-action recovery
+- Optional screenshot planning with a separate OpenAI-compatible vision model
+- In-app APK download progress and cancellation
 
-Scheduling, screen wake, screenshots, foreground service, and visual planning are intentionally deferred until the target tablet passes the capability probe.
+Foreground service and exact-alarm special access are intentionally deferred. Scheduled work uses WorkManager and may run later than the parsed time under Android battery optimization.
 
 ## Build
 

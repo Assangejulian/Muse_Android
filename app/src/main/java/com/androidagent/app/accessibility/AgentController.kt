@@ -9,6 +9,7 @@ import com.androidagent.app.agent.AgentUiState
 import com.androidagent.app.agent.SafetyGuard
 import com.androidagent.app.data.SecureSettings
 import com.androidagent.app.network.DeepSeekClient
+import com.androidagent.app.automation.DailyTaskScheduler
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -57,6 +58,7 @@ object AgentController {
                     ?: apps.singleOrNull { it.label.contains(target, true) || target.contains(it.label, true) }?.packageName
             }
             var lastActionSignature: String? = null
+            var repeatedActionCount = 0
             try {
                 if (configuredTarget != null && lockedPackage == null) {
                     log("Default app not found; falling back to automatic app selection")
@@ -66,15 +68,21 @@ object AgentController {
                     val observation = service.observe()
                     setCurrentPackage(observation.packageName)
                     update { copy(status = "Planning") }
+                    val useVision = settings.visionEnabled && settings.visionApiKey.isNotBlank()
+                    val screenshot = if (useVision) service.captureScreenDataUrl() else null
+                    val planningApiKey = if (useVision) settings.visionApiKey else apiKey
+                    val planningBaseUrl = if (useVision) settings.visionBaseUrl else settings.modelBaseUrl
+                    val planningModel = if (useVision) settings.visionModelName else settings.modelName
                     val raw = DeepSeekClient().plan(
-                        apiKey = apiKey,
-                        baseUrl = settings.modelBaseUrl,
-                        model = settings.modelName,
+                        apiKey = planningApiKey,
+                        baseUrl = planningBaseUrl,
+                        model = planningModel,
                         goal = goal,
                         allowedPackage = lockedPackage,
                         appCatalog = apps.joinToString("\n") { "${it.label} | ${it.packageName}" }.take(16_000),
                         observation = observation,
                         history = history,
+                        screenshotDataUrl = screenshot,
                     )
                     val action = ActionParser.parse(raw)
                     SafetyGuard.validate(action, observation, lockedPackage, packages).getOrThrow()
@@ -84,19 +92,37 @@ object AgentController {
                     }
                     log("Step $step: ${action::class.simpleName}")
                     if (action is AgentAction.Finish) {
-                        update { copy(status = "Succeeded: ${action.reason}") }
-                        return@launch
+                        val verified = DeepSeekClient().verifyCompletion(
+                            apiKey = planningApiKey,
+                            baseUrl = planningBaseUrl,
+                            model = planningModel,
+                            goal = goal,
+                            observation = observation,
+                            history = history,
+                            screenshotDataUrl = screenshot,
+                        )
+                        if (verified) {
+                            completeTask(context, service, goal, action.reason)
+                            return@launch
+                        }
+                        history += "REJECTED_FINISH: task evidence is incomplete"
+                        log("Completion rejected; continuing the task")
+                        continue
                     }
                     if (action is AgentAction.Fail) error(action.reason)
                     val actionSignature = actionSignature(action)
                     if (actionSignature != null && actionSignature == lastActionSignature) {
-                        log("Repeated action blocked after a successful execution")
-                        update { copy(status = "Succeeded: action already completed") }
-                        return@launch
+                        repeatedActionCount += 1
+                        history += "BLOCKED_REPEAT: $actionSignature was already executed successfully; choose another action"
+                        log("Repeated action blocked; asking for a different path")
+                        if (repeatedActionCount >= 3) error("Planner repeated the same wrong action three times")
+                        delay(500)
+                        continue
                     }
                     update { copy(status = "Acting") }
                     require(service.execute(action, observation)) { "Action failed: $action" }
                     lastActionSignature = actionSignature
+                    repeatedActionCount = 0
                     history += action.toString()
                     val completesTask = when (action) {
                         is AgentAction.ClickNode -> action.completeAfter
@@ -105,8 +131,24 @@ object AgentController {
                     }
                     if (completesTask) {
                         log("Final action completed")
-                        update { copy(status = "Succeeded: final action completed") }
-                        return@launch
+                        delay(1_500)
+                        val finalObservation = service.observe()
+                        val finalScreenshot = if (useVision) service.captureScreenDataUrl() else null
+                        val verified = DeepSeekClient().verifyCompletion(
+                            planningApiKey,
+                            planningBaseUrl,
+                            planningModel,
+                            goal,
+                            finalObservation,
+                            history,
+                            finalScreenshot,
+                        )
+                        if (verified) {
+                            completeTask(context, service, goal, "final action completed")
+                            return@launch
+                        }
+                        history += "REJECTED_FINAL_CLICK: requested result is not yet visible"
+                        log("Final click was not enough; continuing the task")
                     }
                     delay(if (action is AgentAction.Wait) action.milliseconds else 1200)
                 }
@@ -121,6 +163,17 @@ object AgentController {
                 update { copy(running = false) }
             }
         }
+    }
+
+    private suspend fun completeTask(context: Context, service: AgentAccessibilityService, goal: String, reason: String) {
+        if (goal.contains("金币") || goal.contains("签到") || goal.contains("领取")) {
+            delay(1_000)
+            val text = service.recognizeScreenText()
+            val nextRun = DailyTaskScheduler.scheduleFromOcr(context.applicationContext, goal, text)
+            if (nextRun != null) log("Next daily run scheduled from OCR: $nextRun")
+            else log("Task completed, but no next-run time was found by OCR")
+        }
+        update { copy(status = "Succeeded: $reason") }
     }
 
     fun stop() {

@@ -37,4 +37,28 @@ class SecureSettings(context: Context) {
     var modelName: String
         get() = prefs.getString("model_name", "deepseek-v4-flash").orEmpty()
         set(value) = prefs.edit().putString("model_name", value.trim()).apply()
+
+    var visionEnabled: Boolean
+        get() = prefs.getBoolean("vision_enabled", false)
+        set(value) = prefs.edit().putBoolean("vision_enabled", value).apply()
+
+    var visionModelName: String
+        get() = prefs.getString("vision_model_name", "qwen3-vl-flash").orEmpty()
+        set(value) = prefs.edit().putString("vision_model_name", value.trim()).apply()
+
+    var visionBaseUrl: String
+        get() = prefs.getString("vision_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1").orEmpty()
+        set(value) = prefs.edit().putString("vision_base_url", value.trim().trimEnd('/')).apply()
+
+    var visionApiKey: String
+        get() = prefs.getString("vision_api_key", "").orEmpty()
+        set(value) = prefs.edit().putString("vision_api_key", value.trim()).apply()
+
+    var scheduledGoal: String
+        get() = prefs.getString("scheduled_goal", "").orEmpty()
+        set(value) = prefs.edit().putString("scheduled_goal", value.trim()).apply()
+
+    var nextRunAt: Long
+        get() = prefs.getLong("next_run_at", 0L)
+        set(value) = prefs.edit().putLong("next_run_at", value).apply()
 }

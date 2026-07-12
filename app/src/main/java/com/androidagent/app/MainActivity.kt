@@ -28,6 +28,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
@@ -35,6 +36,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -52,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.androidagent.app.accessibility.AgentController
+import com.androidagent.app.automation.DailyTaskScheduler
 import com.androidagent.app.apps.AppCatalog
 import com.androidagent.app.chat.ChatMessage
 import com.androidagent.app.chat.ChatStore
@@ -61,7 +64,12 @@ import com.androidagent.app.network.DeepSeekClient
 import com.androidagent.app.network.InteractionDecision
 import com.androidagent.app.update.GitHubUpdater
 import com.androidagent.app.update.UpdateInfo
+import com.androidagent.app.update.DownloadProgress
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private val Ink = Color(0xFF17211B)
 private val Canvas = Color(0xFFF7F7F2)
@@ -88,6 +96,7 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
     val catalog = remember { AppCatalog(context) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val agentState by AgentController.state.collectAsState()
     var conversations by remember {
         mutableStateOf(chatStore.load().ifEmpty { listOf(Conversation()) })
     }
@@ -97,8 +106,15 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
     var githubRepository by remember { mutableStateOf(settings.githubRepository) }
     var modelBaseUrl by remember { mutableStateOf(settings.modelBaseUrl) }
     var modelName by remember { mutableStateOf(settings.modelName) }
+    var visionEnabled by remember { mutableStateOf(settings.visionEnabled) }
+    var visionApiKey by remember { mutableStateOf(settings.visionApiKey) }
+    var visionBaseUrl by remember { mutableStateOf(settings.visionBaseUrl) }
+    var visionModelName by remember { mutableStateOf(settings.visionModelName) }
     var availableUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
     var updateMessage by remember { mutableStateOf<String?>(null) }
+    var downloadProgress by remember { mutableStateOf<DownloadProgress?>(null) }
+    var updateJob by remember { mutableStateOf<Job?>(null) }
+    var nextRunAt by remember { mutableStateOf(settings.nextRunAt) }
     val apps = remember { catalog.list() }
     val updater = remember { GitHubUpdater(context) }
 
@@ -108,6 +124,9 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                 .onSuccess { availableUpdate = it }
                 .onFailure { updateMessage = "更新检查失败：${it.message}" }
         }
+    }
+    LaunchedEffect(agentState.status) {
+        if (!agentState.running) nextRunAt = settings.nextRunAt
     }
 
     fun persist(updated: List<Conversation>) {
@@ -127,8 +146,13 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                     githubRepository = githubRepository,
                     modelBaseUrl = modelBaseUrl,
                     modelName = modelName,
+                    visionEnabled = visionEnabled,
+                    visionApiKey = visionApiKey,
+                    visionBaseUrl = visionBaseUrl,
+                    visionModelName = visionModelName,
                     appCount = apps.size,
                     connected = AgentController.state.value.accessibilityConnected,
+                    nextRunAt = nextRunAt,
                     onSelect = { selectedId = it; scope.launch { drawerState.close() } },
                     onNew = {
                         val chat = Conversation()
@@ -147,6 +171,10 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                     onGithubRepository = { githubRepository = it; settings.githubRepository = it },
                     onModelBaseUrl = { modelBaseUrl = it; settings.modelBaseUrl = it },
                     onModelName = { modelName = it; settings.modelName = it },
+                    onVisionEnabled = { visionEnabled = it; settings.visionEnabled = it },
+                    onVisionApiKey = { visionApiKey = it; settings.visionApiKey = it },
+                    onVisionBaseUrl = { visionBaseUrl = it; settings.visionBaseUrl = it },
+                    onVisionModelName = { visionModelName = it; settings.visionModelName = it },
                     onModelPreset = { preset ->
                         val values = when (preset) {
                             "qwen" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "qwen-plus"
@@ -157,6 +185,10 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                         modelName = values.second
                         settings.modelBaseUrl = values.first
                         settings.modelName = values.second
+                    },
+                    onCancelSchedule = {
+                        DailyTaskScheduler.cancel(context)
+                        nextRunAt = 0L
                     },
                     openAccessibilitySettings = openAccessibilitySettings,
                 )
@@ -175,20 +207,38 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
 
     availableUpdate?.let { update ->
         AlertDialog(
-            onDismissRequest = { availableUpdate = null },
+            onDismissRequest = { if (downloadProgress == null) availableUpdate = null },
             title = { Text("发现新版本 ${update.version}") },
-            text = { Text(update.notes.ifBlank { "可以从 GitHub Release 下载并安装新版本。" }) },
+            text = {
+                val progress = downloadProgress
+                if (progress == null) {
+                    Text(update.notes.ifBlank { "可以从 GitHub Release 下载并安装新版本。" })
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("正在下载… ${progress.percent}%")
+                        LinearProgressIndicator(progress = { progress.fraction }, modifier = Modifier.fillMaxWidth())
+                        Text("${formatMegabytes(progress.downloadedBytes)} / ${if (progress.totalBytes > 0) formatMegabytes(progress.totalBytes) else "未知大小"}", color = Muted)
+                    }
+                }
+            },
             confirmButton = {
-                Button(onClick = {
-                    scope.launch {
+                if (downloadProgress == null) Button(onClick = {
+                    updateJob = scope.launch {
                         updateMessage = "正在下载更新…"
-                        runCatching { updater.downloadAndInstall(update) }
+                        runCatching { updater.downloadAndInstall(update) { downloadProgress = it } }
                             .onFailure { updateMessage = "更新失败：${it.message}" }
+                        downloadProgress = null
                         availableUpdate = null
                     }
                 }) { Text("下载并安装") }
             },
-            dismissButton = { TextButton(onClick = { availableUpdate = null }) { Text("稍后") } },
+            dismissButton = {
+                TextButton(onClick = {
+                    if (downloadProgress != null) updateJob?.cancel()
+                    downloadProgress = null
+                    availableUpdate = null
+                }) { Text(if (downloadProgress == null) "稍后" else "取消下载") }
+            },
         )
     }
     updateMessage?.let { message ->
@@ -212,8 +262,13 @@ private fun DrawerContent(
     githubRepository: String,
     modelBaseUrl: String,
     modelName: String,
+    visionEnabled: Boolean,
+    visionApiKey: String,
+    visionBaseUrl: String,
+    visionModelName: String,
     appCount: Int,
     connected: Boolean,
+    nextRunAt: Long,
     onSelect: (String) -> Unit,
     onNew: () -> Unit,
     onPin: (String) -> Unit,
@@ -223,7 +278,12 @@ private fun DrawerContent(
     onGithubRepository: (String) -> Unit,
     onModelBaseUrl: (String) -> Unit,
     onModelName: (String) -> Unit,
+    onVisionEnabled: (Boolean) -> Unit,
+    onVisionApiKey: (String) -> Unit,
+    onVisionBaseUrl: (String) -> Unit,
+    onVisionModelName: (String) -> Unit,
     onModelPreset: (String) -> Unit,
+    onCancelSchedule: () -> Unit,
     openAccessibilitySettings: () -> Unit,
 ) {
     Column(Modifier.fillMaxHeight().padding(18.dp)) {
@@ -260,6 +320,15 @@ private fun DrawerContent(
             Text("Agent 配置", color = Color.White, fontWeight = FontWeight.Bold)
             Text(if (connected) "● 无障碍已连接" else "○ 无障碍未连接", color = if (connected) Color(0xFF80DDA8) else Color(0xFFFFC36A))
             Text("已发现 $appCount 个可启动应用", color = Color(0xFFB9C2BC), style = MaterialTheme.typography.bodySmall)
+            if (nextRunAt > System.currentTimeMillis()) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column {
+                        Text("每日任务已排程", color = Color(0xFF80DDA8))
+                        Text(formatScheduleTime(nextRunAt), color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
+                    }
+                    TextButton(onClick = onCancelSchedule) { Text("停用", color = Color(0xFFDFA39F)) }
+                }
+            }
             OutlinedTextField(
                 value = apiKey,
                 onValueChange = onApiKey,
@@ -287,6 +356,38 @@ private fun DrawerContent(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("视觉规划", color = Color.White)
+                    Text("仅启用时发送当前屏幕截图", color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
+                }
+                Switch(checked = visionEnabled, onCheckedChange = onVisionEnabled)
+            }
+            if (visionEnabled) {
+                OutlinedTextField(
+                    value = visionApiKey,
+                    onValueChange = onVisionApiKey,
+                    label = { Text("视觉模型 API Key") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = visionModelName,
+                    onValueChange = onVisionModelName,
+                    label = { Text("视觉模型名称") },
+                    placeholder = { Text("qwen3-vl-flash") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = visionBaseUrl,
+                    onValueChange = onVisionBaseUrl,
+                    label = { Text("视觉模型 Base URL") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
             OutlinedTextField(
                 value = defaultPackage,
                 onValueChange = onDefaultPackage,
@@ -453,3 +554,8 @@ private fun translateStatus(status: String): String = when {
     status.startsWith("Succeeded") -> "已完成"
     else -> status
 }
+
+private fun formatMegabytes(bytes: Long): String = "%.1f MB".format(bytes / 1024.0 / 1024.0)
+
+private fun formatScheduleTime(timestamp: Long): String =
+    "下次执行：${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(timestamp))}"

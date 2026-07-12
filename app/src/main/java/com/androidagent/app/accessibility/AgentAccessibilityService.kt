@@ -7,6 +7,7 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.Bitmap
 import android.os.Bundle
+import android.util.Base64
 import android.util.Log
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
@@ -27,6 +28,7 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import kotlinx.coroutines.CompletableDeferred
 import java.util.concurrent.atomic.AtomicInteger
+import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
 
 class AgentAccessibilityService : AccessibilityService() {
@@ -145,6 +147,39 @@ class AgentAccessibilityService : AccessibilityService() {
         }
     }
 
+    suspend fun recognizeScreenText(): String {
+        val bitmap = captureScreen() ?: return ""
+        return try {
+            val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+            try {
+                recognizer.process(InputImage.fromBitmap(bitmap, 0)).await().text
+            } finally {
+                recognizer.close()
+            }
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    suspend fun captureScreenDataUrl(): String? {
+        val original = captureScreen() ?: return null
+        return try {
+            val scale = minOf(1f, 1280f / maxOf(original.width, original.height))
+            val bitmap = if (scale < 1f) {
+                Bitmap.createScaledBitmap(original, (original.width * scale).toInt(), (original.height * scale).toInt(), true)
+            } else original
+            try {
+                val output = ByteArrayOutputStream()
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 72, output)
+                "data:image/jpeg;base64,${Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)}"
+            } finally {
+                if (bitmap !== original) bitmap.recycle()
+            }
+        } finally {
+            original.recycle()
+        }
+    }
+
     private suspend fun captureScreen(): Bitmap? = kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
         takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
             override fun onSuccess(screenshot: ScreenshotResult) {
@@ -229,10 +264,27 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private fun inputText(text: String): Boolean {
-        val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
-        if (!focused.isEditable || focused.isPassword) return false
+        val root = rootInActiveWindow ?: return false
+        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?.takeIf { it.isEditable && it.isVisibleToUser && !it.isPassword }
+            ?: findEditableNode(root)
+            ?: return false
+        if (!focused.isFocused) {
+            focused.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            focused.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
         val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) }
         return focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    private fun findEditableNode(node: AccessibilityNodeInfo, depth: Int = 0): AccessibilityNodeInfo? {
+        if (depth > MAX_DEPTH) return null
+        if (node.isEditable && node.isVisibleToUser && node.isEnabled && !node.isPassword) return node
+        for (index in 0 until node.childCount) {
+            val child = node.getChild(index) ?: continue
+            findEditableNode(child, depth + 1)?.let { return it }
+        }
+        return null
     }
 
     private suspend fun swipe(direction: String): Boolean {

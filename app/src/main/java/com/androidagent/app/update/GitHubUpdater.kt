@@ -8,6 +8,8 @@ import androidx.core.content.FileProvider
 import com.androidagent.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -15,6 +17,10 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 data class UpdateInfo(val version: String, val apkUrl: String, val notes: String)
+data class DownloadProgress(val downloadedBytes: Long, val totalBytes: Long) {
+    val fraction: Float get() = if (totalBytes > 0) (downloadedBytes.toFloat() / totalBytes).coerceIn(0f, 1f) else 0f
+    val percent: Int get() = (fraction * 100).toInt()
+}
 
 class GitHubUpdater(private val context: Context) {
     private val client = OkHttpClient.Builder()
@@ -44,13 +50,32 @@ class GitHubUpdater(private val context: Context) {
         }
     }
 
-    suspend fun downloadAndInstall(update: UpdateInfo) = withContext(Dispatchers.IO) {
+    suspend fun downloadAndInstall(update: UpdateInfo, onProgress: suspend (DownloadProgress) -> Unit = {}) = withContext(Dispatchers.IO) {
         val request = Request.Builder().url(update.apkUrl).header("User-Agent", "AndroidAgent/${BuildConfig.VERSION_NAME}").build()
         client.newCall(request).execute().use { response ->
             require(response.isSuccessful) { "APK download failed: HTTP ${response.code}" }
             val directory = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: error("Download directory unavailable")
             val apk = File(directory, "AndroidAgent-${update.version}.apk")
-            response.body?.byteStream()?.use { input -> apk.outputStream().use(input::copyTo) }
+            val body = response.body ?: error("APK download returned an empty body")
+            val total = body.contentLength()
+            var downloaded = 0L
+            var lastReported = 0L
+            body.byteStream().use { input ->
+                apk.outputStream().use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        downloaded += count
+                        if (downloaded - lastReported >= 256 * 1024 || downloaded == total) {
+                            lastReported = downloaded
+                            withContext(Dispatchers.Main) { onProgress(DownloadProgress(downloaded, total)) }
+                        }
+                    }
+                }
+            }
             withContext(Dispatchers.Main) { openInstaller(apk) }
         }
     }

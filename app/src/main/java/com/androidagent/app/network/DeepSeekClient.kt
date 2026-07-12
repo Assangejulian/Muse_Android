@@ -85,6 +85,7 @@ class DeepSeekClient {
         appCatalog: String,
         observation: Observation,
         history: List<String>,
+        screenshotDataUrl: String? = null,
     ): String = withContext(Dispatchers.IO) {
         val system = """
             You control one private Android tablet for a narrow user-requested task.
@@ -104,17 +105,55 @@ class DeepSeekClient {
             Prefer node/text actions. Take one reversible step at a time.
             Set completeAfter=true when this click is the final requested atomic action, such as liking,
             following, collecting, opening the requested destination, or confirming a completed check-in.
-            Never click the same toggle twice. If recent actions show the requested toggle was clicked, finish.
+            Never click the same toggle twice. Never declare success merely because the target app launched.
+            For multi-step goals, finish only when the current screen contains direct evidence that every requested
+            result is complete. Treat BLOCKED_REPEAT actions as wrong choices and choose a different path.
         """.trimIndent()
         val user = "Goal: ${goal.take(8_000)}\nINSTALLED APPS:\n$appCatalog\nRecent actions: ${history.takeLast(10)}\nScreen:\n${observation.compactText()}"
+        val userContent: Any = if (screenshotDataUrl == null) user else JSONArray()
+            .put(JSONObject().put("type", "text").put("text", user))
+            .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", screenshotDataUrl)))
         executeJsonRequest(
             apiKey = apiKey,
             baseUrl = baseUrl,
             model = model,
-            messages = JSONArray().put(message("system", system)).put(message("user", user)),
+            messages = JSONArray().put(message("system", system)).put(message("user", userContent)),
             temperature = 0.1,
             maxTokens = PLAN_OUTPUT_TOKENS,
         )
+    }
+
+    suspend fun verifyCompletion(
+        apiKey: String,
+        baseUrl: String,
+        model: String,
+        goal: String,
+        observation: Observation,
+        history: List<String>,
+        screenshotDataUrl: String? = null,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val prompt = """
+            Verify whether the Android task is fully complete now. App launch or navigation alone is not success
+            for a multi-step goal. Require direct evidence on the current screen and in successful action history.
+            Return {"done":true,"reason":"evidence"} or {"done":false,"reason":"missing step"}.
+
+            Goal: ${goal.take(8_000)}
+            Successful actions: ${history.takeLast(12)}
+            Screen: ${observation.compactText()}
+        """.trimIndent()
+        val content: Any = if (screenshotDataUrl == null) prompt else JSONArray()
+            .put(JSONObject().put("type", "text").put("text", prompt))
+            .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", screenshotDataUrl)))
+        val raw = executeJsonRequest(
+            apiKey,
+            baseUrl,
+            model,
+            JSONArray().put(message("system", "Be a strict task-completion verifier. Return JSON only."))
+                .put(message("user", content)),
+            0.0,
+            1_024,
+        )
+        JSONObject(JsonResponse.extractObject(raw)).optBoolean("done", false)
     }
 
     private suspend fun executeJsonRequest(
@@ -166,7 +205,7 @@ class DeepSeekClient {
         error(lastError)
     }
 
-    private fun message(role: String, content: String) = JSONObject().put("role", role).put("content", content)
+    private fun message(role: String, content: Any) = JSONObject().put("role", role).put("content", content)
 
     private companion object {
         const val ROUTE_OUTPUT_TOKENS = 8_192
