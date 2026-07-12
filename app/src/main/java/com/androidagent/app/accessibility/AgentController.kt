@@ -7,6 +7,7 @@ import com.androidagent.app.agent.ActionParser
 import com.androidagent.app.agent.AgentAction
 import com.androidagent.app.agent.AgentUiState
 import com.androidagent.app.agent.SafetyGuard
+import com.androidagent.app.agent.CompletionPolicy
 import com.androidagent.app.data.SecureSettings
 import com.androidagent.app.network.DeepSeekClient
 import com.androidagent.app.automation.DailyTaskScheduler
@@ -23,7 +24,7 @@ import kotlinx.coroutines.launch
 
 object AgentController {
     private const val TAG = "AndroidAgent"
-    private const val MAX_STEPS = 15
+    private const val MAX_STEPS = 24
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val mutableState = MutableStateFlow(AgentUiState())
     val state: StateFlow<AgentUiState> = mutableState.asStateFlow()
@@ -59,6 +60,7 @@ object AgentController {
             }
             var lastActionSignature: String? = null
             var repeatedActionCount = 0
+            var failedActionCount = 0
             try {
                 if (configuredTarget != null && lockedPackage == null) {
                     log("Default app not found; falling back to automatic app selection")
@@ -92,6 +94,11 @@ object AgentController {
                     }
                     log("Step $step: ${action::class.simpleName}")
                     if (action is AgentAction.Finish) {
+                        if (!CompletionPolicy.hasMinimumEvidence(goal, history)) {
+                            history += "REJECTED_FINISH: local completion policy found too little successful progress"
+                            log("Completion rejected locally; required steps are still missing")
+                            continue
+                        }
                         val verified = DeepSeekClient().verifyCompletion(
                             apiKey = planningApiKey,
                             baseUrl = planningBaseUrl,
@@ -115,12 +122,29 @@ object AgentController {
                         repeatedActionCount += 1
                         history += "BLOCKED_REPEAT: $actionSignature was already executed successfully; choose another action"
                         log("Repeated action blocked; asking for a different path")
-                        if (repeatedActionCount >= 3) error("Planner repeated the same wrong action three times")
+                        if (repeatedActionCount >= 2) {
+                            val recovery = if (action is AgentAction.ClickNode) AgentAction.Swipe("up") else AgentAction.Back
+                            if (service.execute(recovery, observation)) {
+                                history += "RECOVERY_ACTION: $recovery changed the screen after a repeated wrong action"
+                                log("Applied a local recovery action")
+                            }
+                            lastActionSignature = null
+                            repeatedActionCount = 0
+                        }
                         delay(500)
                         continue
                     }
                     update { copy(status = "Acting") }
-                    require(service.execute(action, observation)) { "Action failed: $action" }
+                    if (!service.execute(action, observation)) {
+                        failedActionCount += 1
+                        history += "FAILED_ACTION: $action could not be executed; choose a different target or focus the input first"
+                        log("Action failed; replanning instead of ending the task")
+                        lastActionSignature = null
+                        if (failedActionCount >= 4) error("Four consecutive actions could not be executed")
+                        delay(700)
+                        continue
+                    }
+                    failedActionCount = 0
                     lastActionSignature = actionSignature
                     repeatedActionCount = 0
                     history += action.toString()
@@ -132,6 +156,11 @@ object AgentController {
                     if (completesTask) {
                         log("Final action completed")
                         delay(1_500)
+                        if (!CompletionPolicy.hasMinimumEvidence(goal, history)) {
+                            history += "REJECTED_FINAL_CLICK: local completion policy found missing steps"
+                            log("Final click rejected locally; continuing the task")
+                            continue
+                        }
                         val finalObservation = service.observe()
                         val finalScreenshot = if (useVision) service.captureScreenDataUrl() else null
                         val verified = DeepSeekClient().verifyCompletion(

@@ -1,4 +1,4 @@
-# Muse Android Agent 0.4.8
+# Muse Android Agent 0.4.9
 
 A private, sideloaded Android 13 automation agent. It observes the active UI through an accessibility service, asks DeepSeek for one constrained action, validates that action locally, executes it, and observes again.
 

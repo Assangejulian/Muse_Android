@@ -14,9 +14,26 @@ class SecureSettings(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
+    init {
+        if (!prefs.getBoolean("provider_keys_migrated", false)) {
+            val legacyKey = prefs.getString("api_key", "").orEmpty()
+            if (legacyKey.isNotBlank()) {
+                val provider = inferProvider(prefs.getString("model_base_url", "").orEmpty())
+                prefs.edit().putString("api_key_$provider", legacyKey).apply()
+            }
+            prefs.edit().putBoolean("provider_keys_migrated", true).apply()
+        }
+    }
+
+    var currentProvider: String
+        get() = prefs.getString("model_provider", "").orEmpty().ifBlank {
+            inferProvider(prefs.getString("model_base_url", "").orEmpty())
+        }
+        set(value) = prefs.edit().putString("model_provider", value).apply()
+
     var apiKey: String
-        get() = prefs.getString("api_key", "").orEmpty()
-        set(value) = prefs.edit().putString("api_key", value.trim()).apply()
+        get() = prefs.getString("api_key_${currentProvider}", "").orEmpty()
+        set(value) = prefs.edit().putString("api_key_${currentProvider}", value.trim()).apply()
 
     var targetPackage: String
         get() = prefs.getString("target_package", "").orEmpty()
@@ -63,4 +80,10 @@ class SecureSettings(context: Context) {
     var nextRunAt: Long
         get() = prefs.getLong("next_run_at", 0L)
         set(value) = prefs.edit().putLong("next_run_at", value).apply()
+
+    private fun inferProvider(baseUrl: String): String = when {
+        baseUrl.contains("aliyuncs.com", true) -> "qwen"
+        baseUrl.contains("xiaomi", true) || baseUrl.contains("mimo", true) -> "mimo"
+        else -> "deepseek"
+    }
 }

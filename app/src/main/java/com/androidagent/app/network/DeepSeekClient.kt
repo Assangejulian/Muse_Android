@@ -108,8 +108,12 @@ class DeepSeekClient {
             Never click the same toggle twice. Never declare success merely because the target app launched.
             For multi-step goals, finish only when the current screen contains direct evidence that every requested
             result is complete. Treat BLOCKED_REPEAT actions as wrong choices and choose a different path.
+            For a named creator's latest video: open the app, use search, enter the creator name, open the matching
+            creator or newest result, open the newest video, perform the requested interaction, then verify its state.
+            Never choose unrelated promotional entries, TV/casting features, ads, or navigation items that do not
+            directly advance the stated goal.
         """.trimIndent()
-        val user = "Goal: ${goal.take(8_000)}\nINSTALLED APPS:\n$appCatalog\nRecent actions: ${history.takeLast(10)}\nScreen:\n${observation.compactText()}"
+        val user = "Goal: ${goal.take(8_000)}\nINSTALLED APPS:\n$appCatalog\nRecent actions: ${history.takeLast(16)}\nScreen:\n${observation.compactText()}"
         val userContent: Any = if (screenshotDataUrl == null) user else JSONArray()
             .put(JSONObject().put("type", "text").put("text", user))
             .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", screenshotDataUrl)))
@@ -176,7 +180,7 @@ class DeepSeekClient {
                 bodyJson.put("thinking", JSONObject().put("type", "disabled"))
             }
             val request = Request.Builder()
-                .url("${baseUrl.trimEnd('/')}/chat/completions")
+                .url(completionsUrl(baseUrl))
                 .header("Authorization", "Bearer $apiKey")
                 .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
                 .build()
@@ -206,6 +210,14 @@ class DeepSeekClient {
     }
 
     private fun message(role: String, content: Any) = JSONObject().put("role", role).put("content", content)
+
+    private fun completionsUrl(baseUrl: String): String {
+        val normalized = baseUrl.trim().trimEnd('/')
+        require(normalized.startsWith("https://") || normalized.startsWith("http://")) {
+            "Base URL must start with https://; an API Key cannot be used as the Base URL"
+        }
+        return "$normalized/chat/completions"
+    }
 
     private companion object {
         const val ROUTE_OUTPUT_TOKENS = 8_192

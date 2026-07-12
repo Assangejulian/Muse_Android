@@ -102,6 +102,7 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
     }
     var selectedId by remember { mutableStateOf(conversations.first().id) }
     var apiKey by remember { mutableStateOf(settings.apiKey) }
+    var activeProvider by remember { mutableStateOf(settings.currentProvider) }
     var defaultPackage by remember { mutableStateOf(settings.targetPackage) }
     var githubRepository by remember { mutableStateOf(settings.githubRepository) }
     var modelBaseUrl by remember { mutableStateOf(settings.modelBaseUrl) }
@@ -142,6 +143,7 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                     conversations = conversations,
                     selectedId = selectedId,
                     apiKey = apiKey,
+                    activeProvider = activeProvider,
                     defaultPackage = defaultPackage,
                     githubRepository = githubRepository,
                     modelBaseUrl = modelBaseUrl,
@@ -177,14 +179,17 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                     onVisionModelName = { visionModelName = it; settings.visionModelName = it },
                     onModelPreset = { preset ->
                         val values = when (preset) {
-                            "qwen" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "qwen-plus"
+                            "qwen" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "qwen3.5-omni-plus"
                             "mimo" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "mimo-v2.5-pro"
                             else -> "https://api.deepseek.com" to "deepseek-v4-flash"
                         }
+                        settings.currentProvider = preset
+                        activeProvider = preset
                         modelBaseUrl = values.first
                         modelName = values.second
                         settings.modelBaseUrl = values.first
                         settings.modelName = values.second
+                        apiKey = settings.apiKey
                     },
                     onCancelSchedule = {
                         DailyTaskScheduler.cancel(context)
@@ -258,6 +263,7 @@ private fun DrawerContent(
     conversations: List<Conversation>,
     selectedId: String,
     apiKey: String,
+    activeProvider: String,
     defaultPackage: String,
     githubRepository: String,
     modelBaseUrl: String,
@@ -332,15 +338,15 @@ private fun DrawerContent(
             OutlinedTextField(
                 value = apiKey,
                 onValueChange = onApiKey,
-                label = { Text("DeepSeek API Key") },
+                label = { Text("${providerName(activeProvider)} API Key") },
                 visualTransformation = PasswordVisualTransformation(),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { onModelPreset("deepseek") }) { Text("DeepSeek", color = Color(0xFF80DDA8)) }
-                TextButton(onClick = { onModelPreset("qwen") }) { Text("Qwen", color = Color.White) }
-                TextButton(onClick = { onModelPreset("mimo") }) { Text("MiMo", color = Color.White) }
+                TextButton(onClick = { onModelPreset("deepseek") }) { Text("DeepSeek", color = providerColor(activeProvider == "deepseek")) }
+                TextButton(onClick = { onModelPreset("qwen") }) { Text("Qwen", color = providerColor(activeProvider == "qwen")) }
+                TextButton(onClick = { onModelPreset("mimo") }) { Text("MiMo", color = providerColor(activeProvider == "mimo")) }
             }
             OutlinedTextField(
                 value = modelName,
@@ -559,3 +565,11 @@ private fun formatMegabytes(bytes: Long): String = "%.1f MB".format(bytes / 1024
 
 private fun formatScheduleTime(timestamp: Long): String =
     "下次执行：${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(timestamp))}"
+
+private fun providerColor(selected: Boolean): Color = if (selected) Color(0xFF80DDA8) else Color.White
+
+private fun providerName(provider: String): String = when (provider) {
+    "qwen" -> "Qwen"
+    "mimo" -> "MiMo"
+    else -> "DeepSeek"
+}
