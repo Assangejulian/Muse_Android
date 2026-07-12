@@ -68,6 +68,8 @@ object AgentController {
                     update { copy(status = "Planning") }
                     val raw = DeepSeekClient().plan(
                         apiKey = apiKey,
+                        baseUrl = settings.modelBaseUrl,
+                        model = settings.modelName,
                         goal = goal,
                         allowedPackage = lockedPackage,
                         appCatalog = apps.joinToString("\n") { "${it.label} | ${it.packageName}" }.take(16_000),

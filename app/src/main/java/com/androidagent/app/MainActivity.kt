@@ -95,6 +95,8 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
     var apiKey by remember { mutableStateOf(settings.apiKey) }
     var defaultPackage by remember { mutableStateOf(settings.targetPackage) }
     var githubRepository by remember { mutableStateOf(settings.githubRepository) }
+    var modelBaseUrl by remember { mutableStateOf(settings.modelBaseUrl) }
+    var modelName by remember { mutableStateOf(settings.modelName) }
     var availableUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
     var updateMessage by remember { mutableStateOf<String?>(null) }
     val apps = remember { catalog.list() }
@@ -123,6 +125,8 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                     apiKey = apiKey,
                     defaultPackage = defaultPackage,
                     githubRepository = githubRepository,
+                    modelBaseUrl = modelBaseUrl,
+                    modelName = modelName,
                     appCount = apps.size,
                     connected = AgentController.state.value.accessibilityConnected,
                     onSelect = { selectedId = it; scope.launch { drawerState.close() } },
@@ -141,6 +145,19 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                     onApiKey = { apiKey = it; settings.apiKey = it },
                     onDefaultPackage = { defaultPackage = it; settings.targetPackage = it },
                     onGithubRepository = { githubRepository = it; settings.githubRepository = it },
+                    onModelBaseUrl = { modelBaseUrl = it; settings.modelBaseUrl = it },
+                    onModelName = { modelName = it; settings.modelName = it },
+                    onModelPreset = { preset ->
+                        val values = when (preset) {
+                            "qwen" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "qwen-plus"
+                            "mimo" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "mimo-v2.5-pro"
+                            else -> "https://api.deepseek.com" to "deepseek-v4-flash"
+                        }
+                        modelBaseUrl = values.first
+                        modelName = values.second
+                        settings.modelBaseUrl = values.first
+                        settings.modelName = values.second
+                    },
                     openAccessibilitySettings = openAccessibilitySettings,
                 )
             }
@@ -193,6 +210,8 @@ private fun DrawerContent(
     apiKey: String,
     defaultPackage: String,
     githubRepository: String,
+    modelBaseUrl: String,
+    modelName: String,
     appCount: Int,
     connected: Boolean,
     onSelect: (String) -> Unit,
@@ -202,6 +221,9 @@ private fun DrawerContent(
     onApiKey: (String) -> Unit,
     onDefaultPackage: (String) -> Unit,
     onGithubRepository: (String) -> Unit,
+    onModelBaseUrl: (String) -> Unit,
+    onModelName: (String) -> Unit,
+    onModelPreset: (String) -> Unit,
     openAccessibilitySettings: () -> Unit,
 ) {
     Column(Modifier.fillMaxHeight().padding(18.dp)) {
@@ -243,6 +265,25 @@ private fun DrawerContent(
                 onValueChange = onApiKey,
                 label = { Text("DeepSeek API Key") },
                 visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = { onModelPreset("deepseek") }) { Text("DeepSeek", color = Color(0xFF80DDA8)) }
+                TextButton(onClick = { onModelPreset("qwen") }) { Text("Qwen", color = Color.White) }
+                TextButton(onClick = { onModelPreset("mimo") }) { Text("MiMo", color = Color.White) }
+            }
+            OutlinedTextField(
+                value = modelName,
+                onValueChange = onModelName,
+                label = { Text("模型名称") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = modelBaseUrl,
+                onValueChange = onModelBaseUrl,
+                label = { Text("OpenAI-compatible Base URL") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -356,7 +397,7 @@ private fun ChatWorkspace(
                         } else {
                             sending = true
                             interactionScope.launch {
-                                val result = runCatching { DeepSeekClient().route(settings.apiKey, text, appCatalog.compactList()) }
+                                val result = runCatching { DeepSeekClient().route(settings.apiKey, settings.modelBaseUrl, settings.modelName, text, appCatalog.compactList()) }
                                 result.onSuccess { decision ->
                                     val response = when (decision) {
                                         is InteractionDecision.Chat -> decision.reply

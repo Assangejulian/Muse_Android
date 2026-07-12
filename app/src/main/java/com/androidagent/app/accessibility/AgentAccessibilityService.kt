@@ -5,8 +5,10 @@ import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
+import android.graphics.Bitmap
 import android.os.Bundle
 import android.util.Log
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.androidagent.app.agent.AgentAction
@@ -19,8 +21,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import kotlinx.coroutines.CompletableDeferred
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.resume
 
 class AgentAccessibilityService : AccessibilityService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -107,10 +114,51 @@ class AgentAccessibilityService : AccessibilityService() {
         return true
     }
 
-    private fun clickText(text: String): Boolean {
+    private suspend fun clickText(text: String): Boolean {
         val candidates = rootInActiveWindow?.findAccessibilityNodeInfosByText(text).orEmpty()
-        val node = candidates.firstOrNull { it.isVisibleToUser } ?: return false
-        return clickNodeOrParent(node)
+        val node = candidates.firstOrNull { it.isVisibleToUser }
+        if (node != null && clickNodeOrParent(node)) return true
+        return clickTextWithOcr(text)
+    }
+
+    private suspend fun clickTextWithOcr(target: String): Boolean {
+        val bitmap = captureScreen() ?: return false
+        return try {
+            val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+            val result = recognizer.process(InputImage.fromBitmap(bitmap, 0)).await()
+            recognizer.close()
+            val candidate = result.textBlocks.asSequence()
+                .flatMap { it.lines.asSequence() }
+                .flatMap { line -> line.elements.asSequence() }
+                .filter { element -> element.text.equals(target, true) || element.text.contains(target, true) || target.contains(element.text, true) }
+                .mapNotNull { it.boundingBox }
+                .firstOrNull { bounds ->
+                    NodeClickPolicy.isSafeBounds(bounds.left, bounds.top, bounds.right, bounds.bottom, bitmap.width, bitmap.height)
+                } ?: return false
+            Log.i(TAG, "OCR fallback matched text=$target bounds=$candidate")
+            tap(candidate.exactCenterX(), candidate.exactCenterY())
+        } catch (error: Throwable) {
+            Log.w(TAG, "OCR fallback failed for text=$target", error)
+            false
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private suspend fun captureScreen(): Bitmap? = kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+        takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+            override fun onSuccess(screenshot: ScreenshotResult) {
+                val hardwareBuffer = screenshot.hardwareBuffer
+                val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, screenshot.colorSpace)?.copy(Bitmap.Config.ARGB_8888, false)
+                hardwareBuffer.close()
+                if (continuation.isActive) continuation.resume(bitmap)
+            }
+
+            override fun onFailure(errorCode: Int) {
+                Log.w(TAG, "Screenshot failed errorCode=$errorCode")
+                if (continuation.isActive) continuation.resume(null)
+            }
+        })
     }
 
     private suspend fun clickNode(nodeId: Int, observation: Observation): Boolean {

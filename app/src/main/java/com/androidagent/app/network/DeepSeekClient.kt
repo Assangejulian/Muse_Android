@@ -23,7 +23,7 @@ class DeepSeekClient {
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    suspend fun route(apiKey: String, input: String, appCatalog: String): InteractionDecision = withContext(Dispatchers.IO) {
+    suspend fun route(apiKey: String, baseUrl: String, model: String, input: String, appCatalog: String): InteractionDecision = withContext(Dispatchers.IO) {
         val forcedChat = input.startsWith("/chat ", true)
         val forcedAction = input.startsWith("/run ", true)
         val cleanInput = when {
@@ -44,7 +44,7 @@ class DeepSeekClient {
             ${if (forcedAction) "The /run prefix forces action mode unless the request is prohibited." else ""}
         """.trimIndent()
         val body = JSONObject()
-            .put("model", "deepseek-chat")
+            .put("model", model)
             .put("temperature", 0.2)
             .put("max_tokens", 400)
             .put("response_format", JSONObject().put("type", "json_object"))
@@ -53,7 +53,7 @@ class DeepSeekClient {
                 .put(JSONObject().put("role", "user").put("content", "Message: $cleanInput\nInstalled apps:\n$appCatalog")))
             .toString()
         val request = Request.Builder()
-            .url("https://api.deepseek.com/chat/completions")
+            .url("${baseUrl.trimEnd('/')}/chat/completions")
             .header("Authorization", "Bearer $apiKey")
             .post(body.toRequestBody("application/json".toMediaType()))
             .build()
@@ -76,6 +76,8 @@ class DeepSeekClient {
 
     suspend fun plan(
         apiKey: String,
+        baseUrl: String,
+        model: String,
         goal: String,
         allowedPackage: String?,
         appCatalog: String,
@@ -105,7 +107,7 @@ class DeepSeekClient {
             """.trimIndent()
             val user = "Goal: ${goal.take(1000)}\nINSTALLED APPS:\n$appCatalog\nRecent actions: ${history.takeLast(6)}\nScreen:\n${observation.compactText()}"
             val body = JSONObject()
-                .put("model", "deepseek-chat")
+                .put("model", model)
                 .put("temperature", 0.1)
                 .put("max_tokens", 250)
                 .put("response_format", JSONObject().put("type", "json_object"))
@@ -114,7 +116,7 @@ class DeepSeekClient {
                     .put(JSONObject().put("role", "user").put("content", user)))
                 .toString()
             val request = Request.Builder()
-                .url("https://api.deepseek.com/chat/completions")
+                .url("${baseUrl.trimEnd('/')}/chat/completions")
                 .header("Authorization", "Bearer $apiKey")
                 .post(body.toRequestBody("application/json".toMediaType()))
                 .build()

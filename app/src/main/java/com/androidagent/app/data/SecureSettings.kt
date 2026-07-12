@@ -29,4 +29,12 @@ class SecureSettings(context: Context) {
     var githubRepository: String
         get() = prefs.getString("github_repository", BuildConfig.GITHUB_REPOSITORY).orEmpty()
         set(value) = prefs.edit().putString("github_repository", value.trim()).apply()
+
+    var modelBaseUrl: String
+        get() = prefs.getString("model_base_url", "https://api.deepseek.com").orEmpty()
+        set(value) = prefs.edit().putString("model_base_url", value.trim().trimEnd('/')).apply()
+
+    var modelName: String
+        get() = prefs.getString("model_name", "deepseek-v4-flash").orEmpty()
+        set(value) = prefs.edit().putString("model_name", value.trim()).apply()
 }

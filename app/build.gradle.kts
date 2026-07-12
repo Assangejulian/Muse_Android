@@ -12,8 +12,8 @@ android {
         applicationId = "com.androidagent.app"
         minSdk = 30
         targetSdk = 33
-        versionCode = 8
-        versionName = "0.4.3"
+        versionCode = 9
+        versionName = "0.4.4"
         buildConfigField("String", "GITHUB_REPOSITORY", "\"Assangejulian/Muse_Android\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -53,6 +53,8 @@ dependencies {
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
