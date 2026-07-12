@@ -54,7 +54,11 @@ class AgentAccessibilityService : AccessibilityService() {
         val nodes = mutableListOf<UiNodeSnapshot>()
         val nextId = AtomicInteger(1)
         windows.sortedByDescending { it.layer }.forEach { window ->
-            window.root?.let { collectNodes(it, nodes, nextId, 0) }
+            window.root?.let { root ->
+                if (ObservationPolicy.shouldIncludePackage(root.packageName?.toString())) {
+                    collectNodes(root, nodes, nextId, 0)
+                }
+            }
         }
         return Observation(rootInActiveWindow?.packageName?.toString().orEmpty(), nodes.take(MAX_NODES))
     }
@@ -131,7 +135,9 @@ class AgentAccessibilityService : AccessibilityService() {
         val counter = AtomicInteger(1)
         windows.sortedByDescending { it.layer }.forEach { window ->
             window.root?.let { root ->
-                findLiveNode(root, targetId, counter, 0)?.let { return it }
+                if (ObservationPolicy.shouldIncludePackage(root.packageName?.toString())) {
+                    findLiveNode(root, targetId, counter, 0)?.let { return it }
+                }
             }
         }
         return null
