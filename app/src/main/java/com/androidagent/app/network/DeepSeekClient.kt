@@ -26,7 +26,10 @@ class DeepSeekClient {
     suspend fun route(apiKey: String, input: String, appCatalog: String): InteractionDecision = withContext(Dispatchers.IO) {
         val forcedChat = input.startsWith("/chat ", true)
         val forcedAction = input.startsWith("/run ", true)
-        val cleanInput = input.substringAfter(' ', input).take(2_000)
+        val cleanInput = when {
+            forcedChat || forcedAction -> input.substringAfter(' ', "").trim()
+            else -> input.trim()
+        }.take(2_000)
         val system = """
             You are Muse, a friendly Chinese Android tablet assistant. Decide whether the user wants normal
             conversation or a real device operation. Return exactly one JSON object.
