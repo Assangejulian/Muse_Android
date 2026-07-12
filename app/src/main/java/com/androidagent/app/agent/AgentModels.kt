@@ -16,14 +16,14 @@ data class Observation(
 ) {
     fun compactText(): String = buildString {
         appendLine("package=$packageName")
-        nodes.take(120).forEach { node ->
+        nodes.take(80).forEach { node ->
             append("#${node.id} ${node.className}")
-            if (node.text.isNotBlank()) append(" text=${node.text.take(100)}")
-            if (node.description.isNotBlank()) append(" description=${node.description.take(100)}")
+            if (node.text.isNotBlank()) append(" text=${node.text.take(80)}")
+            if (node.description.isNotBlank()) append(" description=${node.description.take(80)}")
             append(" clickable=${node.clickable} editable=${node.editable} bounds=${node.bounds}")
             appendLine()
         }
-    }.take(18_000)
+    }.take(12_000)
 }
 
 sealed interface AgentAction {

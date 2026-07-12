@@ -4,7 +4,15 @@ import org.json.JSONObject
 
 object ActionParser {
     fun parse(raw: String): AgentAction {
-        val clean = raw.substringAfter("```json", raw).substringAfter("```", raw).substringBeforeLast("```").trim()
+        val unfenced = when {
+            raw.contains("```json") -> raw.substringAfter("```json").substringBefore("```").trim()
+            raw.contains("```") -> raw.substringAfter("```").substringBefore("```").trim()
+            else -> raw.trim()
+        }
+        val start = unfenced.indexOf('{')
+        val end = unfenced.lastIndexOf('}')
+        val clean = if (start >= 0 && end >= start) unfenced.substring(start, end + 1) else unfenced
+        require(clean.isNotEmpty()) { "Planner returned empty response" }
         val json = JSONObject(clean)
         val allowed = setOf("action", "packageName", "text", "nodeId", "direction", "milliseconds", "reason", "completeAfter")
         require(json.keys().asSequence().all { it in allowed }) { "Unknown response field" }

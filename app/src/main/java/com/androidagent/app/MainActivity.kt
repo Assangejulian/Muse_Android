@@ -397,7 +397,8 @@ private fun ChatWorkspace(
                         } else {
                             sending = true
                             interactionScope.launch {
-                                val result = runCatching { DeepSeekClient().route(settings.apiKey, settings.modelBaseUrl, settings.modelName, text, appCatalog.compactList()) }
+                                val history = conversation.messages.map { it.role to it.content }
+                                val result = runCatching { DeepSeekClient().route(settings.apiKey, settings.modelBaseUrl, settings.modelName, text, appCatalog.compactList(), history) }
                                 result.onSuccess { decision ->
                                     val response = when (decision) {
                                         is InteractionDecision.Chat -> decision.reply

@@ -24,4 +24,12 @@ class ActionParserTest {
     fun clampsWaitDuration() {
         assertEquals(AgentAction.Wait(5000), ActionParser.parse("""{"action":"wait","milliseconds":99999}"""))
     }
+
+    @Test
+    fun parsesJsonSurroundedByModelText() {
+        assertEquals(
+            AgentAction.Finish("done"),
+            ActionParser.parse("Result:\n{\"action\":\"finish\",\"reason\":\"done\"}\nEnd"),
+        )
+    }
 }
