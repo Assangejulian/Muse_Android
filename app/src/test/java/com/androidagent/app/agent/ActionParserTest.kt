@@ -32,4 +32,12 @@ class ActionParserTest {
             ActionParser.parse("Result:\n{\"action\":\"finish\",\"reason\":\"done\"}\nEnd"),
         )
     }
+
+    @Test
+    fun ignoresMarkdownFenceMentionAfterJson() {
+        assertEquals(
+            AgentAction.Finish("done"),
+            ActionParser.parse("{\"action\":\"finish\",\"reason\":\"done\"}\n```json\n```"),
+        )
+    }
 }

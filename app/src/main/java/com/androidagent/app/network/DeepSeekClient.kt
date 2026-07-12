@@ -224,8 +224,9 @@ class DeepSeekClient {
                 val responseMessage = choice.optJSONObject("message")
                 val content = responseMessage?.optString("content").orEmpty().trim()
                 if (content.isNotEmpty()) {
-                    val validJson = runCatching { JSONObject(JsonResponse.extractObject(content)) }.isSuccess
-                    if (validJson) return content
+                    val normalizedJson = runCatching { JsonResponse.extractObject(content) }.getOrNull()
+                    val validJson = normalizedJson != null && runCatching { JSONObject(normalizedJson) }.isSuccess
+                    if (validJson) return normalizedJson
                     lastError = "$purpose ($model) returned non-JSON content"
                     workingMessages.put(message("assistant", content.take(2_000)))
                     workingMessages.put(message("user", "Your previous response was invalid or contained an empty JSON block. Return one complete JSON object now."))
