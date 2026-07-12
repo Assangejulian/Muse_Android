@@ -87,6 +87,7 @@ class DeepSeekClient {
         observation: Observation,
         history: List<String>,
         screenshotDataUrl: String? = null,
+        harnessState: String = "",
     ): String = withContext(Dispatchers.IO) {
         val system = """
             You control one private Android tablet for a narrow user-requested task.
@@ -113,8 +114,10 @@ class DeepSeekClient {
             creator or newest result, open the newest video, perform the requested interaction, then verify its state.
             Never choose unrelated promotional entries, TV/casting features, ads, or navigation items that do not
             directly advance the stated goal.
+            HARNESS STATE is authoritative. Never mutate its query, append digits, redo a listed milestone, or
+            choose an action rejected in history. If loopDetected=true, choose a genuinely different route.
         """.trimIndent()
-        val user = "Goal: ${goal.take(8_000)}\nINSTALLED APPS:\n$appCatalog\nRecent actions: ${history.takeLast(16)}\nScreen:\n${observation.compactText()}"
+        val user = "Goal: ${goal.take(8_000)}\nHARNESS STATE: $harnessState\nINSTALLED APPS:\n$appCatalog\nRecent actions: ${history.takeLast(16)}\nScreen:\n${observation.compactText()}"
         val userContent: Any = if (screenshotDataUrl == null) user else JSONArray()
             .put(JSONObject().put("type", "text").put("text", user))
             .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", screenshotDataUrl)))

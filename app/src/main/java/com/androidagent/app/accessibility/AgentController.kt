@@ -8,6 +8,7 @@ import com.androidagent.app.agent.AgentAction
 import com.androidagent.app.agent.AgentUiState
 import com.androidagent.app.agent.SafetyGuard
 import com.androidagent.app.agent.CompletionPolicy
+import com.androidagent.app.agent.ExecutionHarness
 import com.androidagent.app.data.SecureSettings
 import com.androidagent.app.network.DeepSeekClient
 import com.androidagent.app.automation.DailyTaskScheduler
@@ -64,6 +65,7 @@ object AgentController {
             var lastActionSignature: String? = null
             var repeatedActionCount = 0
             var failedActionCount = 0
+            val harness = ExecutionHarness(goal)
             try {
                 if (configuredTarget != null && lockedPackage == null) {
                     log("Default app not found; falling back to automatic app selection")
@@ -71,7 +73,17 @@ object AgentController {
                 for (step in 1..MAX_STEPS) {
                     update { copy(step = step, status = "Observing") }
                     val observation = service.observe()
+                    harness.observe(observation)
                     setCurrentPackage(observation.packageName)
+                    val harnessRecovery = harness.recoveryAction(observation)
+                    if (harnessRecovery != null) {
+                        log("Screen cycle detected; applying harness recovery")
+                        if (service.execute(harnessRecovery, observation)) {
+                            history += "HARNESS_RECOVERY: $harnessRecovery"
+                            delay(1_000)
+                            continue
+                        }
+                    }
                     update { copy(status = "Planning") }
                     val useVision = settings.visionEnabled && settings.visionApiKey.isNotBlank()
                     val screenshot = if (useVision) service.captureScreenDataUrl() else null
@@ -88,8 +100,16 @@ object AgentController {
                         observation = observation,
                         history = history,
                         screenshotDataUrl = screenshot,
+                        harnessState = harness.context(),
                     )
-                    val action = ActionParser.parse(raw)
+                    val action = harness.normalize(ActionParser.parse(raw))
+                    val harnessBlockReason = harness.blockReason(action, observation)
+                    if (harnessBlockReason != null) {
+                        history += "HARNESS_BLOCKED: $action because $harnessBlockReason"
+                        log("Harness blocked an invalid repeated action: $harnessBlockReason")
+                        delay(400)
+                        continue
+                    }
                     SafetyGuard.validate(action, observation, lockedPackage, packages).getOrThrow()
                     if (action is AgentAction.LaunchApp && lockedPackage == null) {
                         lockedPackage = action.packageName
@@ -150,7 +170,15 @@ object AgentController {
                     failedActionCount = 0
                     lastActionSignature = actionSignature
                     repeatedActionCount = 0
+                    delay(if (action is AgentAction.Wait) action.milliseconds else 900)
+                    val postObservation = service.observe()
+                    val transition = harness.recordSuccess(action, observation, postObservation)
                     history += action.toString()
+                    history += "TRANSITION: $transition"
+                    if (transition == "screen_unchanged" && action !is AgentAction.Wait) {
+                        history += "NO_PROGRESS: successful API call produced no observable UI change"
+                        log("Action produced no observable screen change")
+                    }
                     val completesTask = when (action) {
                         is AgentAction.ClickNode -> action.completeAfter
                         is AgentAction.ClickText -> action.completeAfter
@@ -182,7 +210,7 @@ object AgentController {
                         history += "REJECTED_FINAL_CLICK: requested result is not yet visible"
                         log("Final click was not enough; continuing the task")
                     }
-                    delay(if (action is AgentAction.Wait) action.milliseconds else 1200)
+                    if (action !is AgentAction.Wait) delay(300)
                 }
                 error("Maximum steps reached")
             } catch (_: CancellationException) {
