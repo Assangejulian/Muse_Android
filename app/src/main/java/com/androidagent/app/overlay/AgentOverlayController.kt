@@ -42,6 +42,12 @@ class AgentOverlayController(private val service: AccessibilityService) {
         statusText = null
     }
 
+    fun setCaptureHidden(hidden: Boolean) {
+        val visibility = if (hidden) View.INVISIBLE else View.VISIBLE
+        borderView?.visibility = visibility
+        controlBar?.visibility = visibility
+    }
+
     private fun show() {
         borderView = IntelligenceBorderView(service).also { view ->
             windowManager.addView(view, WindowManager.LayoutParams(
@@ -103,9 +109,13 @@ class AgentOverlayController(private val service: AccessibilityService) {
 
     private fun statusLabel(status: String): String = when (status) {
         "Preparing" -> "正在准备"
+        "Compiling" -> "正在拆解任务"
         "Observing" -> "正在读取屏幕"
         "Planning" -> "正在思考下一步"
         "Acting" -> "正在执行操作"
+        "Critiquing" -> "正在检查结果"
+        "Verifying" -> "正在最终验收"
+        "Replanning" -> "正在更换策略"
         else -> status.substringBefore(':')
     }
 }

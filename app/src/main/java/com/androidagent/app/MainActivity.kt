@@ -54,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.androidagent.app.accessibility.AgentController
+import com.androidagent.app.agent.AgentTraceStore
 import com.androidagent.app.automation.DailyTaskScheduler
 import com.androidagent.app.apps.AppCatalog
 import com.androidagent.app.chat.ChatMessage
@@ -478,7 +479,7 @@ private fun ChatWorkspace(
                 value = input,
                 onValueChange = { input = it },
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("聊天或交代任务；/chat 只聊天，/run 强制执行") },
+                placeholder = { Text("聊天或交代任务；/chat 只聊天，/run 强制执行，/trace 看轨迹") },
                 minLines = 2,
                 maxLines = 5,
             )
@@ -499,8 +500,11 @@ private fun ChatWorkspace(
                         if (text.equals("/list", true)) {
                             val response = "已发现 ${appCatalog.list().size} 个可启动应用：\n\n" + appCatalog.list().joinToString("\n") { "• ${it.label}  (${it.packageName})" }
                             updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
+                        } else if (text.equals("/trace", true)) {
+                            val response = AgentTraceStore(context).latestRunSummary()
+                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
                         } else if (settings.apiKey.isBlank()) {
-                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先在侧栏配置 DeepSeek API Key。")))
+                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先在侧栏配置当前模型的 API Key。")))
                         } else {
                             sending = true
                             interactionScope.launch {
@@ -510,7 +514,8 @@ private fun ChatWorkspace(
                                     val response = when (decision) {
                                         is InteractionDecision.Chat -> decision.reply
                                         is InteractionDecision.Action -> {
-                                            settings.taskGoal = decision.goal
+                                            // Preserve the immutable user wording; the router may summarize but must not mutate locked entities.
+                                            settings.taskGoal = text.removePrefix("/run ").trim()
                                             AgentController.start(context, settings)
                                             decision.reply
                                         }
@@ -551,9 +556,13 @@ private fun MessageBubble(message: ChatMessage) {
 private fun translateStatus(status: String): String = when {
     status == "Idle" -> "空闲"
     status == "Preparing" -> "准备中"
+    status == "Compiling" -> "拆解任务"
     status == "Observing" -> "读取页面"
     status == "Planning" -> "正在规划"
     status == "Acting" -> "正在操作"
+    status == "Critiquing" -> "检查结果"
+    status == "Verifying" -> "最终验收"
+    status == "Replanning" -> "更换策略"
     status == "Stopped" -> "已停止"
     status == "Cancelled" -> "已取消"
     status == "Failed" -> "执行失败"

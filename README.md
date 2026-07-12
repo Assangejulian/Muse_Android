@@ -1,20 +1,20 @@
-# Muse Android Agent 0.5.0
+# Muse Android Agent 0.6.0
 
-A private, sideloaded Android 13 automation agent. It observes the active UI through an accessibility service, asks DeepSeek for one constrained action, validates that action locally, executes it, and observes again.
+A private, sideloaded Android 13 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, executes it, and independently checks the result.
 
 ## MVP capabilities
 
 - Accessibility node observation
-- DeepSeek `deepseek-chat` planning
+- DeepSeek, Qwen, or MiMo planning through OpenAI-compatible APIs
 - One action per model response
 - Target package allowlist
 - Sensitive-page blocking
 - Text and node clicks
 - Four-direction swipes
 - Focused text input
-- Back, Home, app launch, wait, finish, and fail
+- Back, app launch, exact text replacement, submit, wait, scroll, and idempotent toggle tools
 - Encrypted local API key storage
-- Manual stop and 15-step run limit
+- Manual stop and a bounded 36-tool run budget
 - Chinese chat workspace with a configuration drawer
 - Persistent conversations with create, pin, and delete actions
 - Launchable app catalog exposed through `/list`
@@ -39,6 +39,12 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 - Optional screenshot planning with a separate OpenAI-compatible vision model
 - In-app APK download progress and cancellation
 - Stateful execution harness with goal contracts, milestones, screen fingerprints, transition checks, and loop recovery
+- Manager/Actor/Critic/Verifier runtime with deterministic Pre/Post Tool hooks and a Stop Gate
+- Observation-bound stable element matching and exact text readback validation
+- Set-of-Mark screenshots and guarded normalized visual point taps for inaccessible controls
+- Stale-observation rejection before state-dependent actions
+- Visual before/after Critic checks with hard deterministic predicate gates
+- App-private SQLite run traces available through `/trace`
 
 Foreground service and exact-alarm special access are intentionally deferred. Scheduled work uses WorkManager and may run later than the parsed time under Android battery optimization.
 

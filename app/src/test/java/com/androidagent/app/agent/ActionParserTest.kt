@@ -12,7 +12,12 @@ class ActionParserTest {
 
     @Test
     fun parsesFinalClick() {
-        assertEquals(AgentAction.ClickNode(7, true), ActionParser.parse("""{"action":"click_node","nodeId":7,"completeAfter":true}"""))
+        assertEquals(AgentAction.ClickNode(7), ActionParser.parse("""{"action":"click_node","nodeId":7}"""))
+    }
+
+    @Test
+    fun parsesNormalizedVisualPoint() {
+        assertEquals(AgentAction.TapPoint(875, 520), ActionParser.parse("""{"action":"tap_point","x":875,"y":520}"""))
     }
 
     @Test

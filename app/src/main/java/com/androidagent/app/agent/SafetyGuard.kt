@@ -12,13 +12,18 @@ object SafetyGuard {
         allowedPackage: String?,
         launchablePackages: Set<String>,
     ): Result<AgentAction> = runCatching {
+        val recoveryAction = action is AgentAction.Back || action is AgentAction.Wait || action is AgentAction.LaunchApp
         val packageAllowed = observation.packageName.isBlank() ||
             observation.packageName == allowedPackage ||
             observation.packageName == "com.androidagent.app" ||
             observation.packageName.startsWith("com.android.systemui")
-        if (allowedPackage != null) require(packageAllowed) { "Package left allowlist: ${observation.packageName}" }
-        require(blockedTerms.none { term -> observation.compactText().contains(term, ignoreCase = true) }) {
-            "Sensitive page detected"
+        if (allowedPackage != null && !recoveryAction) {
+            require(packageAllowed) { "Package left allowlist: ${observation.packageName}" }
+        }
+        if (!recoveryAction) {
+            require(blockedTerms.none { term -> observation.compactText().contains(term, ignoreCase = true) }) {
+                "Sensitive page detected"
+            }
         }
         when (action) {
             is AgentAction.LaunchApp -> {
@@ -26,11 +31,15 @@ object SafetyGuard {
                 if (allowedPackage != null) require(action.packageName == allowedPackage) { "Package is not allowlisted" }
             }
             is AgentAction.ClickText -> require(blockedTerms.none { action.text.contains(it, true) }) { "Sensitive click rejected" }
+            is AgentAction.TapPoint -> {
+                require(action.x in 30..970 && action.y in 30..970) { "Visual point is outside the safe screen region" }
+            }
             is AgentAction.InputText -> {
                 require(action.text.length <= 300) { "Input is too long" }
                 require(blockedTerms.none { action.text.contains(it, true) }) { "Sensitive input rejected" }
             }
             is AgentAction.Swipe -> require(action.direction in setOf("up", "down", "left", "right")) { "Invalid direction" }
+            is AgentAction.EnsureToggle -> require(action.nodeId > 0) { "Invalid toggle target" }
             else -> Unit
         }
         action

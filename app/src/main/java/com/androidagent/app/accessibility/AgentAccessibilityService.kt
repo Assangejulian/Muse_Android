@@ -6,6 +6,10 @@ import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.os.Bundle
 import android.util.Base64
 import android.util.Log
@@ -15,6 +19,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.androidagent.app.agent.AgentAction
 import com.androidagent.app.agent.Observation
 import com.androidagent.app.agent.UiNodeSnapshot
+import com.androidagent.app.agent.ElementMatchPolicy
 import com.androidagent.app.overlay.AgentOverlayController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,6 +32,8 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicInteger
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
@@ -62,10 +69,10 @@ class AgentAccessibilityService : AccessibilityService() {
     fun observe(): Observation {
         val nodes = mutableListOf<UiNodeSnapshot>()
         val nextId = AtomicInteger(1)
-        windows.sortedByDescending { it.layer }.forEach { window ->
+        windows.sortedByDescending { it.layer }.forEachIndexed { windowIndex, window ->
             window.root?.let { root ->
                 if (ObservationPolicy.shouldIncludePackage(root.packageName?.toString())) {
-                    collectNodes(root, nodes, nextId, 0)
+                    collectNodes(root, nodes, nextId, 0, "w$windowIndex")
                 }
             }
         }
@@ -77,22 +84,39 @@ class AgentAccessibilityService : AccessibilityService() {
         output: MutableList<UiNodeSnapshot>,
         nextId: AtomicInteger,
         depth: Int,
+        path: String,
     ) {
         if (output.size >= MAX_NODES || depth > MAX_DEPTH) return
         val rect = Rect().also(node::getBoundsInScreen)
         val id = nextId.getAndIncrement()
+        val text = if (node.isPassword) "" else node.text?.toString().orEmpty()
+        val description = node.contentDescription?.toString().orEmpty()
+        val viewId = node.viewIdResourceName.orEmpty()
+        val className = node.className?.toString().orEmpty()
+        val bounds = "${rect.left},${rect.top},${rect.right},${rect.bottom}"
+        val stableKey = listOf(node.packageName?.toString().orEmpty(), viewId, text, description, className, path, bounds)
+            .joinToString("|").hashCode().toUInt().toString(16)
         output += UiNodeSnapshot(
             id = id,
-            text = if (node.isPassword) "" else node.text?.toString().orEmpty(),
-            description = node.contentDescription?.toString().orEmpty(),
-            className = node.className?.toString().orEmpty(),
+            text = text,
+            description = description,
+            className = className,
             clickable = node.isClickable,
             editable = node.isEditable,
-            bounds = "${rect.left},${rect.top},${rect.right},${rect.bottom}",
+            bounds = bounds,
+            stableKey = stableKey,
+            viewId = viewId,
+            treePath = path,
+            enabled = node.isEnabled,
+            focused = node.isFocused,
+            checked = if (node.isCheckable) node.isChecked else null,
+            selected = node.isSelected,
+            scrollable = node.isScrollable,
+            packageName = node.packageName?.toString().orEmpty(),
         )
         for (index in 0 until node.childCount) {
             node.getChild(index)?.let { child ->
-                collectNodes(child, output, nextId, depth + 1)
+                collectNodes(child, output, nextId, depth + 1, "$path/$index")
             }
         }
     }
@@ -101,8 +125,11 @@ class AgentAccessibilityService : AccessibilityService() {
         is AgentAction.LaunchApp -> launchApp(action.packageName)
         is AgentAction.ClickText -> clickText(action.text)
         is AgentAction.ClickNode -> clickNode(action.nodeId, observation)
+        is AgentAction.TapPoint -> tapNormalized(action.x, action.y)
         is AgentAction.Swipe -> swipe(action.direction)
-        is AgentAction.InputText -> inputText(action.text)
+        is AgentAction.InputText -> inputText(action.text, action.nodeId, observation)
+        is AgentAction.SubmitInput -> submitInput(action.nodeId, observation)
+        is AgentAction.EnsureToggle -> ensureToggle(action, observation)
         is AgentAction.Back -> performGlobalAction(GLOBAL_ACTION_BACK)
         is AgentAction.Home -> performGlobalAction(GLOBAL_ACTION_HOME)
         is AgentAction.Wait -> true
@@ -117,26 +144,44 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun clickText(text: String): Boolean {
-        val candidates = rootInActiveWindow?.findAccessibilityNodeInfosByText(text).orEmpty()
-        val node = candidates.firstOrNull { it.isVisibleToUser }
+        if (text.isBlank()) return false
+        val visible = rootInActiveWindow?.findAccessibilityNodeInfosByText(text).orEmpty().filter { it.isVisibleToUser && it.isEnabled }
+        val exact = visible.filter {
+            it.text?.toString().equals(text, true) || it.contentDescription?.toString().equals(text, true)
+        }
+        val node = when {
+            exact.size == 1 -> exact.single()
+            exact.isEmpty() && visible.size == 1 -> visible.single()
+            else -> null
+        }
         if (node != null && clickNodeOrParent(node)) return true
+        if (exact.size > 1 || visible.size > 1) return false
         return clickTextWithOcr(text)
     }
 
     private suspend fun clickTextWithOcr(target: String): Boolean {
+        if (target.isBlank()) return false
         val bitmap = captureScreen() ?: return false
         return try {
             val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
             val result = recognizer.process(InputImage.fromBitmap(bitmap, 0)).await()
             recognizer.close()
-            val candidate = result.textBlocks.asSequence()
+            val elements = result.textBlocks.asSequence()
                 .flatMap { it.lines.asSequence() }
                 .flatMap { line -> line.elements.asSequence() }
-                .filter { element -> element.text.equals(target, true) || element.text.contains(target, true) || target.contains(element.text, true) }
+                .toList()
+            val exact = elements.filter { it.text.equals(target, true) }
+            val partial = if (target.length >= 2) {
+                elements.filter { it.text.contains(target, true) || target.contains(it.text, true) }
+            } else {
+                emptyList()
+            }
+            val candidate = (if (exact.isNotEmpty()) exact else partial)
                 .mapNotNull { it.boundingBox }
-                .firstOrNull { bounds ->
+                .filter { bounds ->
                     NodeClickPolicy.isSafeBounds(bounds.left, bounds.top, bounds.right, bounds.bottom, bitmap.width, bitmap.height)
-                } ?: return false
+                }
+                .singleOrNull() ?: return false
             Log.i(TAG, "OCR fallback matched text=$target bounds=$candidate")
             tap(candidate.exactCenterX(), candidate.exactCenterY())
         } catch (error: Throwable) {
@@ -161,26 +206,71 @@ class AgentAccessibilityService : AccessibilityService() {
         }
     }
 
-    suspend fun captureScreenDataUrl(): String? {
+    suspend fun captureScreenDataUrl(observation: Observation? = null): String? {
         val original = captureScreen() ?: return null
         return try {
             val scale = minOf(1f, 1280f / maxOf(original.width, original.height))
-            val bitmap = if (scale < 1f) {
+            val scaled = if (scale < 1f) {
                 Bitmap.createScaledBitmap(original, (original.width * scale).toInt(), (original.height * scale).toInt(), true)
             } else original
+            val bitmap = scaled.copy(Bitmap.Config.ARGB_8888, true)
             try {
+                if (observation != null) drawSetOfMarks(bitmap, observation, scale)
                 val output = ByteArrayOutputStream()
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 72, output)
                 "data:image/jpeg;base64,${Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)}"
             } finally {
-                if (bitmap !== original) bitmap.recycle()
+                bitmap.recycle()
+                if (scaled !== original) scaled.recycle()
             }
         } finally {
             original.recycle()
         }
     }
 
-    private suspend fun captureScreen(): Bitmap? = kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+    private fun drawSetOfMarks(bitmap: Bitmap, observation: Observation, scale: Float) {
+        val canvas = Canvas(bitmap)
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(255, 72, 72)
+            style = Paint.Style.STROKE
+            strokeWidth = 2.5f
+        }
+        val label = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val background = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(210, 35, 35) }
+        observation.nodes.asSequence().filter { it.clickable || it.editable }.take(80).forEach { node ->
+            val values = node.bounds.split(',').mapNotNull(String::toFloatOrNull)
+            if (values.size != 4) return@forEach
+            val left = values[0] * scale
+            val top = values[1] * scale
+            val right = values[2] * scale
+            val bottom = values[3] * scale
+            canvas.drawRect(left, top, right, bottom, stroke)
+            val text = node.id.toString()
+            val width = label.measureText(text) + 8f
+            canvas.drawRect(left, top, left + width, top + 22f, background)
+            canvas.drawText(text, left + 4f, top + 17f, label)
+        }
+    }
+
+    private suspend fun captureScreen(): Bitmap? {
+        if (::overlayController.isInitialized) {
+            withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(true) }
+            delay(50)
+        }
+        return try {
+            captureScreenRaw()
+        } finally {
+            if (::overlayController.isInitialized) {
+                withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(false) }
+            }
+        }
+    }
+
+    private suspend fun captureScreenRaw(): Bitmap? = kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
         takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
             override fun onSuccess(screenshot: ScreenshotResult) {
                 val hardwareBuffer = screenshot.hardwareBuffer
@@ -198,7 +288,8 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private suspend fun clickNode(nodeId: Int, observation: Observation): Boolean {
         if (observation.nodes.none { it.id == nodeId }) return false
-        val liveNode = findLiveNode(nodeId) ?: return false
+        val snapshot = observation.nodes.firstOrNull { it.id == nodeId } ?: return false
+        val liveNode = findLiveNode(snapshot) ?: return false
         if (!liveNode.isVisibleToUser || !liveNode.isEnabled) return false
         if (clickNodeOrParent(liveNode)) return true
 
@@ -214,31 +305,53 @@ class AgentAccessibilityService : AccessibilityService() {
         return tap(bounds.exactCenterX(), bounds.exactCenterY())
     }
 
-    private fun findLiveNode(targetId: Int): AccessibilityNodeInfo? {
-        val counter = AtomicInteger(1)
+    private fun findLiveNode(snapshot: UiNodeSnapshot): AccessibilityNodeInfo? {
+        var bestNode: AccessibilityNodeInfo? = null
+        var bestScore = 0
+        var bestCount = 0
         windows.sortedByDescending { it.layer }.forEach { window ->
             window.root?.let { root ->
-                if (ObservationPolicy.shouldIncludePackage(root.packageName?.toString())) {
-                    findLiveNode(root, targetId, counter, 0)?.let { return it }
+                val rootPackage = root.packageName?.toString().orEmpty()
+                if (ObservationPolicy.shouldIncludePackage(rootPackage) && (snapshot.packageName.isBlank() || snapshot.packageName == rootPackage)) {
+                    findBestLiveNode(root, snapshot, 0) { node, score ->
+                        if (score > bestScore) {
+                            bestNode = node
+                            bestScore = score
+                            bestCount = 1
+                        } else if (score == bestScore) {
+                            bestCount += 1
+                        }
+                    }
                 }
             }
         }
-        return null
+        val minimumScore = ElementMatchPolicy.minimumScore(snapshot)
+        return bestNode?.takeIf { bestScore >= minimumScore && bestCount == 1 }
     }
 
-    private fun findLiveNode(
+    private fun findBestLiveNode(
         node: AccessibilityNodeInfo,
-        targetId: Int,
-        counter: AtomicInteger,
+        snapshot: UiNodeSnapshot,
         depth: Int,
-    ): AccessibilityNodeInfo? {
-        if (depth > MAX_DEPTH || counter.get() > MAX_NODES) return null
-        if (counter.getAndIncrement() == targetId) return node
+        onCandidate: (AccessibilityNodeInfo, Int) -> Unit,
+    ) {
+        if (depth > MAX_DEPTH) return
+        val rect = Rect().also(node::getBoundsInScreen)
+        val score = ElementMatchPolicy.score(
+            snapshot = snapshot,
+            viewId = node.viewIdResourceName.orEmpty(),
+            text = node.text?.toString().orEmpty(),
+            description = node.contentDescription?.toString().orEmpty(),
+            className = node.className?.toString().orEmpty(),
+            bounds = "${rect.left},${rect.top},${rect.right},${rect.bottom}",
+            editable = node.isEditable,
+            clickable = node.isClickable,
+        )
+        if (score > 0) onCandidate(node, score)
         for (index in 0 until node.childCount) {
             val child = node.getChild(index) ?: continue
-            findLiveNode(child, targetId, counter, depth + 1)?.let { return it }
+            findBestLiveNode(child, snapshot, depth + 1, onCandidate)
         }
-        return null
     }
 
     private fun clickNodeOrParent(start: AccessibilityNodeInfo): Boolean {
@@ -251,40 +364,102 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun tap(x: Float, y: Float): Boolean {
-        val path = Path().apply { moveTo(x, y) }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
-            .build()
-        val result = CompletableDeferred<Boolean>()
-        dispatchGesture(gesture, object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) { result.complete(true) }
-            override fun onCancelled(gestureDescription: GestureDescription?) { result.complete(false) }
-        }, null)
-        return result.await()
+        if (::overlayController.isInitialized) {
+            withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(true) }
+            delay(32)
+        }
+        return try {
+            val path = Path().apply { moveTo(x, y) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
+                .build()
+            val result = CompletableDeferred<Boolean>()
+            dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) { result.complete(true) }
+                override fun onCancelled(gestureDescription: GestureDescription?) { result.complete(false) }
+            }, null)
+            result.await()
+        } finally {
+            if (::overlayController.isInitialized) {
+                withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(false) }
+            }
+        }
     }
 
-    private fun inputText(text: String): Boolean {
+    private suspend fun tapNormalized(x: Int, y: Int): Boolean {
+        if (x !in 30..970 || y !in 30..970) return false
+        val width = resources.displayMetrics.widthPixels
+        val height = resources.displayMetrics.heightPixels
+        val physicalX = width * (x / 1000f)
+        val physicalY = height * (y / 1000f)
+        if (!NodeClickPolicy.isSafeBounds(
+                physicalX.toInt() - 1,
+                physicalY.toInt() - 1,
+                physicalX.toInt() + 1,
+                physicalY.toInt() + 1,
+                width,
+                height,
+            )) return false
+        return tap(physicalX, physicalY)
+    }
+
+    private suspend fun inputText(text: String, nodeId: Int?, observation: Observation): Boolean {
         val root = rootInActiveWindow ?: return false
-        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            ?.takeIf { it.isEditable && it.isVisibleToUser && !it.isPassword }
-            ?: findEditableNode(root)
-            ?: return false
+        val focused = if (nodeId != null) {
+            observation.nodes.firstOrNull { it.id == nodeId && it.editable }?.let(::findLiveNode) ?: return false
+        } else {
+            root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                ?.takeIf { it.isEditable && it.isVisibleToUser && !it.isPassword }
+                ?: findUniqueEditableNode(root)
+                ?: return false
+        }
         if (!focused.isFocused) {
             focused.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
             focused.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
         val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) }
-        return focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        if (!focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) return false
+        delay(180)
+        val liveText = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text?.toString()
+            ?: focused.text?.toString()
+        return liveText == text
     }
 
-    private fun findEditableNode(node: AccessibilityNodeInfo, depth: Int = 0): AccessibilityNodeInfo? {
-        if (depth > MAX_DEPTH) return null
-        if (node.isEditable && node.isVisibleToUser && node.isEnabled && !node.isPassword) return node
+    private fun submitInput(nodeId: Int?, observation: Observation): Boolean {
+        val node = if (nodeId != null) {
+            observation.nodes.firstOrNull { it.id == nodeId && it.editable }?.let(::findLiveNode) ?: return false
+        } else {
+            rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+        }
+        if (!node.isEditable || !node.isVisibleToUser) return false
+        if (!node.isFocused) node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        return node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+    }
+
+    private suspend fun ensureToggle(action: AgentAction.EnsureToggle, observation: Observation): Boolean {
+        val snapshot = observation.nodes.firstOrNull { it.id == action.nodeId } ?: return false
+        val description = "${snapshot.text} ${snapshot.description}"
+        val currentlyOn = snapshot.checked == true || snapshot.selected || description.contains("已点赞") || description.contains("取消点赞")
+        val currentlyOff = snapshot.checked == false || description.trim().equals("点赞", true)
+        if (action.desired && currentlyOn) return true
+        if (!action.desired && currentlyOff) return true
+        if (!currentlyOn && !currentlyOff) return false
+        return clickNode(action.nodeId, observation)
+    }
+
+    private fun findUniqueEditableNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val matches = mutableListOf<AccessibilityNodeInfo>()
+        collectEditableNodes(root, matches, 0)
+        return matches.singleOrNull()
+    }
+
+    private fun collectEditableNodes(node: AccessibilityNodeInfo, output: MutableList<AccessibilityNodeInfo>, depth: Int) {
+        if (depth > MAX_DEPTH || output.size > 1) return
+        if (node.isEditable && node.isVisibleToUser && node.isEnabled && !node.isPassword) output += node
         for (index in 0 until node.childCount) {
             val child = node.getChild(index) ?: continue
-            findEditableNode(child, depth + 1)?.let { return it }
+            collectEditableNodes(child, output, depth + 1)
         }
-        return null
     }
 
     private suspend fun swipe(direction: String): Boolean {
