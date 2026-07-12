@@ -64,6 +64,7 @@ class DeepSeekClient {
             messages = messages,
             temperature = 0.2,
             maxTokens = ROUTE_OUTPUT_TOKENS,
+            purpose = "router",
         )
         val decision = JSONObject(JsonResponse.extractObject(content))
         when (decision.getString("mode")) {
@@ -124,6 +125,7 @@ class DeepSeekClient {
             messages = JSONArray().put(message("system", system)).put(message("user", userContent)),
             temperature = 0.1,
             maxTokens = PLAN_OUTPUT_TOKENS,
+            purpose = "planner",
         )
     }
 
@@ -156,6 +158,7 @@ class DeepSeekClient {
                 .put(message("user", content)),
             0.0,
             1_024,
+            "verifier",
         )
         JSONObject(JsonResponse.extractObject(raw)).optBoolean("done", false)
     }
@@ -167,17 +170,22 @@ class DeepSeekClient {
         messages: JSONArray,
         temperature: Double,
         maxTokens: Int,
+        purpose: String,
     ): String {
-        var lastError = "API returned no usable content"
+        var lastError = "$purpose ($model) returned no usable content"
+        val workingMessages = JSONArray(messages.toString())
         repeat(MAX_ATTEMPTS) { attempt ->
             val bodyJson = JSONObject()
                 .put("model", model)
                 .put("temperature", temperature)
                 .put("max_tokens", maxTokens)
                 .put("response_format", JSONObject().put("type", "json_object"))
-                .put("messages", messages)
+                .put("messages", workingMessages)
             if (baseUrl.contains("deepseek.com", ignoreCase = true) || model.startsWith("deepseek", ignoreCase = true)) {
                 bodyJson.put("thinking", JSONObject().put("type", "disabled"))
+            }
+            if (baseUrl.contains("aliyuncs.com", ignoreCase = true) || model.startsWith("qwen", ignoreCase = true)) {
+                bodyJson.put("enable_thinking", false)
             }
             val request = Request.Builder()
                 .url(completionsUrl(baseUrl))
@@ -190,18 +198,25 @@ class DeepSeekClient {
                     val apiMessage = runCatching {
                         JSONObject(responseBody).optJSONObject("error")?.optString("message")
                     }.getOrNull().orEmpty()
-                    error("Model API HTTP ${response.code}${if (apiMessage.isBlank()) "" else ": $apiMessage"}")
+                    error("$purpose ($model) HTTP ${response.code}${if (apiMessage.isBlank()) "" else ": $apiMessage"}")
                 }
                 val choice = runCatching {
                     JSONObject(responseBody).getJSONArray("choices").getJSONObject(0)
                 }.getOrElse { error("Model API returned an invalid response") }
-                val content = choice.optJSONObject("message")?.optString("content").orEmpty().trim()
-                if (content.isNotEmpty()) return content
+                val responseMessage = choice.optJSONObject("message")
+                val content = responseMessage?.optString("content").orEmpty().trim()
+                if (content.isNotEmpty()) {
+                    val validJson = runCatching { JSONObject(JsonResponse.extractObject(content)) }.isSuccess
+                    if (validJson) return content
+                    lastError = "$purpose ($model) returned non-JSON content"
+                    workingMessages.put(message("assistant", content.take(2_000)))
+                    workingMessages.put(message("user", "Your previous response was invalid or contained an empty JSON block. Return one complete JSON object now."))
+                }
                 val finishReason = choice.optString("finish_reason", "unknown")
-                lastError = when (finishReason) {
-                    "content_filter" -> "Model response was filtered"
-                    "length" -> "Model output reached the $maxTokens token limit before JSON was produced"
-                    else -> "Model returned empty content (finish_reason=$finishReason)"
+                if (content.isEmpty()) lastError = when (finishReason) {
+                    "content_filter" -> "$purpose ($model) response was filtered"
+                    "length" -> "$purpose ($model) reached the $maxTokens token limit before JSON was produced"
+                    else -> "$purpose ($model) returned empty content (finish_reason=$finishReason, reasoning=${responseMessage?.optString("reasoning_content").orEmpty().isNotBlank()})"
                 }
             }
             if (attempt + 1 < MAX_ATTEMPTS) delay(700L * (attempt + 1))

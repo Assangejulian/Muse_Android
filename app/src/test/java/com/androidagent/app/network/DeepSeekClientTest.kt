@@ -14,6 +14,11 @@ class DeepSeekClientTest {
     }
 
     @Test
+    fun rejectsEmptyJsonFence() {
+        assertTrue(runCatching { JsonResponse.extractObject("```json\n\n```") }.isFailure)
+    }
+
+    @Test
     fun retainsRecentHistoryWithinOneMillionTokenBudget() {
         val oversized = "a".repeat(ContextWindow.MAX_CONTEXT_TOKENS * 3 + 100)
         val selected = ContextWindow.select(listOf("user" to "old", "assistant" to oversized))
