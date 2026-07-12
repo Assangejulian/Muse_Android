@@ -11,6 +11,11 @@ class ActionParserTest {
     }
 
     @Test
+    fun parsesFinalClick() {
+        assertEquals(AgentAction.ClickNode(7, true), ActionParser.parse("""{"action":"click_node","nodeId":7,"completeAfter":true}"""))
+    }
+
+    @Test
     fun rejectsUnknownAction() {
         assertTrue(runCatching { ActionParser.parse("""{"action":"shell"}""") }.isFailure)
     }

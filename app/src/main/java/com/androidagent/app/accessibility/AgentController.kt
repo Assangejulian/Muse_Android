@@ -56,6 +56,7 @@ object AgentController {
                     ?: apps.singleOrNull { it.label.equals(target, true) }?.packageName
                     ?: apps.singleOrNull { it.label.contains(target, true) || target.contains(it.label, true) }?.packageName
             }
+            var lastActionSignature: String? = null
             try {
                 if (configuredTarget != null && lockedPackage == null) {
                     log("Default app not found; falling back to automatic app selection")
@@ -85,9 +86,26 @@ object AgentController {
                         return@launch
                     }
                     if (action is AgentAction.Fail) error(action.reason)
+                    val actionSignature = actionSignature(action)
+                    if (actionSignature != null && actionSignature == lastActionSignature) {
+                        log("Repeated action blocked after a successful execution")
+                        update { copy(status = "Succeeded: action already completed") }
+                        return@launch
+                    }
                     update { copy(status = "Acting") }
                     require(service.execute(action, observation)) { "Action failed: $action" }
+                    lastActionSignature = actionSignature
                     history += action.toString()
+                    val completesTask = when (action) {
+                        is AgentAction.ClickNode -> action.completeAfter
+                        is AgentAction.ClickText -> action.completeAfter
+                        else -> false
+                    }
+                    if (completesTask) {
+                        log("Final action completed")
+                        update { copy(status = "Succeeded: final action completed") }
+                        return@launch
+                    }
                     delay(if (action is AgentAction.Wait) action.milliseconds else 1200)
                 }
                 error("Maximum steps reached")
@@ -113,6 +131,12 @@ object AgentController {
     private fun log(message: String) {
         Log.i(TAG, message)
         update { copy(logs = (listOf(message) + logs).take(40)) }
+    }
+
+    private fun actionSignature(action: AgentAction): String? = when (action) {
+        is AgentAction.ClickNode -> "node:${action.nodeId}"
+        is AgentAction.ClickText -> "text:${action.text.lowercase()}"
+        else -> null
     }
 
     private inline fun update(block: AgentUiState.() -> AgentUiState) {

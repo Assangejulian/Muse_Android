@@ -32,8 +32,8 @@ class DeepSeekClient {
                 Return exactly one JSON object and no prose.
                 Available actions:
                 {"action":"launch_app","packageName":"an exact package from INSTALLED APPS"}
-                {"action":"click_text","text":"visible text"}
-                {"action":"click_node","nodeId":1}
+                {"action":"click_text","text":"visible text","completeAfter":false}
+                {"action":"click_node","nodeId":1,"completeAfter":false}
                 {"action":"swipe","direction":"up|down|left|right"}
                 {"action":"input_text","text":"text"}
                 {"action":"back"} {"action":"home"}
@@ -43,6 +43,9 @@ class DeepSeekClient {
                 recharge, transfer, authentication, permission granting, account security, or settings changes.
                 ${if (allowedPackage != null) "The target is locked to package $allowedPackage." else "Infer the requested app from INSTALLED APPS, then launch exactly one listed package."}
                 Prefer node/text actions. Take one reversible step at a time.
+                Set completeAfter=true when this click is the final requested atomic action, such as liking,
+                following, collecting, opening the requested destination, or confirming a completed check-in.
+                Never click the same toggle twice. If recent actions show the requested toggle was clicked, finish.
             """.trimIndent()
             val user = "Goal: ${goal.take(1000)}\nINSTALLED APPS:\n$appCatalog\nRecent actions: ${history.takeLast(6)}\nScreen:\n${observation.compactText()}"
             val body = JSONObject()

@@ -12,12 +12,24 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.androidagent.app.agent.AgentAction
 import com.androidagent.app.agent.Observation
 import com.androidagent.app.agent.UiNodeSnapshot
+import com.androidagent.app.overlay.AgentOverlayController
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.CompletableDeferred
 import java.util.concurrent.atomic.AtomicInteger
 
 class AgentAccessibilityService : AccessibilityService() {
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private lateinit var overlayController: AgentOverlayController
+
     override fun onServiceConnected() {
         instance = this
+        overlayController = AgentOverlayController(this)
+        serviceScope.launch { AgentController.state.collectLatest(overlayController::render) }
         AgentController.setAccessibilityConnected(true)
         Log.i(TAG, "Accessibility service connected")
     }
@@ -31,6 +43,8 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        if (::overlayController.isInitialized) overlayController.hide()
+        serviceScope.cancel()
         if (instance === this) instance = null
         AgentController.setAccessibilityConnected(false)
         super.onDestroy()

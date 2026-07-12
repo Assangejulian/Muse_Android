@@ -28,8 +28,8 @@ data class Observation(
 
 sealed interface AgentAction {
     data class LaunchApp(val packageName: String) : AgentAction
-    data class ClickText(val text: String) : AgentAction
-    data class ClickNode(val nodeId: Int) : AgentAction
+    data class ClickText(val text: String, val completeAfter: Boolean = false) : AgentAction
+    data class ClickNode(val nodeId: Int, val completeAfter: Boolean = false) : AgentAction
     data class Swipe(val direction: String) : AgentAction
     data class InputText(val text: String) : AgentAction
     data class Wait(val milliseconds: Long) : AgentAction

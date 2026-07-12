@@ -6,12 +6,12 @@ object ActionParser {
     fun parse(raw: String): AgentAction {
         val clean = raw.substringAfter("```json", raw).substringAfter("```", raw).substringBeforeLast("```").trim()
         val json = JSONObject(clean)
-        val allowed = setOf("action", "packageName", "text", "nodeId", "direction", "milliseconds", "reason")
+        val allowed = setOf("action", "packageName", "text", "nodeId", "direction", "milliseconds", "reason", "completeAfter")
         require(json.keys().asSequence().all { it in allowed }) { "Unknown response field" }
         return when (json.getString("action")) {
             "launch_app" -> AgentAction.LaunchApp(json.getString("packageName"))
-            "click_text" -> AgentAction.ClickText(json.getString("text"))
-            "click_node" -> AgentAction.ClickNode(json.getInt("nodeId"))
+            "click_text" -> AgentAction.ClickText(json.getString("text"), json.optBoolean("completeAfter", false))
+            "click_node" -> AgentAction.ClickNode(json.getInt("nodeId"), json.optBoolean("completeAfter", false))
             "swipe" -> AgentAction.Swipe(json.optString("direction", "up"))
             "input_text" -> AgentAction.InputText(json.getString("text"))
             "back" -> AgentAction.Back
