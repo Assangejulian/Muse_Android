@@ -289,7 +289,7 @@ private fun DrawerContent(
     Column(Modifier.fillMaxHeight().padding(18.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column {
-                Text("ANDROID AGENT", color = Color(0xFF80DDA8), fontWeight = FontWeight.Bold)
+                Text("MUSE", color = Color(0xFF80DDA8), fontWeight = FontWeight.Bold)
                 Text("私人平板助手", color = Color.White)
             }
             TextButton(onClick = onNew) { Text("＋ 新对话", color = Color.White) }
@@ -376,7 +376,7 @@ private fun DrawerContent(
                     value = visionModelName,
                     onValueChange = onVisionModelName,
                     label = { Text("视觉模型名称") },
-                    placeholder = { Text("qwen3-vl-flash") },
+                    placeholder = { Text("qwen3.5-omni-plus") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )

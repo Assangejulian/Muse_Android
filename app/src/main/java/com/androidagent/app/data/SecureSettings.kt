@@ -43,7 +43,9 @@ class SecureSettings(context: Context) {
         set(value) = prefs.edit().putBoolean("vision_enabled", value).apply()
 
     var visionModelName: String
-        get() = prefs.getString("vision_model_name", "qwen3-vl-flash").orEmpty()
+        get() = prefs.getString("vision_model_name", "qwen3.5-omni-plus").orEmpty().let {
+            if (it == "qwen3-vl-flash") "qwen3.5-omni-plus" else it
+        }
         set(value) = prefs.edit().putString("vision_model_name", value.trim()).apply()
 
     var visionBaseUrl: String

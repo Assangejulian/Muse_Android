@@ -1,4 +1,4 @@
-# Android Agent MVP 0.4.8
+# Muse Android Agent 0.4.8
 
 A private, sideloaded Android 13 automation agent. It observes the active UI through an accessibility service, asks DeepSeek for one constrained action, validates that action locally, executes it, and observes again.
 
@@ -52,8 +52,8 @@ Foreground service and exact-alarm special access are intentionally deferred. Sc
 ## First run
 
 1. Install the debug APK.
-2. Open Android Agent.
-3. Tap **Accessibility** and enable **Android Agent Control**.
+2. Open Muse.
+3. Tap **Accessibility** and enable **Muse Control**.
 4. Enter the DeepSeek API key.
 5. Optionally set a default target package. Leave it blank for automatic app selection.
 6. Enter a narrow, low-risk task in the chat input and tap **发送**.
