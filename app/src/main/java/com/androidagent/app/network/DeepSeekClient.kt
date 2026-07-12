@@ -118,15 +118,32 @@ class DeepSeekClient {
         val userContent: Any = if (screenshotDataUrl == null) user else JSONArray()
             .put(JSONObject().put("type", "text").put("text", user))
             .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", screenshotDataUrl)))
-        executeJsonRequest(
-            apiKey = apiKey,
-            baseUrl = baseUrl,
-            model = model,
-            messages = JSONArray().put(message("system", system)).put(message("user", userContent)),
-            temperature = 0.1,
-            maxTokens = PLAN_OUTPUT_TOKENS,
-            purpose = "planner",
-        )
+        val plannerMessages = JSONArray().put(message("system", system)).put(message("user", userContent))
+        runCatching {
+            executeJsonRequest(
+                apiKey = apiKey,
+                baseUrl = baseUrl,
+                model = model,
+                messages = plannerMessages,
+                temperature = 0.1,
+                maxTokens = PLAN_OUTPUT_TOKENS,
+                purpose = "planner-json-mode",
+            )
+        }.getOrElse { primaryError ->
+            val isQwen = baseUrl.contains("aliyuncs.com", true) || model.startsWith("qwen", true)
+            if (!isQwen) throw primaryError
+            plannerMessages.put(message("user", "JSON mode was unavailable. Return one raw JSON object without Markdown fences or commentary."))
+            executeJsonRequest(
+                apiKey = apiKey,
+                baseUrl = baseUrl,
+                model = model,
+                messages = plannerMessages,
+                temperature = 0.1,
+                maxTokens = PLAN_OUTPUT_TOKENS,
+                purpose = "planner-compat-mode",
+                jsonMode = false,
+            )
+        }
     }
 
     suspend fun verifyCompletion(
@@ -171,6 +188,7 @@ class DeepSeekClient {
         temperature: Double,
         maxTokens: Int,
         purpose: String,
+        jsonMode: Boolean = true,
     ): String {
         var lastError = "$purpose ($model) returned no usable content"
         val workingMessages = JSONArray(messages.toString())
@@ -179,8 +197,8 @@ class DeepSeekClient {
                 .put("model", model)
                 .put("temperature", temperature)
                 .put("max_tokens", maxTokens)
-                .put("response_format", JSONObject().put("type", "json_object"))
                 .put("messages", workingMessages)
+            if (jsonMode) bodyJson.put("response_format", JSONObject().put("type", "json_object"))
             if (baseUrl.contains("deepseek.com", ignoreCase = true) || model.startsWith("deepseek", ignoreCase = true)) {
                 bodyJson.put("thinking", JSONObject().put("type", "disabled"))
             }

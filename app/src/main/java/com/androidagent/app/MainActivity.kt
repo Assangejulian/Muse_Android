@@ -295,7 +295,7 @@ private fun DrawerContent(
     Column(Modifier.fillMaxHeight().padding(18.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column {
-                Text("MUSE", color = Color(0xFF80DDA8), fontWeight = FontWeight.Bold)
+                Text("MUSE v${BuildConfig.VERSION_NAME}", color = Color(0xFF80DDA8), fontWeight = FontWeight.Bold)
                 Text("私人平板助手", color = Color.White)
             }
             TextButton(onClick = onNew) { Text("＋ 新对话", color = Color.White) }

@@ -12,8 +12,8 @@ android {
         applicationId = "com.androidagent.app"
         minSdk = 30
         targetSdk = 33
-        versionCode = 15
-        versionName = "0.4.10"
+        versionCode = 16
+        versionName = "0.4.11"
         buildConfigField("String", "GITHUB_REPOSITORY", "\"Assangejulian/Muse_Android\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

@@ -35,16 +35,19 @@ object AgentController {
 
     fun start(context: Context, settings: SecureSettings) {
         if (runJob?.isActive == true) return
+        update { copy(step = 0, status = "Preparing", logs = emptyList()) }
         val apiKey = settings.apiKey
         val configuredTarget = settings.targetPackage.ifBlank { null }
         val goal = settings.taskGoal
         if (apiKey.isBlank() || goal.isBlank()) {
             log("API key and task are required")
+            update { copy(status = "Failed") }
             return
         }
         val service = AgentAccessibilityService.current()
         if (service == null) {
             log("Accessibility service is not connected")
+            update { copy(status = "Failed", accessibilityConnected = false) }
             return
         }
         runJob = scope.launch {
