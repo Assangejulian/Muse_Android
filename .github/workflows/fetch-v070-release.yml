@@ -1,0 +1,34 @@
+name: Fetch v0.7.0 Release APK
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download APK from v0.7.0 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ASSET_JSON="$(gh api "repos/${REPOSITORY}/releases/tags/v0.7.0" --jq '[.assets[] | select(.name | endswith(".apk"))][0]')"
+          ASSET_ID="$(jq -r '.id // empty' <<<"${ASSET_JSON}")"
+          ASSET_NAME="$(jq -r '.name // empty' <<<"${ASSET_JSON}")"
+          test -n "${ASSET_ID}" || { echo "No APK asset found in v0.7.0"; exit 1; }
+          gh api -H "Accept: application/octet-stream" "repos/${REPOSITORY}/releases/assets/${ASSET_ID}" > "${ASSET_NAME}"
+          sha256sum "${ASSET_NAME}"
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Muse-Android-v0.7.0-release
+          path: '*.apk'
+          if-no-files-found: error
+          retention-days: 1
