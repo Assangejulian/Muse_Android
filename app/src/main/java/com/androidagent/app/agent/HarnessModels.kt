@@ -190,11 +190,13 @@ data class TaskPlan(
                 val binding = bindings?.get(milestone.id, predicateIndex)?.let { bound ->
                     val identityType = when {
                         bound.identity.viewIdResourceName != null -> "VIEW_ID"
+                        bound.identity.crossWindowStructureKey != null -> "CROSS_WINDOW_STRUCTURE"
                         bound.identity.treePath != null -> "TREE_PATH"
                         bound.identity.initialBounds != null -> "BOUNDS"
-                        else -> "STABLE_KEY"
+                        else -> "UNSPECIFIED"
                     }
-                    "binding=BOUND boundPackage=${bound.boundPackage} identityType=$identityType lifecycle=${bound.lifecycle}"
+                    "binding=BOUND boundPackage=${bound.boundPackage} identityType=$identityType " +
+                        "lifecycle=${bound.lifecycle} origin=${bound.origin} resultState=${bound.resultState}"
                 } ?: "binding=UNBOUND"
                 val predicateId = predicate.predicateId ?: TaskPlanValidator.predicateIdFor(milestone.id, predicateIndex)
                 appendLine("  predicateId=$predicateId kind=${predicate.kind} description=${predicate.description.take(180)} $literal $valueRef $expectedChecked $targetPackage $targetHint $target $binding")

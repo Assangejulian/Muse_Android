@@ -20,7 +20,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 
 enum class AgentStopCause {
     USER_REQUEST,
@@ -42,9 +41,7 @@ object AgentController {
     private const val TAG = "AndroidAgent"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val mutableState = MutableStateFlow(AgentUiState())
-    private val results = ConcurrentHashMap<String, RuntimeResult>()
-    private val stopCauses = ConcurrentHashMap<String, AgentStopCause>()
-    private val resultOrder = ArrayDeque<String>()
+    private val runResults = RunResultCoordinator()
 
     val state: StateFlow<AgentUiState> = mutableState.asStateFlow()
 
@@ -67,23 +64,19 @@ object AgentController {
     /** Includes a cancelling job until its finally block releases the run slot. */
     fun isRunning(runId: String): Boolean = activeRunId == runId
 
-    fun resultForRun(runId: String): RuntimeResult? = results[runId]
+    fun resultForRun(runId: String): RuntimeResult? = runResults.resultForRun(runId)
 
     /** Atomically consumes a completed run result for one caller (for example WorkManager). */
-    @Synchronized
-    fun consumeResult(runId: String): RuntimeResult? = results.remove(runId).also {
-        resultOrder.remove(runId)
-        stopCauses.remove(runId)
-    }
+    fun consumeResult(runId: String): RuntimeResult? = runResults.consumeResult(runId)
 
-    @Synchronized
-    fun removeResult(runId: String) {
-        results.remove(runId)
-        resultOrder.remove(runId)
-        stopCauses.remove(runId)
-    }
+    fun removeResult(runId: String) = runResults.removeResult(runId)
 
-    fun stopCauseFor(runId: String): AgentStopCause? = stopCauses[runId]
+    fun stopCauseFor(runId: String): AgentStopCause? = runResults.stopCauseFor(runId)
+
+    suspend fun awaitAndConsumeResult(runId: String, timeoutMillis: Long): RuntimeResult? =
+        runResults.awaitAndConsumeResult(runId, timeoutMillis)
+
+    fun registerLateResultTombstone(runId: String) = runResults.registerLateResultTombstone(runId)
 
     fun currentRunId(): String? = activeRunId
 
@@ -124,6 +117,7 @@ object AgentController {
         val generation = ++runGeneration
         val runId = UUID.randomUUID().toString()
         activeRunId = runId
+        runResults.registerRun(runId)
         lastResult = null
         update {
             copy(
@@ -150,7 +144,7 @@ object AgentController {
                     onAction = { action -> updateFor(generation) { copy(currentAction = action) } },
                     goalOverride = goalOverride,
                     runIdOverride = runId,
-                    cancellationOutcomeProvider = { stopCauses[runId]?.runtimeOutcome() },
+                    cancellationOutcomeProvider = { runResults.stopCauseFor(runId)?.runtimeOutcome() },
                 ).run()
                 storeResult(generation, runId, result)
                 if (result.succeeded) {
@@ -161,7 +155,7 @@ object AgentController {
                     updateFor(generation) { copy(status = "Failed", outcome = result.reason) }
                 }
             } catch (_: CancellationException) {
-                val cause = stopCauses[runId] ?: AgentStopCause.APP_SHUTDOWN
+                val cause = runResults.stopCauseFor(runId) ?: AgentStopCause.APP_SHUTDOWN
                 val outcome = cause.runtimeOutcome()
                 val reason = cause.reason()
                 storeResult(generation, runId, RuntimeResult.failure(outcome, reason, runId))
@@ -203,11 +197,13 @@ object AgentController {
         if (requestedRunId != null && requestedRunId != currentId) return false
         val job = runJob
         if (job == null) return false
-        currentId?.let { stopCauses[it] = cause }
-        runGeneration += 1
-        job?.cancel(CancellationException(reason))
-        update { copy(running = job.isActive, status = "Stopping", currentAction = "", outcome = reason) }
-        log(reason)
+        val existingCause = currentId?.let(runResults::stopCauseFor)
+        val effectiveCause = currentId?.let { runResults.recordStopCause(it, cause) } ?: cause
+        val effectiveReason = if (existingCause == null) reason else effectiveCause.reason()
+        if (existingCause == null) runGeneration += 1
+        job.cancel(CancellationException(effectiveReason))
+        update { copy(running = job.isActive, status = "Stopping", currentAction = "", outcome = effectiveReason) }
+        log(effectiveReason)
         return true
     }
 
@@ -229,17 +225,8 @@ object AgentController {
 
     private fun storeResult(generation: Long, runId: String, result: RuntimeResult) {
         val normalized = if (result.runId == runId) result else result.copy(runId = runId)
-        results[runId] = normalized
-        synchronized(this) {
-            resultOrder.remove(runId)
-            resultOrder.addLast(runId)
-            while (resultOrder.size > MAX_RETAINED_RESULTS) {
-                val evicted = resultOrder.removeFirst()
-                results.remove(evicted)
-                stopCauses.remove(evicted)
-            }
-        }
-        if (generation == runGeneration) lastResult = normalized
+        val stored = runResults.storeResult(runId, normalized)
+        if (stored && generation == runGeneration) lastResult = normalized
     }
 
     private fun log(message: String) {
@@ -260,7 +247,6 @@ object AgentController {
         mutableState.update { state -> if (generation == runGeneration) state.block() else state }
     }
 
-    private const val MAX_RETAINED_RESULTS = 20
 }
 
 object AgentStopCausePolicy {

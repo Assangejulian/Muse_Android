@@ -82,8 +82,8 @@ object TraceSanitizer {
     }
 
     fun observationDelta(before: Observation, after: Observation): String {
-        val oldKeys = before.nodes.filter { it.visible }.map { it.stableKey.ifBlank { "${it.className}:${it.bounds}" } }.toSet()
-        val newKeys = after.nodes.filter { it.visible }.map { it.stableKey.ifBlank { "${it.className}:${it.bounds}" } }.toSet()
+        val oldKeys = before.nodes.filter { it.visible }.map { it.withinWindowStableKey.ifBlank { "${it.className}:${it.bounds}" } }.toSet()
+        val newKeys = after.nodes.filter { it.visible }.map { it.withinWindowStableKey.ifBlank { "${it.className}:${it.bounds}" } }.toSet()
         return "observation_delta(addedCount=${(newKeys - oldKeys).size}, removedCount=${(oldKeys - newKeys).size}, packageChanged=${before.packageName != after.packageName}, fingerprint=${after.observationId})"
     }
 
@@ -121,7 +121,7 @@ object TraceSanitizer {
         "SUCCESS", "TRANSIENT_NETWORK_ERROR", "ACCESSIBILITY_DISCONNECTED", "AGENT_BUSY",
         "PERMANENT_PLAN_ERROR", "SAFETY_BLOCKED", "USER_CANCELLED", "TIMEOUT", "INTERNAL_ERROR",
         "SCREEN_UNCHANGED", "REPEATED_ACTION", "ABAB_LOOP", "TARGET_MISSING", "AMBIGUOUS_TARGET",
-        "WRONG_PACKAGE", "INPUT_FAILED", "APP_NOT_RESPONDING", "NETWORK_ERROR", "ALREADY_SATISFIED",
+        "WRONG_PACKAGE", "INPUT_FAILED", "APP_NOT_RESPONDING", "NETWORK_ERROR", "RESULT_UNKNOWN", "ALREADY_SATISFIED",
         "TEXT_SET_FAILED", "TEXT_VERIFICATION_FAILED", "SUBMIT_FAILED",
     )
 }

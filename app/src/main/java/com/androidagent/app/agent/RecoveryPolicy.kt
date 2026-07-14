@@ -10,6 +10,7 @@ enum class RecoveryReason {
     INPUT_FAILED,
     APP_NOT_RESPONDING,
     NETWORK_ERROR,
+    RESULT_UNKNOWN,
 }
 
 enum class RecoveryAction { REOBSERVE, REPLAN, BACK, DISMISS, WAIT, RELAUNCH, ABORT }
@@ -57,18 +58,20 @@ class RecoveryPolicy(
             RecoveryReason.SCREEN_UNCHANGED -> if (count < maxScreenRepeats) RecoveryAction.REOBSERVE else RecoveryAction.REPLAN
             RecoveryReason.REPEATED_ACTION, RecoveryReason.ABAB_LOOP -> RecoveryAction.REPLAN
             RecoveryReason.TARGET_MISSING, RecoveryReason.AMBIGUOUS_TARGET -> if (count == 0) RecoveryAction.REOBSERVE else RecoveryAction.REPLAN
-            RecoveryReason.WRONG_PACKAGE -> when {
-                !context.expectedPackage.isNullOrBlank() -> RecoveryAction.RELAUNCH
-                count == 0 -> RecoveryAction.REOBSERVE
-                else -> RecoveryAction.REPLAN
-            }
+            RecoveryReason.WRONG_PACKAGE -> if (count == 0) RecoveryAction.REOBSERVE else RecoveryAction.REPLAN
             RecoveryReason.INPUT_FAILED -> if (count < maxActionRetries) RecoveryAction.REOBSERVE else RecoveryAction.REPLAN
             RecoveryReason.APP_NOT_RESPONDING -> when {
+                count == 0 -> RecoveryAction.REOBSERVE
+                count == 1 -> RecoveryAction.WAIT
                 !context.expectedPackage.isNullOrBlank() -> RecoveryAction.RELAUNCH
-                count == 0 -> RecoveryAction.WAIT
                 else -> RecoveryAction.ABORT
             }
             RecoveryReason.NETWORK_ERROR -> if (count < maxActionRetries) RecoveryAction.WAIT else RecoveryAction.ABORT
+            RecoveryReason.RESULT_UNKNOWN -> when (count) {
+                0 -> RecoveryAction.REOBSERVE
+                1 -> RecoveryAction.WAIT
+                else -> RecoveryAction.REPLAN
+            }
         }
         return RecoveryDecision(decision, context.reason, "${context.reason.name.lowercase()} recovery", count + 1)
     }

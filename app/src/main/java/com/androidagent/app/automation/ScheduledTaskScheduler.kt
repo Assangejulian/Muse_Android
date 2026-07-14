@@ -17,8 +17,7 @@ import com.androidagent.app.data.SecureSettings
 import com.androidagent.app.agent.RuntimeOutcome
 import com.androidagent.app.agent.RuntimeResult
 import com.androidagent.app.agent.SensitiveOperationPolicy
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
 import java.security.MessageDigest
 import java.time.Duration
 import java.time.LocalDateTime
@@ -204,25 +203,20 @@ class ScheduledAgentWorker(context: Context, parameters: WorkerParameters) : Cor
                 }
             }
             startedRunId = runId
-            delay(1_000)
-            val finished = withTimeoutOrNull(TimeUnit.MINUTES.toMillis(8)) {
-                while (AgentController.isRunning(runId)) delay(500)
-                true
-            } ?: false
-            if (!finished) {
+            var completedResult = AgentController.awaitAndConsumeResult(runId, TimeUnit.MINUTES.toMillis(8))
+            val timedOut = completedResult == null
+            if (timedOut) {
                 AgentController.cancelRun(AgentStopCause.WORKER_TIMEOUT, runId)
-                // Cancellation is cooperative. Wait for the controller to
-                // write the run-scoped result before consuming it.
-                withTimeoutOrNull(TimeUnit.SECONDS.toMillis(5)) {
-                    while (AgentController.isRunning(runId) || AgentController.resultForRun(runId) == null) delay(50)
+                completedResult = AgentController.awaitAndConsumeResult(runId, TimeUnit.SECONDS.toMillis(5))
+                if (completedResult == null) {
+                    AgentController.registerLateResultTombstone(runId)
                 }
             }
-            val completedResult = AgentController.consumeResult(runId)
             val decision = ScheduledWorkerResultMapper.map(
                 runtimeResult = completedResult,
                 accessibilityConnected = AgentController.state.value.accessibilityConnected,
                 agentBusy = AgentController.state.value.running,
-                timedOut = !finished,
+                timedOut = timedOut,
                 runAttemptCount = runAttemptCount,
             )
             when (decision.type) {
@@ -230,12 +224,14 @@ class ScheduledAgentWorker(context: Context, parameters: WorkerParameters) : Cor
                 WorkerDecisionType.RETRY -> Result.retry()
                 WorkerDecisionType.FAILURE -> Result.failure()
             }
-        } finally {
+        } catch (cancelled: CancellationException) {
             startedRunId?.let { runId ->
-                if (AgentController.isRunning(runId)) {
+                if (AgentController.isRunning(runId) && AgentController.stopCauseFor(runId) == null) {
                     AgentController.cancelRun(AgentStopCause.APP_SHUTDOWN, runId)
                 }
             }
+            throw cancelled
+        } finally {
             if (wakeLock.isHeld) wakeLock.release()
         }
     }

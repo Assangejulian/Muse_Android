@@ -4,6 +4,12 @@ data class PredicateEvidence(val proven: Boolean, val details: List<String>)
 
 enum class BindingLifecycle { PREPARED, DISPATCHED, COMMITTED, VERIFIED, INVALIDATED, REBIND_REQUIRED }
 
+enum class BindingOrigin { OBSERVATION_ONLY, ALREADY_SATISFIED, MUTATING_ACTION }
+
+enum class BindingResultState { BOUND_ONLY, DISPATCHED, RESULT_UNKNOWN, RESULT_OBSERVED, VERIFIED }
+
+enum class DispatchResultState { CONFIRMED, RESULT_UNKNOWN, FAILED }
+
 /** Local evidence counters used by the Stop Gate; tool volume is not evidence. */
 data class StopGateEvidenceCounters(
     var successfulMutatingActions: Int = 0,
@@ -24,24 +30,60 @@ data class PredicateBinding(
     val boundPackage: String,
     val runId: String? = null,
     val lifecycle: BindingLifecycle = BindingLifecycle.COMMITTED,
+    val origin: BindingOrigin = BindingOrigin.OBSERVATION_ONLY,
+    val dispatchedActionKey: String? = null,
+    val dispatchedObservationId: String? = null,
+    val dispatchSequence: Long? = null,
+    val resultState: BindingResultState = BindingResultState.BOUND_ONLY,
+    val strongPostconditionsBefore: Map<String, Boolean> = emptyMap(),
 )
 
-data class ProvisionalPredicateBinding(val binding: PredicateBinding)
+data class BindingTransitionProposal(
+    val existingBinding: PredicateBinding?,
+    val requestedLifecycle: BindingLifecycle,
+    val replacementBinding: PredicateBinding?,
+    val reason: String,
+)
+
+data class ProvisionalPredicateBinding(
+    val binding: PredicateBinding,
+    val existingBinding: PredicateBinding? = null,
+    val requestedLifecycle: BindingLifecycle = BindingLifecycle.COMMITTED,
+    val reason: String = "",
+) {
+    fun asProposal(): BindingTransitionProposal = BindingTransitionProposal(
+        existingBinding = existingBinding,
+        requestedLifecycle = requestedLifecycle,
+        replacementBinding = binding,
+        reason = reason,
+    )
+}
 
 data class BindingResult(
     val bound: Boolean,
     val binding: PredicateBinding? = null,
     val provisional: ProvisionalPredicateBinding? = null,
+    val proposal: BindingTransitionProposal? = null,
     val reason: String = "",
 )
 
 data class BindingPreparation(
     val prepared: Boolean,
-    val provisional: List<ProvisionalPredicateBinding> = emptyList(),
+    val transitions: List<BindingTransitionProposal> = emptyList(),
     val reason: String = "",
     val inferredExistingBinding: PredicateBinding? = null,
 ) {
     val bound: Boolean get() = prepared
+    val provisional: List<ProvisionalPredicateBinding> get() = transitions.mapNotNull { proposal ->
+        proposal.replacementBinding?.let { replacement ->
+            ProvisionalPredicateBinding(
+                binding = replacement,
+                existingBinding = proposal.existingBinding,
+                requestedLifecycle = proposal.requestedLifecycle,
+                reason = proposal.reason,
+            )
+        }
+    }
 }
 
 /**
@@ -51,6 +93,7 @@ data class BindingPreparation(
  */
 class PredicateBindingStore {
     private val bindings = linkedMapOf<String, PredicateBinding>()
+    private var dispatchSequence = 0L
 
     fun all(): List<PredicateBinding> = bindings.values.toList()
 
@@ -65,9 +108,11 @@ class PredicateBindingStore {
         runId: String? = null,
     ): BindingResult {
         val result = prepareBinding(milestone, predicateIndex, node, observation, runId)
-        result.provisional?.let { provisional ->
-            if (!commit(provisional)) return BindingResult(false, reason = "predicate binding conflicts with an existing target")
-        }
+        val proposal = result.proposal ?: return result
+        if (!commitObservation(
+                BindingPreparation(true, listOf(proposal)),
+                BindingOrigin.OBSERVATION_ONLY,
+            )) return BindingResult(false, reason = "predicate binding conflicts with an existing target")
         return result
     }
 
@@ -89,8 +134,7 @@ class PredicateBindingStore {
             if (selectorMatches.size != 1) {
                 return BindingResult(false, reason = if (selectorMatches.isEmpty()) "predicate target missing" else "predicate target is ambiguous")
             }
-            val existing = bindings[key(milestone.id, predicateIndex)]
-            if (!sameNode(node, selectorMatches.single()) && existing?.lifecycle != BindingLifecycle.REBIND_REQUIRED) {
+            if (!sameNode(node, selectorMatches.single())) {
                 return BindingResult(false, reason = "target conflicts with predicate selector")
             }
         }
@@ -98,7 +142,7 @@ class PredicateBindingStore {
         val matches = NodeSelector.matchingNodes(observation, identity)
         if (matches.size != 1) return BindingResult(false, reason = if (matches.isEmpty()) "target missing" else "target is ambiguous")
         val predicateId = predicate.predicateId ?: TaskPlanValidator.predicateIdFor(milestone.id, predicateIndex)
-        val binding = PredicateBinding(
+        val replacement = PredicateBinding(
             milestoneId = milestone.id,
             predicateIndex = predicateIndex,
             predicateId = predicateId,
@@ -116,62 +160,53 @@ class PredicateBindingStore {
             if (existing.lifecycle == BindingLifecycle.INVALIDATED) {
                 return BindingResult(false, reason = "predicate binding was invalidated")
             }
-            if (existing.lifecycle == BindingLifecycle.REBIND_REQUIRED && predicate.kind == UiPredicateKind.ELEMENT_DISAPPEARED) {
-                return BindingResult(false, reason = "disappeared predicate cannot be rebound after its window identity changed")
-            }
-            return if (sameBindingIdentity(existing, binding)) {
-                BindingResult(true, binding = existing, reason = "already_bound")
-            } else {
-                if (existing.lifecycle == BindingLifecycle.REBIND_REQUIRED) {
-                    BindingResult(true, binding = binding, provisional = ProvisionalPredicateBinding(binding), reason = "rebind_required")
-                } else {
-                    BindingResult(false, reason = "predicate binding conflicts with an existing target")
+            val resolution = NodeSelector.resolveIdentity(observation, existing.identity)
+            return when (resolution) {
+                is IdentityResolution.Found -> {
+                    if (!sameNode(node, resolution.node)) {
+                        BindingResult(false, reason = "predicate binding conflicts with an existing target")
+                    } else {
+                        proposalResult(existing, existing, BindingLifecycle.COMMITTED, "already_bound")
+                    }
                 }
+                IdentityResolution.WindowRecreated,
+                IdentityResolution.IdentityInvalidated,
+                -> {
+                    if (predicate.kind == UiPredicateKind.ELEMENT_DISAPPEARED) {
+                        BindingResult(false, reason = "disappeared predicate cannot be rebound after its window identity changed")
+                    } else {
+                        proposalResult(existing, replacement, BindingLifecycle.REBIND_REQUIRED, "rebind_required")
+                    }
+                }
+                else -> BindingResult(false, reason = "predicate binding conflicts with an existing target")
             }
         }
-        return BindingResult(true, binding, ProvisionalPredicateBinding(binding))
+        return proposalResult(null, replacement, BindingLifecycle.PREPARED, "prepared")
     }
 
-    fun commit(provisional: ProvisionalPredicateBinding): Boolean {
-        val binding = provisional.binding.copy(lifecycle = BindingLifecycle.COMMITTED)
-        val existing = bindings[key(binding.milestoneId, binding.predicateIndex)]
-        if (existing != null) {
-            if (existing.lifecycle == BindingLifecycle.VERIFIED || existing.lifecycle == BindingLifecycle.INVALIDATED) return false
-            if (existing.lifecycle == BindingLifecycle.REBIND_REQUIRED) {
-                if (existing.predicateId != binding.predicateId) return false
-                bindings[key(binding.milestoneId, binding.predicateIndex)] = binding
-                return true
-            }
-            if (!sameBindingIdentity(existing, binding)) return false
-            return true
-        }
-        bindings[key(binding.milestoneId, binding.predicateIndex)] = binding
-        return true
-    }
+    /** Compatibility commit for observation-only callers. */
+    fun commit(provisional: ProvisionalPredicateBinding): Boolean = commitAll(listOf(provisional))
 
-    fun commitAll(provisional: List<ProvisionalPredicateBinding>): Boolean {
-        if (provisional.any { existingConflict(it) }) return false
-        provisional.forEach(::commit)
-        return true
-    }
+    /** Compatibility commit for observation-only callers. */
+    fun commitAll(provisional: List<ProvisionalPredicateBinding>): Boolean = commitObservation(
+        BindingPreparation(true, provisional.map(ProvisionalPredicateBinding::asProposal)),
+        BindingOrigin.OBSERVATION_ONLY,
+    )
 
-    fun rollback(provisional: ProvisionalPredicateBinding?) {
-        provisional ?: return
-        val binding = provisional.binding
-        val existing = bindings[key(binding.milestoneId, binding.predicateIndex)]
-        if (existing != null && existing.identity == binding.identity && existing.runId == binding.runId) {
-            bindings.remove(key(binding.milestoneId, binding.predicateIndex))
-        }
-    }
+    /** Preparation is read-only, so rollback intentionally has no state to undo. */
+    fun rollback(@Suppress("UNUSED_PARAMETER") provisional: ProvisionalPredicateBinding?) = Unit
 
-    fun rollbackAll(provisional: List<ProvisionalPredicateBinding>) = provisional.forEach(::rollback)
+    /** Preparation is read-only, so rollback intentionally has no state to undo. */
+    fun rollbackAll(@Suppress("UNUSED_PARAMETER") provisional: List<ProvisionalPredicateBinding>) = Unit
 
     /** Compatibility helper for callers that intentionally bind immediately. */
     fun bindAction(milestone: TaskMilestone, action: AgentAction, observation: Observation, runId: String? = null): BindingResult {
         val preparation = prepareActionBinding(milestone, action, observation, runId)
         if (!preparation.prepared) return BindingResult(false, reason = preparation.reason)
-        if (!commitAll(preparation.provisional)) return BindingResult(false, reason = "predicate binding commit failed")
-        val first = preparation.provisional.firstOrNull()?.binding
+        if (!commitObservation(preparation, BindingOrigin.OBSERVATION_ONLY)) {
+            return BindingResult(false, reason = "predicate binding commit failed")
+        }
+        val first = preparation.transitions.firstOrNull()?.replacementBinding
         return BindingResult(true, first ?: preparation.inferredExistingBinding, preparation.provisional.firstOrNull())
     }
 
@@ -222,15 +257,9 @@ class PredicateBindingStore {
             }
             if (selectorMatches != null && !sameNode(target, selectorMatches.single())) {
                 val existing = get(milestone.id, index)
-                val canRebind = existing != null && existing.lifecycle != BindingLifecycle.VERIFIED &&
-                    existing.lifecycle != BindingLifecycle.INVALIDATED &&
-                    NodeSelector.resolveIdentity(observation, existing.identity) in setOf(
-                        IdentityResolution.WindowRecreated,
-                        IdentityResolution.IdentityInvalidated,
-                    ) && predicate.kind != UiPredicateKind.ELEMENT_DISAPPEARED
-                if (requestedPredicateId == effectiveId && !canRebind) {
+                if (requestedPredicateId == effectiveId) {
                     rejection = "action target conflicts with predicate target"
-                } else if (existing != null && !canRebind) {
+                } else if (existing != null) {
                     rejection = "action target conflicts with existing predicate binding"
                 }
                 return@forEachIndexed
@@ -260,7 +289,6 @@ class PredicateBindingStore {
                             rejection = "disappeared predicate cannot be rebound after its window identity changed"
                             return@forEachIndexed
                         }
-                        bindings[key(milestone.id, index)] = existing.copy(lifecycle = BindingLifecycle.REBIND_REQUIRED)
                     }
                     else -> {
                         rejection = "action target conflicts with existing predicate binding"
@@ -268,26 +296,35 @@ class PredicateBindingStore {
                     }
                 }
             }
-            candidates += Candidate(index, get(milestone.id, index))
+            candidates += Candidate(index, existing)
         }
         rejection?.let { return BindingPreparation(false, reason = it) }
         if (candidates.isEmpty()) {
             return if (requestedPredicateId == null) BindingPreparation(true)
             else BindingPreparation(false, reason = "predicateId does not match a compatible current predicate")
         }
-        if (requestedPredicateId == null && candidates.size > 1) {
-            return BindingPreparation(false, reason = "multiple compatible predicates; predicateId is required")
+        val candidate = if (requestedPredicateId != null) {
+            candidates.single()
+        } else {
+            val existingCandidates = candidates.filter { it.existing != null }
+            when {
+                existingCandidates.size == 1 -> existingCandidates.single()
+                existingCandidates.size > 1 -> return BindingPreparation(false, reason = "multiple compatible existing bindings; predicateId is required")
+                candidates.size == 1 -> candidates.single()
+                else -> return BindingPreparation(false, reason = "multiple compatible predicates; predicateId is required")
+            }
         }
-        val candidate = candidates.single()
         val existing = get(milestone.id, candidate.index) ?: candidate.existing
-        if (existing != null && existing.lifecycle != BindingLifecycle.REBIND_REQUIRED) {
-            return BindingPreparation(true, inferredExistingBinding = existing, reason = "inferred_existing_binding")
-        }
         val result = prepareBinding(milestone, candidate.index, target, observation, runId)
-        if (!result.bound || result.provisional == null) {
+        if (!result.bound || result.proposal == null) {
             return BindingPreparation(false, reason = result.reason)
         }
-        return BindingPreparation(true, listOf(result.provisional), reason = if (existing != null) "rebind_required" else "")
+        return BindingPreparation(
+            prepared = true,
+            transitions = listOf(result.proposal),
+            reason = result.reason,
+            inferredExistingBinding = existing,
+        )
     }
 
     private fun prepareExplicitBinding(
@@ -325,7 +362,6 @@ class PredicateBindingStore {
                     if (predicate.kind == UiPredicateKind.ELEMENT_DISAPPEARED) {
                         return BindingPreparation(false, reason = "disappeared predicate cannot be rebound after its window identity changed")
                     }
-                    bindings[key(milestone.id, index)] = existing.copy(lifecycle = BindingLifecycle.REBIND_REQUIRED)
                 }
                 else -> return BindingPreparation(false, reason = "predicate binding conflicts with an existing target")
             }
@@ -336,15 +372,73 @@ class PredicateBindingStore {
         predicate.target?.let { selector ->
             val matches = NodeSelector.matchingNodes(observation, selector)
             if (matches.size != 1) return BindingPreparation(false, reason = if (matches.isEmpty()) "predicate target missing" else "predicate target is ambiguous")
-            val existing = get(milestone.id, index)
-            if (!sameNode(target, matches.single()) && existing?.lifecycle != BindingLifecycle.REBIND_REQUIRED) {
+            if (!sameNode(target, matches.single())) {
                 return BindingPreparation(false, reason = "bind_predicate target conflicts with predicate selector")
             }
         }
         val result = prepareBinding(milestone, index, target, observation, runId)
-        return if (result.bound && result.provisional != null) BindingPreparation(true, listOf(result.provisional), reason = "rebind_required")
+        return if (result.bound && result.proposal != null) BindingPreparation(
+            true,
+            listOf(result.proposal),
+            reason = result.reason,
+            inferredExistingBinding = result.proposal.existingBinding,
+        )
         else BindingPreparation(false, reason = result.reason)
     }
+
+    /** Atomically applies an observation-only or already-satisfied transition. */
+    @Synchronized
+    fun commitObservation(preparation: BindingPreparation, origin: BindingOrigin): Boolean {
+        if (!preparation.prepared || !canCommit(preparation.transitions)) return false
+        val updates = preparation.transitions.mapNotNull { proposal ->
+            val base = proposal.replacementBinding ?: proposal.existingBinding ?: return@mapNotNull null
+            key(base.milestoneId, base.predicateIndex) to base.copy(
+                lifecycle = BindingLifecycle.COMMITTED,
+                origin = origin,
+                resultState = BindingResultState.BOUND_ONLY,
+                dispatchedActionKey = null,
+                dispatchedObservationId = null,
+                dispatchSequence = null,
+                strongPostconditionsBefore = emptyMap(),
+            )
+        }
+        updates.forEach { (bindingKey, binding) -> bindings[bindingKey] = binding }
+        return true
+    }
+
+    /** Atomically commits a successful side effect and updates inferred existing bindings too. */
+    @Synchronized
+    fun commitMutation(
+        preparation: BindingPreparation,
+        actionKey: String,
+        observationId: String,
+        strongPostconditionsBefore: Map<String, Boolean>,
+    ): Boolean {
+        if (!preparation.prepared || !canCommit(preparation.transitions)) return false
+        val sequence = ++dispatchSequence
+        val updates = preparation.transitions.mapNotNull { proposal ->
+            val base = proposal.replacementBinding ?: proposal.existingBinding ?: return@mapNotNull null
+            key(base.milestoneId, base.predicateIndex) to base.copy(
+                lifecycle = BindingLifecycle.COMMITTED,
+                origin = BindingOrigin.MUTATING_ACTION,
+                dispatchedActionKey = actionKey,
+                dispatchedObservationId = observationId,
+                dispatchSequence = sequence,
+                resultState = BindingResultState.DISPATCHED,
+                strongPostconditionsBefore = strongPostconditionsBefore,
+            )
+        }
+        updates.forEach { (bindingKey, binding) -> bindings[bindingKey] = binding }
+        return true
+    }
+
+    @Synchronized
+    fun markResultUnknown(preparation: BindingPreparation, actionKey: String) =
+        updateDispatchState(preparation, actionKey, BindingResultState.RESULT_UNKNOWN)
+
+    @Synchronized
+    fun markResultObserved(preparation: BindingPreparation, actionKey: String) =
+        updateDispatchState(preparation, actionKey, BindingResultState.RESULT_OBSERVED)
 
     fun retainCompleted(previous: TaskPlan, revised: TaskPlan, completedIds: Set<String>) {
         val retained = linkedMapOf<String, PredicateBinding>()
@@ -371,12 +465,19 @@ class PredicateBindingStore {
         bindings.entries.removeIf { it.value.runId == runId }
     }
 
-    /** Marks a successfully dispatched action before the commit transition. */
+    /** Compatibility two-phase transition used by older local tests. */
     fun markDispatched(provisional: List<ProvisionalPredicateBinding>): Boolean {
-        if (provisional.any { existingConflict(it) }) return false
-        provisional.forEach { candidate ->
-            val binding = candidate.binding.copy(lifecycle = BindingLifecycle.DISPATCHED)
-            bindings[key(binding.milestoneId, binding.predicateIndex)] = binding
+        val proposals = provisional.map(ProvisionalPredicateBinding::asProposal)
+        if (!canCommit(proposals)) return false
+        val sequence = ++dispatchSequence
+        proposals.forEach { proposal ->
+            val base = proposal.replacementBinding ?: proposal.existingBinding ?: return@forEach
+            bindings[key(base.milestoneId, base.predicateIndex)] = base.copy(
+                lifecycle = BindingLifecycle.DISPATCHED,
+                origin = BindingOrigin.MUTATING_ACTION,
+                resultState = BindingResultState.DISPATCHED,
+                dispatchSequence = sequence,
+            )
         }
         return true
     }
@@ -394,7 +495,12 @@ class PredicateBindingStore {
     fun markVerified(milestoneId: String) {
         bindings.entries
             .filter { it.value.milestoneId == milestoneId && it.value.lifecycle == BindingLifecycle.COMMITTED }
-            .forEach { (bindingKey, binding) -> bindings[bindingKey] = binding.copy(lifecycle = BindingLifecycle.VERIFIED) }
+            .forEach { (bindingKey, binding) ->
+                bindings[bindingKey] = binding.copy(
+                    lifecycle = BindingLifecycle.VERIFIED,
+                    resultState = BindingResultState.VERIFIED,
+                )
+            }
     }
 
     fun invalidateRun(runId: String) {
@@ -452,8 +558,8 @@ class PredicateBindingStore {
         if (first.packageName.isNotBlank() && second.packageName.isNotBlank() && first.packageName != second.packageName) return false
         if (first.windowId != null && second.windowId != null && first.windowId != second.windowId) return false
         if (first.id == second.id) return true
-        if (first.stableKey.isNotBlank() && second.stableKey.isNotBlank()) {
-            return first.stableKey == second.stableKey && first.className == second.className
+        if (first.withinWindowStableKey.isNotBlank() && second.withinWindowStableKey.isNotBlank()) {
+            return first.withinWindowStableKey == second.withinWindowStableKey && first.className == second.className
         }
         if (first.treePath != null && second.treePath != null) {
             return first.treePath == second.treePath && first.className == second.className
@@ -470,22 +576,39 @@ class PredicateBindingStore {
         return false
     }
 
-    private fun existingConflict(provisional: ProvisionalPredicateBinding): Boolean {
-        val binding = provisional.binding
-        val existing = bindings[key(binding.milestoneId, binding.predicateIndex)]
-        return existing != null && (
-            existing.lifecycle == BindingLifecycle.VERIFIED ||
-                existing.lifecycle == BindingLifecycle.INVALIDATED ||
-                (existing.lifecycle != BindingLifecycle.REBIND_REQUIRED && !sameBindingIdentity(existing, binding))
-        )
+    private fun proposalResult(
+        existing: PredicateBinding?,
+        replacement: PredicateBinding,
+        requestedLifecycle: BindingLifecycle,
+        reason: String,
+    ): BindingResult {
+        val proposal = BindingTransitionProposal(existing, requestedLifecycle, replacement, reason)
+        val provisional = ProvisionalPredicateBinding(replacement, existing, requestedLifecycle, reason)
+        return BindingResult(true, replacement, provisional, proposal, reason)
     }
 
-    private fun sameBindingIdentity(first: PredicateBinding, second: PredicateBinding): Boolean =
-        first.milestoneId == second.milestoneId &&
-            first.predicateIndex == second.predicateIndex &&
-            first.predicateId == second.predicateId &&
-            first.identity == second.identity &&
-            first.runId == second.runId
+    private fun canCommit(proposals: List<BindingTransitionProposal>): Boolean = proposals.all { proposal ->
+        val binding = proposal.replacementBinding ?: proposal.existingBinding ?: return@all false
+        val current = bindings[key(binding.milestoneId, binding.predicateIndex)]
+        current == proposal.existingBinding &&
+            current?.lifecycle !in setOf(BindingLifecycle.VERIFIED, BindingLifecycle.INVALIDATED) &&
+            (proposal.existingBinding == null || proposal.existingBinding.predicateId == binding.predicateId)
+    }
+
+    private fun updateDispatchState(
+        preparation: BindingPreparation,
+        actionKey: String,
+        state: BindingResultState,
+    ): Boolean {
+        val keys = preparation.transitions.mapNotNull { proposal ->
+            (proposal.replacementBinding ?: proposal.existingBinding)?.let { key(it.milestoneId, it.predicateIndex) }
+        }
+        if (keys.any { bindingKey -> bindings[bindingKey]?.dispatchedActionKey != actionKey }) return false
+        keys.forEach { bindingKey ->
+            bindings[bindingKey]?.let { binding -> bindings[bindingKey] = binding.copy(resultState = state) }
+        }
+        return true
+    }
 
     private fun key(milestoneId: String, predicateIndex: Int): String = "$milestoneId#$predicateIndex"
 }
@@ -504,12 +627,12 @@ object MilestoneEvaluator {
         val details = mutableListOf<String>()
         val indices = predicateIndices ?: milestone.successPredicates.indices.toSet()
         val positiveIndices = indices.filter { index ->
-            milestone.successPredicates.getOrNull(index)?.kind in POSITIVE_POSTCONDITION_KINDS
+            milestone.successPredicates.getOrNull(index)?.kind in STRONG_POSTCONDITION_KINDS
         }.toSet()
         val positiveEvidence = if (!computePositiveEvidence || positiveIndices.isEmpty()) {
-            false
+            emptyMap()
         } else {
-            positiveIndices.any { positiveIndex ->
+            positiveIndices.associateWith { positiveIndex ->
                 evaluate(
                     milestone = milestone,
                     plan = plan,
@@ -589,7 +712,9 @@ object MilestoneEvaluator {
                     IdentityResolution.BoundWindowGone -> boundWindowGoneCanProve(
                         binding = bound,
                         observation = observation,
-                        positiveEvidence = positiveEvidence,
+                        strongPostconditionsAfter = positiveEvidence.mapKeys { (index, _) ->
+                            predicateId(milestone, index)
+                        },
                     )
                     else -> false
                 }
@@ -608,8 +733,8 @@ object MilestoneEvaluator {
                 UiPredicateKind.ELEMENT_STATE -> false
                 UiPredicateKind.SEMANTIC_CLAIM -> false
             }
-            val detail = if (!proven && predicate.kind == UiPredicateKind.ELEMENT_DISAPPEARED && identityResolution == IdentityResolution.BoundWindowGone && !positiveEvidence) {
-                "bound window disappeared but a positive postcondition is required"
+            val detail = if (!proven && predicate.kind == UiPredicateKind.ELEMENT_DISAPPEARED && identityResolution == IdentityResolution.BoundWindowGone) {
+                "bound window disappeared but no new strong postcondition was observed"
             } else {
                 predicate.description
             }
@@ -622,35 +747,77 @@ object MilestoneEvaluator {
     private fun boundWindowGoneCanProve(
         binding: PredicateBinding,
         observation: Observation,
-        positiveEvidence: Boolean,
+        strongPostconditionsAfter: Map<String, Boolean>,
     ): Boolean {
-        if (binding.lifecycle != BindingLifecycle.COMMITTED && binding.lifecycle != BindingLifecycle.VERIFIED) return false
+        if (binding.origin != BindingOrigin.MUTATING_ACTION) return false
+        if (binding.lifecycle !in setOf(BindingLifecycle.COMMITTED, BindingLifecycle.VERIFIED)) return false
+        if (binding.resultState !in setOf(
+                BindingResultState.DISPATCHED,
+                BindingResultState.RESULT_UNKNOWN,
+                BindingResultState.RESULT_OBSERVED,
+                BindingResultState.VERIFIED,
+            )) return false
         if (binding.boundPackage.isBlank() || observation.packageName != binding.boundPackage) return false
-        if (!positiveEvidence) return false
+        if (binding.dispatchedObservationId.isNullOrBlank() || binding.dispatchedObservationId == observation.observationId) return false
         val identity = binding.identity
+        val originalWindowId = identity.windowId ?: return false
+        val originalWindowStillExists = observation.windowPackages[originalWindowId]?.let { it == binding.boundPackage }
+            ?: (originalWindowId in observation.windowIds)
+        if (originalWindowStillExists) return false
         val samePackageNodes = observation.nodes.filter { node ->
             identity.packageName.isBlank() || node.packageName == identity.packageName
         }
-        // A replacement node with the same hard identity means this is a
-        // recreated/moved target, not a proven disappearance.
-        return samePackageNodes.none { node ->
-            (identity.viewIdResourceName != null && node.viewId == identity.viewIdResourceName) ||
-                (identity.stableKey != null && node.stableKey == identity.stableKey && node.className == identity.className) ||
-                (identity.treePath != null && node.treePath == identity.treePath && node.className == identity.className)
+        val originalStructureKey = identity.crossWindowStructureKey ?: return false
+        if (samePackageNodes.any { node -> crossWindowKey(node) == originalStructureKey }) return false
+        return strongPostconditionsAfter.any { (predicateId, provenAfter) ->
+            provenAfter && binding.strongPostconditionsBefore[predicateId] == false
         }
     }
 
-    private val POSITIVE_POSTCONDITION_KINDS = setOf(
-        UiPredicateKind.PACKAGE_FOREGROUND,
+    fun strongPostconditionBaseline(
+        milestone: TaskMilestone,
+        plan: TaskPlan,
+        observation: Observation,
+        targetPackage: String?,
+        bindings: PredicateBindingStore?,
+        runId: String? = null,
+    ): Map<String, Boolean> = milestone.successPredicates.mapIndexedNotNull { index, predicate ->
+        if (predicate.kind !in STRONG_POSTCONDITION_KINDS) return@mapIndexedNotNull null
+        val proven = evaluate(
+            milestone = milestone,
+            plan = plan,
+            observation = observation,
+            targetPackage = targetPackage,
+            bindings = bindings,
+            predicateIndices = setOf(index),
+            runId = runId,
+            computePositiveEvidence = false,
+        ).proven
+        predicateId(milestone, index) to proven
+    }.toMap()
+
+    private fun predicateId(milestone: TaskMilestone, index: Int): String =
+        milestone.successPredicates[index].predicateId ?: TaskPlanValidator.predicateIdFor(milestone.id, index)
+
+    private fun crossWindowKey(node: UiNodeSnapshot): String = node.crossWindowStructureKey.ifBlank {
+        NodeIdentityKeys.crossWindowStructureKey(
+            node.packageName,
+            node.viewId,
+            node.className,
+            node.treePath.orEmpty(),
+        )
+    }
+
+    private val STRONG_POSTCONDITION_KINDS = setOf(
         UiPredicateKind.TEXT_PRESENT,
         UiPredicateKind.EDITABLE_EQUALS,
-        UiPredicateKind.IME_HIDDEN,
         UiPredicateKind.ELEMENT_PRESENT,
         UiPredicateKind.ELEMENT_ENABLED,
         UiPredicateKind.ELEMENT_SELECTED,
         UiPredicateKind.ELEMENT_CHECKED,
         UiPredicateKind.ELEMENT_TEXT_EQUALS,
         UiPredicateKind.TOGGLE_STATE,
+        UiPredicateKind.TOGGLE_ON,
     )
 
     fun evaluateHardPredicates(
@@ -896,6 +1063,7 @@ class RunLedger(private var plan: TaskPlan) {
         private set
     private val fingerprints = ArrayDeque<String>()
     private val attempts = mutableMapOf<String, Int>()
+    private val unknownDispatches = mutableSetOf<String>()
     private val traces = mutableListOf<StepTrace>()
     private val evidence = linkedMapOf<String, String>()
     var noProgressCount: Int = 0
@@ -923,18 +1091,43 @@ class RunLedger(private var plan: TaskPlan) {
     /** Read-only duplicate check. Attempts are charged only by recordDispatch after execution. */
     fun blockRepeated(action: AgentAction, observation: Observation): String? {
         val milestone = currentMilestone ?: return null
-        val key = actionKey(milestone, action, observation)
+        val unknownKey = unknownActionKey(milestone, action, observation)
+        if (unknownKey in unknownDispatches) {
+            return "previous dispatch result is unknown for the same milestone, action, and target"
+        }
+        val key = screenActionKey(milestone, action, observation)
         return if (attempts.getOrDefault(key, 0) >= MAX_ATTEMPTS_PER_SCREEN) {
             "strategy exhausted for the same milestone and screen"
         } else null
     }
 
-    fun recordDispatch(action: AgentAction, observation: Observation) {
+    fun repeatedRecoveryReason(action: AgentAction, observation: Observation): RecoveryReason? {
+        val milestone = currentMilestone ?: return null
+        return if (unknownActionKey(milestone, action, observation) in unknownDispatches) {
+            RecoveryReason.RESULT_UNKNOWN
+        } else if (blockRepeated(action, observation) != null) {
+            RecoveryReason.REPEATED_ACTION
+        } else {
+            null
+        }
+    }
+
+    fun recordDispatch(
+        action: AgentAction,
+        observation: Observation,
+        resultState: DispatchResultState = DispatchResultState.CONFIRMED,
+    ) {
         if (action is AgentAction.Wait || action is AgentAction.BindPredicate) return
         val milestone = currentMilestone ?: return
-        val key = actionKey(milestone, action, observation)
+        if (resultState == DispatchResultState.FAILED) return
+        val key = screenActionKey(milestone, action, observation)
         attempts[key] = attempts.getOrDefault(key, 0) + 1
+        if (resultState == DispatchResultState.RESULT_UNKNOWN) {
+            unknownDispatches += unknownActionKey(milestone, action, observation)
+        }
     }
+
+    fun actionKey(action: AgentAction, observation: Observation): String = stableActionKey(action, observation)
 
     fun record(trace: StepTrace) {
         traces += trace
@@ -965,8 +1158,54 @@ class RunLedger(private var plan: TaskPlan) {
 
     fun evidenceSummary(): String = if (evidence.isEmpty()) "No milestone evidence recorded" else evidence.entries.joinToString("\n") { (id, proof) -> "$id: $proof" }
 
-    private fun actionKey(milestone: TaskMilestone, action: AgentAction, observation: Observation): String =
-        "${milestone.id}|${observation.stateFingerprint()}|${action::class.simpleName}:${action.toString()}"
+    private fun screenActionKey(milestone: TaskMilestone, action: AgentAction, observation: Observation): String =
+        "${milestone.id}|${observation.stateFingerprint()}|${stableActionKey(action, observation)}"
+
+    private fun unknownActionKey(milestone: TaskMilestone, action: AgentAction, observation: Observation): String =
+        "${milestone.id}|${stableActionKey(action, observation)}"
+
+    private fun stableActionKey(action: AgentAction, observation: Observation): String {
+        val target = when (action) {
+            is AgentAction.ClickNode -> NodeSelector.resolve(observation, action.nodeId, action.selector)
+            is AgentAction.InputText -> NodeSelector.resolve(observation, action.nodeId, action.target)
+            is AgentAction.SubmitInput -> NodeSelector.resolve(observation, action.nodeId, action.target)
+            is AgentAction.EnsureToggle -> NodeSelector.resolve(observation, action.nodeId, action.selector)
+            is AgentAction.BindPredicate -> NodeSelector.resolve(observation, action.nodeId, action.selector)
+            is AgentAction.ClickText -> observation.nodes.singleOrNull { node ->
+                node.visible && node.enabled && !node.editable &&
+                    (node.text.equals(action.text, true) || node.description.equals(action.text, true))
+            }
+            else -> null
+        }
+        val targetKey = target?.let { node ->
+            node.crossWindowStructureKey.ifBlank {
+                NodeIdentityKeys.crossWindowStructureKey(
+                    node.packageName,
+                    node.viewId,
+                    node.className,
+                    node.treePath.orEmpty(),
+                )
+            }
+        } ?: when (action) {
+            is AgentAction.TapPoint -> "${action.x},${action.y}"
+            else -> "no-target"
+        }
+        val payload = when (action) {
+            is AgentAction.InputText -> "${action.text.length}:${action.text.hashCode()}:${action.mode}:${action.submit}:${action.predicateId.orEmpty()}"
+            is AgentAction.ClickText -> "${action.text.lowercase().hashCode()}:${action.predicateId.orEmpty()}"
+            is AgentAction.ClickNode -> action.predicateId.orEmpty()
+            is AgentAction.SubmitInput -> action.predicateId.orEmpty()
+            is AgentAction.EnsureToggle -> "${action.desired}:${action.predicateId.orEmpty()}"
+            is AgentAction.BindPredicate -> action.predicateId
+            is AgentAction.LaunchApp -> action.packageName
+            is AgentAction.Swipe -> action.direction
+            is AgentAction.Wait -> action.milliseconds.toString()
+            is AgentAction.Finish -> action.reason.hashCode().toString()
+            is AgentAction.Fail -> action.reason.hashCode().toString()
+            is AgentAction.TapPoint, AgentAction.Back, AgentAction.Home -> ""
+        }
+        return "${TraceSanitizer.actionType(action)}|$targetKey|$payload"
+    }
 
     private companion object { const val MAX_ATTEMPTS_PER_SCREEN = 2 }
 }

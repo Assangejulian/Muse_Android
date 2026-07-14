@@ -93,8 +93,16 @@ class ElementSelectorTest {
 
     @Test
     fun treePathAndBoundsFallbackSurviveSmallMovementWithoutViewId() {
-        val before = node(1, "", "0,0,100,30").copy(treePath = listOf(2), stableKey = "row-2")
-        val after = node(7, "changed", "3,3,103,33").copy(treePath = listOf(2), stableKey = "row-2")
+        val before = node(1, "", "0,0,100,30").copy(
+            treePath = listOf(2),
+            withinWindowStableKey = "row-2",
+            crossWindowStructureKey = "row-2-cross",
+        )
+        val after = node(7, "changed", "3,3,103,33").copy(
+            treePath = listOf(2),
+            withinWindowStableKey = "row-2",
+            crossWindowStructureKey = "row-2-cross",
+        )
         val identity = BoundElementIdentity.from(before)
         assertEquals(7, NodeSelector.matchingNodes(Observation("example.app", listOf(after)), identity).single().id)
     }

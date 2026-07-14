@@ -1,5 +1,6 @@
 package com.androidagent.app.agent
 
+import com.androidagent.app.accessibility.AgentAccessibilityService
 import kotlinx.coroutines.runBlocking
 import java.util.ArrayDeque
 import org.junit.Assert.assertEquals
@@ -101,6 +102,38 @@ class RuntimeHarnessTest {
     }
 
     @Test
+    fun resultUnknownReobservesAndCanCompleteWithoutRedispatch() = runBlocking {
+        val service = FakeAccessibilityService(Observation("example.app", listOf(node(1, "Dismiss"))))
+        val result = harness(
+            service,
+            FakePlanner { AgentAction.ClickNode(1) },
+            FakeClock(DispatchResultState.RESULT_UNKNOWN),
+        ).run(disappearedPlan())
+
+        assertTrue(result.completed)
+        assertEquals(1, service.executeCount)
+        assertEquals(RecoveryAction.REOBSERVE, service.recoveryActions.first())
+        assertTrue(RecoveryAction.RELAUNCH !in service.recoveryActions)
+    }
+
+    @Test
+    fun unresolvedUnknownResultReobservesWaitsThenReplansWithoutRelaunch() = runBlocking {
+        val service = NoChangeAccessibilityService(Observation("example.app", listOf(node(1, "Dismiss"))))
+        val result = RuntimeContractHarness(
+            service = service,
+            planner = FakePlanner { AgentAction.ClickNode(1) },
+            clock = FakeClock(DispatchResultState.RESULT_UNKNOWN),
+            launchablePackages = setOf("example.app"),
+            packagePolicy = PackagePolicy(allowedPackages = mutableSetOf("example.app"), primaryPackage = "example.app"),
+        ).run(disappearedPlan())
+
+        assertTrue(!result.completed)
+        assertEquals(1, service.executeCount)
+        assertEquals(listOf(RecoveryAction.REOBSERVE, RecoveryAction.WAIT, RecoveryAction.REPLAN), service.recoveryActions)
+        assertTrue(RecoveryAction.RELAUNCH !in service.recoveryActions)
+    }
+
+    @Test
     fun bindPredicateCanCompleteObservationOnlyMilestone() = runBlocking {
         val service = FakeAccessibilityService(Observation("example.app", listOf(node(1, "Target"))))
         val milestone = TaskMilestone(
@@ -118,11 +151,30 @@ class RuntimeHarnessTest {
 
     @Test
     fun productionStyleNonEmptyWindowDismissalCompletes() = runBlocking {
+        val targetPath = listOf(0, 1)
         val target = UiNodeSnapshot(
             1, "Dismiss", "", "Button", true, false, "0,0,100,40",
-            viewId = "example:id/dismiss", packageName = "example.app", windowId = 7,
+            withinWindowStableKey = AgentAccessibilityService.stableNodeKey(
+                "example.app", 7, "example:id/dismiss", "Button", targetPath,
+            ),
+            crossWindowStructureKey = AgentAccessibilityService.crossWindowStructureKey(
+                "example.app", "example:id/dismiss", "Button", targetPath,
+            ),
+            viewId = "example:id/dismiss",
+            treePath = targetPath,
+            packageName = "example.app",
+            windowId = 7,
         )
-        val initial = Observation("example.app", listOf(target), windowIds = setOf(7))
+        val underlying = UiNodeSnapshot(
+            2, "Loading", "", "TextView", false, false, "0,50,100,80",
+            packageName = "example.app", windowId = 3, treePath = listOf(1, 0),
+        )
+        val initial = Observation(
+            "example.app",
+            listOf(target, underlying),
+            windowIds = setOf(3, 7),
+            windowPackages = mapOf(3 to "example.app", 7 to "example.app"),
+        )
         val service = WindowDismissService(initial)
         val result = RuntimeContractHarness(
             service = service,
@@ -130,7 +182,7 @@ class RuntimeHarnessTest {
             clock = FakeClock(),
             launchablePackages = setOf("example.app"),
             packagePolicy = PackagePolicy(allowedPackages = mutableSetOf("example.app"), primaryPackage = "example.app"),
-        ).run(disappearedPlan())
+        ).run(windowDisappearedPlan())
 
         assertTrue(result.completed)
         val phases = result.events.map { it.phase }
@@ -161,6 +213,30 @@ class RuntimeHarnessTest {
             "m1",
             "dismiss target",
             listOf(UiPredicate(UiPredicateKind.ELEMENT_DISAPPEARED, targetHint = "Dismiss", description = "dialog is gone")),
+        )),
+    )
+
+    private fun windowDisappearedPlan(): TaskPlan = TaskPlan(
+        summary = "dismiss",
+        targetAppHint = "example.app",
+        goal = GoalContext("dismiss"),
+        milestones = listOf(TaskMilestone(
+            "m1",
+            "dismiss target",
+            listOf(
+                UiPredicate(
+                    UiPredicateKind.ELEMENT_DISAPPEARED,
+                    predicateId = "m1-gone",
+                    targetHint = "Dismiss",
+                    description = "dialog is gone",
+                ),
+                UiPredicate(
+                    UiPredicateKind.TEXT_PRESENT,
+                    predicateId = "m1-ready",
+                    literal = "Ready",
+                    description = "underlying page is ready",
+                ),
+            ),
         )),
     )
 
@@ -199,11 +275,35 @@ class RuntimeHarnessTest {
         override suspend fun nextAction(observation: Observation, milestone: TaskMilestone, history: List<ActionRecord>): AgentAction = next()
     }
 
-    private class FakeClock : RuntimeHarnessClock {
+    private class FakeClock(
+        private val state: DispatchResultState = DispatchResultState.CONFIRMED,
+    ) : RuntimeHarnessClock {
         var calls = 0
-        override suspend fun afterAction(before: Observation, action: AgentAction, observe: suspend () -> Observation): Observation {
+        override suspend fun afterAction(
+            before: Observation,
+            action: AgentAction,
+            observe: suspend () -> Observation,
+        ): RuntimeStepSettleResult {
             calls++
-            return observe()
+            return RuntimeStepSettleResult(state, observe(), "fake settle")
+        }
+    }
+
+    private class NoChangeAccessibilityService(initial: Observation) : RuntimeHarnessAccessibilityService {
+        private var current = initial
+        val recoveryActions = mutableListOf<RecoveryAction>()
+        var executeCount = 0
+
+        override suspend fun observe(): Observation = current
+
+        override suspend fun executeDetailed(action: AgentAction, observation: Observation): ActionExecutionResult {
+            executeCount++
+            return ActionExecutionResult(true, "executed", "dispatch accepted without an observable result")
+        }
+
+        override suspend fun executeRecovery(action: RecoveryAction, observation: Observation): ActionExecutionResult {
+            recoveryActions += action
+            return ActionExecutionResult(true, "recovered", action.name)
         }
     }
 
@@ -215,8 +315,9 @@ class RuntimeHarnessTest {
         override suspend fun executeDetailed(action: AgentAction, observation: Observation): ActionExecutionResult {
             current = Observation(
                 "example.app",
-                listOf(UiNodeSnapshot(2, "Ready", "", "TextView", false, false, "0,50,100,80", packageName = "example.app", windowId = 7)),
-                windowIds = setOf(7),
+                listOf(UiNodeSnapshot(3, "Ready", "", "TextView", false, false, "0,50,100,80", packageName = "example.app", windowId = 3, treePath = listOf(1, 0))),
+                windowIds = setOf(3),
+                windowPackages = mapOf(3 to "example.app"),
             )
             return ActionExecutionResult(true, "executed", "window target dismissed")
         }

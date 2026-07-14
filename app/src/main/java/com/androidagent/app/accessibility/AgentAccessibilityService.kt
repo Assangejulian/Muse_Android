@@ -26,6 +26,7 @@ import com.androidagent.app.agent.ElementSelector
 import com.androidagent.app.agent.InputMode
 import com.androidagent.app.agent.InputActionResultPolicy
 import com.androidagent.app.agent.NodeSelector
+import com.androidagent.app.agent.NodeIdentityKeys
 import com.androidagent.app.overlay.AgentOverlayController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -41,7 +42,6 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicInteger
-import java.security.MessageDigest
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
 
@@ -133,9 +133,15 @@ class AgentAccessibilityService : AccessibilityService() {
         val viewId = node.viewIdResourceName.orEmpty()
         val className = node.className?.toString().orEmpty()
         val bounds = "${rect.left},${rect.top},${rect.right},${rect.bottom}"
-        val stableKey = stableNodeKey(
+        val withinWindowStableKey = stableNodeKey(
             packageName = node.packageName?.toString().orEmpty(),
             windowId = windowId,
+            viewId = viewId,
+            className = className,
+            treePath = path,
+        )
+        val crossWindowStructureKey = crossWindowStructureKey(
+            packageName = node.packageName?.toString().orEmpty(),
             viewId = viewId,
             className = className,
             treePath = path,
@@ -153,7 +159,8 @@ class AgentAccessibilityService : AccessibilityService() {
                 clickable = node.isClickable,
                 editable = node.isEditable,
                 bounds = bounds,
-                stableKey = stableKey,
+                withinWindowStableKey = withinWindowStableKey,
+                crossWindowStructureKey = crossWindowStructureKey,
                 viewId = viewId,
                 treePath = path,
                 enabled = node.isEnabled,
@@ -679,10 +686,15 @@ class AgentAccessibilityService : AccessibilityService() {
             viewId: String,
             className: String,
             treePath: List<Int>,
-        ): String = MessageDigest.getInstance("SHA-256")
-            .digest(listOf(packageName, windowId.toString(), viewId, className, treePath.joinToString("/")).joinToString("|").toByteArray())
-            .take(12)
-            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        ): String = NodeIdentityKeys.withinWindowStableKey(packageName, windowId, viewId, className, treePath)
+
+        /** Stable structure key that deliberately excludes window identity. */
+        internal fun crossWindowStructureKey(
+            packageName: String,
+            viewId: String,
+            className: String,
+            treePath: List<Int>,
+        ): String = NodeIdentityKeys.crossWindowStructureKey(packageName, viewId, className, treePath)
     }
 }
 

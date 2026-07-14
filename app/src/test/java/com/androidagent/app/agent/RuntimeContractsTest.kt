@@ -1,5 +1,6 @@
 package com.androidagent.app.agent
 
+import com.androidagent.app.accessibility.AgentAccessibilityService
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -383,6 +384,43 @@ class RuntimeContractsTest {
     }
 
     @Test
+    fun samePackageWindowWithDifferentStructureIsBoundWindowGone() {
+        val original = UiNodeSnapshot(
+            1,
+            "Dismiss",
+            "",
+            "Button",
+            true,
+            false,
+            "0,0,100,30",
+            viewId = "primary:id/dismiss",
+            treePath = listOf(0, 1),
+            packageName = "primary.app",
+            windowId = 10,
+        )
+        val different = UiNodeSnapshot(
+            2,
+            "Dashboard",
+            "",
+            "TextView",
+            false,
+            false,
+            "0,0,300,80",
+            viewId = "primary:id/dashboard",
+            treePath = listOf(0, 0),
+            packageName = "primary.app",
+            windowId = 11,
+        )
+        val after = Observation(
+            "primary.app",
+            listOf(different),
+            windowIds = setOf(11),
+            windowPackages = mapOf(11 to "primary.app"),
+        )
+        assertEquals(IdentityResolution.BoundWindowGone, NodeSelector.resolveIdentity(after, BoundElementIdentity.from(original)))
+    }
+
+    @Test
     fun nonEmptyWindowIdentityCanProveSameWindowDisappearance() {
         val milestone = TaskMilestone(
             "dismiss",
@@ -410,23 +448,134 @@ class RuntimeContractsTest {
         val disappeared = UiPredicate(UiPredicateKind.ELEMENT_DISAPPEARED, predicateId = "dismiss-p1", targetHint = "Dismiss", description = "dialog dismissed")
         val positive = UiPredicate(UiPredicateKind.TEXT_PRESENT, predicateId = "dismiss-p2", literal = "Ready", description = "underlying page is ready")
         val milestone = TaskMilestone("dismiss", "dismiss dialog", listOf(disappeared, positive))
+        val targetPlan = plan.copy(milestones = listOf(milestone))
         val dialog = UiNodeSnapshot(1, "Dismiss", "", "Button", true, false, "0,0,100,30", viewId = "primary:id/dismiss", packageName = "primary.app", windowId = 10)
         val before = Observation("primary.app", listOf(dialog), windowIds = setOf(10))
         val bindings = PredicateBindingStore()
-        assertTrue(bindings.bind(milestone, 0, dialog, before, "run-1").bound)
+        val ledger = RunLedger(targetPlan)
+        val action = AgentAction.ClickNode(1, predicateId = "dismiss-p1")
+        val prepared = bindings.prepareActionBinding(milestone, action, before, "run-1")
+        val actionKey = ledger.actionKey(action, before)
+        val baseline = MilestoneEvaluator.strongPostconditionBaseline(milestone, targetPlan, before, "primary.app", bindings, "run-1")
+        assertTrue(bindings.commitMutation(prepared, actionKey, before.observationId, baseline))
 
         val underlying = Observation(
             "primary.app",
             listOf(UiNodeSnapshot(2, "Ready", "", "TextView", false, false, "0,0,100,30", packageName = "primary.app", windowId = 11)),
             windowIds = setOf(11),
         )
+        assertTrue(bindings.markResultObserved(prepared, actionKey))
         assertEquals(IdentityResolution.BoundWindowGone, NodeSelector.resolveIdentity(underlying, BoundElementIdentity.from(dialog)))
-        assertTrue(MilestoneEvaluator.evaluate(milestone, plan, underlying, "primary.app", bindings, runId = "run-1").proven)
+        assertTrue(MilestoneEvaluator.evaluate(milestone, targetPlan, underlying, "primary.app", bindings, runId = "run-1").proven)
 
         val noPostcondition = milestone.copy(successPredicates = listOf(disappeared))
+        val noPostPlan = plan.copy(milestones = listOf(noPostcondition))
         val noPostBindings = PredicateBindingStore()
-        assertTrue(noPostBindings.bind(noPostcondition, 0, dialog, before, "run-2").bound)
-        assertFalse(MilestoneEvaluator.evaluate(noPostcondition, plan, underlying, "primary.app", noPostBindings, runId = "run-2").proven)
+        val noPostLedger = RunLedger(noPostPlan)
+        val noPostAction = AgentAction.ClickNode(1, predicateId = "dismiss-p1")
+        val noPostPrepared = noPostBindings.prepareActionBinding(noPostcondition, noPostAction, before, "run-2")
+        val noPostActionKey = noPostLedger.actionKey(noPostAction, before)
+        assertTrue(noPostBindings.commitMutation(noPostPrepared, noPostActionKey, before.observationId, emptyMap()))
+        assertTrue(noPostBindings.markResultObserved(noPostPrepared, noPostActionKey))
+        val noPostEvidence = MilestoneEvaluator.evaluate(noPostcondition, noPostPlan, underlying, "primary.app", noPostBindings, runId = "run-2")
+        assertFalse(noPostEvidence.proven)
+        assertTrue(noPostEvidence.details.any { it.contains("no new strong postcondition") })
+    }
+
+    @Test
+    fun observationOnlyBindingCannotProveBoundWindowGone() {
+        val milestone = TaskMilestone(
+            "dismiss",
+            "dismiss dialog",
+            listOf(
+                UiPredicate(UiPredicateKind.ELEMENT_DISAPPEARED, predicateId = "dismiss-gone", targetHint = "Dismiss", description = "gone"),
+                UiPredicate(UiPredicateKind.TEXT_PRESENT, predicateId = "dismiss-ready", literal = "Ready", description = "ready"),
+            ),
+        )
+        val targetPlan = plan.copy(milestones = listOf(milestone))
+        val dialog = UiNodeSnapshot(1, "Dismiss", "", "Button", true, false, "0,0,100,30", viewId = "primary:id/dismiss", packageName = "primary.app", windowId = 7)
+        val before = Observation("primary.app", listOf(dialog), windowIds = setOf(7))
+        val after = Observation(
+            "primary.app",
+            listOf(UiNodeSnapshot(2, "Ready", "", "TextView", false, false, "0,0,100,30", packageName = "primary.app", windowId = 3)),
+            windowIds = setOf(3),
+        )
+        val bindings = PredicateBindingStore()
+        val prepared = bindings.prepareActionBinding(
+            milestone,
+            AgentAction.BindPredicate("dismiss-gone", nodeId = 1),
+            before,
+            "run-observe",
+        )
+        assertTrue(bindings.commitObservation(prepared, BindingOrigin.OBSERVATION_ONLY))
+        assertEquals(BindingOrigin.OBSERVATION_ONLY, bindings.get("dismiss", 0)?.origin)
+        assertFalse(MilestoneEvaluator.evaluate(milestone, targetPlan, after, "primary.app", bindings, runId = "run-observe").proven)
+    }
+
+    @Test
+    fun weakPredicatesThatWereAlreadyTrueCannotUnlockBoundWindowGone() {
+        fun evaluateWith(weak: UiPredicate, imeVisible: Boolean): PredicateEvidence {
+            val disappeared = UiPredicate(UiPredicateKind.ELEMENT_DISAPPEARED, predicateId = "gone", targetHint = "Dismiss", description = "gone")
+            val milestone = TaskMilestone("dismiss", "dismiss", listOf(disappeared, weak))
+            val targetPlan = plan.copy(milestones = listOf(milestone))
+            val dialog = UiNodeSnapshot(1, "Dismiss", "", "Button", true, false, "0,0,100,30", viewId = "primary:id/dismiss", packageName = "primary.app", windowId = 7)
+            val before = Observation("primary.app", listOf(dialog), imeVisible = imeVisible, windowIds = setOf(7))
+            val after = Observation("primary.app", emptyList(), imeVisible = imeVisible, windowIds = setOf(3), windowPackages = mapOf(3 to "primary.app"))
+            val bindings = PredicateBindingStore()
+            val ledger = RunLedger(targetPlan)
+            val action = AgentAction.ClickNode(1, predicateId = "gone")
+            val prepared = bindings.prepareActionBinding(milestone, action, before, "run-weak")
+            val actionKey = ledger.actionKey(action, before)
+            val baseline = MilestoneEvaluator.strongPostconditionBaseline(milestone, targetPlan, before, "primary.app", bindings, "run-weak")
+            assertTrue(bindings.commitMutation(prepared, actionKey, before.observationId, baseline))
+            assertTrue(bindings.markResultObserved(prepared, actionKey))
+            return MilestoneEvaluator.evaluate(milestone, targetPlan, after, "primary.app", bindings, runId = "run-weak")
+        }
+
+        val packageEvidence = evaluateWith(
+            UiPredicate(UiPredicateKind.PACKAGE_FOREGROUND, predicateId = "package", targetPackage = "primary.app", description = "package"),
+            imeVisible = false,
+        )
+        val imeEvidence = evaluateWith(
+            UiPredicate(UiPredicateKind.IME_HIDDEN, predicateId = "ime", description = "ime hidden"),
+            imeVisible = false,
+        )
+        assertFalse(packageEvidence.proven)
+        assertFalse(imeEvidence.proven)
+        assertTrue(packageEvidence.details.any { it.contains("no new strong postcondition") })
+        assertTrue(imeEvidence.details.any { it.contains("no new strong postcondition") })
+    }
+
+    @Test
+    fun newlyAppearingUniqueControlCanUnlockBoundWindowGone() {
+        val readySelector = ElementSelector(
+            packageName = "primary.app",
+            viewIdResourceName = "primary:id/ready",
+            className = "TextView",
+        )
+        val milestone = TaskMilestone(
+            "dismiss",
+            "dismiss",
+            listOf(
+                UiPredicate(UiPredicateKind.ELEMENT_DISAPPEARED, predicateId = "gone", targetHint = "Dismiss", description = "gone"),
+                UiPredicate(UiPredicateKind.ELEMENT_PRESENT, predicateId = "ready", target = readySelector, description = "ready control"),
+            ),
+        )
+        val targetPlan = plan.copy(milestones = listOf(milestone))
+        val dialog = UiNodeSnapshot(1, "Dismiss", "", "Button", true, false, "0,0,100,30", viewId = "primary:id/dismiss", packageName = "primary.app", windowId = 7)
+        val before = Observation("primary.app", listOf(dialog), windowIds = setOf(7))
+        val ready = UiNodeSnapshot(2, "Ready", "", "TextView", false, false, "0,0,100,30", viewId = "primary:id/ready", packageName = "primary.app", windowId = 3)
+        val after = Observation("primary.app", listOf(ready), windowIds = setOf(3))
+        val bindings = PredicateBindingStore()
+        val ledger = RunLedger(targetPlan)
+        val action = AgentAction.ClickNode(1, predicateId = "gone")
+        val prepared = bindings.prepareActionBinding(milestone, action, before, "run-control")
+        val actionKey = ledger.actionKey(action, before)
+        val baseline = MilestoneEvaluator.strongPostconditionBaseline(milestone, targetPlan, before, "primary.app", bindings, "run-control")
+        assertEquals(false, baseline["ready"])
+        assertTrue(bindings.commitMutation(prepared, actionKey, before.observationId, baseline))
+        assertTrue(bindings.markResultObserved(prepared, actionKey))
+        assertTrue(MilestoneEvaluator.evaluate(milestone, targetPlan, after, "primary.app", bindings, runId = "run-control").proven)
     }
 
     @Test
@@ -434,18 +583,35 @@ class RuntimeContractsTest {
         val milestone = TaskMilestone(
             "dismiss",
             "dismiss target",
-            listOf(UiPredicate(UiPredicateKind.ELEMENT_DISAPPEARED, predicateId = "dismiss-p1", targetHint = "Dismiss", description = "dismissed")),
+            listOf(
+                UiPredicate(UiPredicateKind.ELEMENT_DISAPPEARED, predicateId = "dismiss-p1", targetHint = "Dismiss", description = "dismissed"),
+                UiPredicate(UiPredicateKind.TEXT_PRESENT, predicateId = "dismiss-p2", literal = "Ready", description = "ready"),
+            ),
         )
+        val targetPlan = plan.copy(milestones = listOf(milestone))
         val original = UiNodeSnapshot(1, "Dismiss", "", "Button", true, false, "0,0,100,30", viewId = "primary:id/dismiss", treePath = listOf(0, 1), packageName = "primary.app", windowId = 10)
         val before = Observation("primary.app", listOf(original), windowIds = setOf(10))
         val bindings = PredicateBindingStore()
-        assertTrue(bindings.bind(milestone, 0, original, before, "run-1").bound)
-        val recreated = Observation("primary.app", listOf(original.copy(id = 2, windowId = 11)), windowIds = setOf(11))
+        val ledger = RunLedger(targetPlan)
+        val action = AgentAction.ClickNode(1, predicateId = "dismiss-p1")
+        val prepared = bindings.prepareActionBinding(milestone, action, before, "run-1")
+        val actionKey = ledger.actionKey(action, before)
+        val baseline = MilestoneEvaluator.strongPostconditionBaseline(milestone, targetPlan, before, "primary.app", bindings, "run-1")
+        assertTrue(bindings.commitMutation(prepared, actionKey, before.observationId, baseline))
+        val recreated = Observation(
+            "primary.app",
+            listOf(
+                original.copy(id = 2, windowId = 11),
+                UiNodeSnapshot(3, "Ready", "", "TextView", false, false, "0,40,100,70", packageName = "primary.app", windowId = 11),
+            ),
+            windowIds = setOf(11),
+        )
+        assertTrue(bindings.markResultObserved(prepared, actionKey))
         assertEquals(IdentityResolution.WindowRecreated, NodeSelector.resolveIdentity(recreated, BoundElementIdentity.from(original)))
-        assertFalse(MilestoneEvaluator.evaluate(milestone, plan, recreated, "primary.app", bindings, runId = "run-1").proven)
+        assertFalse(MilestoneEvaluator.evaluate(milestone, targetPlan, recreated, "primary.app", bindings, runId = "run-1").proven)
         val switched = Observation("secondary.app", emptyList())
         assertEquals(IdentityResolution.PackageChanged, NodeSelector.resolveIdentity(switched, BoundElementIdentity.from(original)))
-        assertFalse(MilestoneEvaluator.evaluate(milestone, plan, switched, "primary.app", bindings, runId = "run-1").proven)
+        assertFalse(MilestoneEvaluator.evaluate(milestone, targetPlan, switched, "primary.app", bindings, runId = "run-1").proven)
     }
 
     @Test
@@ -509,11 +675,15 @@ class RuntimeContractsTest {
         val bindings = PredicateBindingStore()
         val first = bindings.prepareActionBinding(state, AgentAction.EnsureToggle(1, true, predicateId = "m1-p1"), old, "run-1")
         assertTrue(bindings.commitAll(first.provisional))
+        val storedBeforeRebind = bindings.get("m1", 0)
         val newNode = oldNode.copy(id = 9, windowId = 2, checked = false)
         val recreated = Observation("primary.app", listOf(newNode), windowIds = setOf(2))
         val rebind = bindings.prepareActionBinding(state, AgentAction.EnsureToggle(9, true), recreated, "run-1")
         assertTrue(rebind.prepared)
         assertEquals("rebind_required", rebind.reason)
+        assertEquals(storedBeforeRebind, bindings.get("m1", 0))
+        assertTrue(bindings.commitObservation(rebind, BindingOrigin.OBSERVATION_ONLY))
+        assertEquals(2, bindings.get("m1", 0)?.identity?.windowId)
 
         val disappeared = TaskMilestone("gone", "gone", listOf(UiPredicate(UiPredicateKind.ELEMENT_DISAPPEARED, predicateId = "gone-p1", targetHint = "Target", description = "gone")))
         val goneBindings = PredicateBindingStore()
@@ -523,7 +693,67 @@ class RuntimeContractsTest {
     }
 
     @Test
-    fun stableKeyOnlyIdentityDetectsWindowRecreation() {
+    fun rebindRespectsExplicitSelectorAndFailedExecutionLeavesOldBinding() {
+        val predicate = UiPredicate(
+            UiPredicateKind.TOGGLE_STATE,
+            predicateId = "toggle-p1",
+            expectedChecked = true,
+            target = ElementSelector(
+                packageName = "primary.app",
+                viewIdResourceName = "primary:id/toggle",
+                className = "Switch",
+            ),
+            description = "toggle on",
+        )
+        val milestone = TaskMilestone("toggle", "toggle", listOf(predicate))
+        val oldNode = UiNodeSnapshot(
+            1,
+            "Target",
+            "",
+            "Switch",
+            true,
+            false,
+            "0,0,100,30",
+            viewId = "primary:id/toggle",
+            treePath = listOf(0, 1),
+            checked = false,
+            packageName = "primary.app",
+            windowId = 10,
+        )
+        val old = Observation("primary.app", listOf(oldNode), windowIds = setOf(10))
+        val bindings = PredicateBindingStore()
+        val first = bindings.prepareActionBinding(milestone, AgentAction.EnsureToggle(1, true, predicateId = "toggle-p1"), old, "run-1")
+        assertTrue(bindings.commitObservation(first, BindingOrigin.OBSERVATION_ONLY))
+        val stored = bindings.get("toggle", 0)
+
+        val recreatedNode = oldNode.copy(id = 2, windowId = 11)
+        val recreated = Observation("primary.app", listOf(recreatedNode), windowIds = setOf(11))
+        val preparedRebind = bindings.prepareActionBinding(
+            milestone,
+            AgentAction.EnsureToggle(2, true, predicateId = "toggle-p1"),
+            recreated,
+            "run-1",
+        )
+        assertTrue(preparedRebind.prepared)
+        assertEquals(stored, bindings.get("toggle", 0))
+        // Simulated executeDetailed=false: no transaction commit is allowed.
+        assertEquals(stored, bindings.get("toggle", 0))
+
+        val changedViewNode = recreatedNode.copy(id = 3, viewId = "primary:id/other", windowId = 12)
+        val changedView = Observation("primary.app", listOf(changedViewNode), windowIds = setOf(12))
+        val rejected = bindings.prepareActionBinding(
+            milestone,
+            AgentAction.EnsureToggle(3, true, predicateId = "toggle-p1"),
+            changedView,
+            "run-1",
+        )
+        assertFalse(rejected.prepared)
+        assertEquals(stored, bindings.get("toggle", 0))
+    }
+
+    @Test
+    fun productionKeysDetectWindowRecreationAndStaleExecutionObservation() {
+        val path = listOf(0, 2)
         val original = UiNodeSnapshot(
             1,
             "Target",
@@ -532,14 +762,80 @@ class RuntimeContractsTest {
             true,
             false,
             "0,0,100,30",
-            stableKey = "target-key",
+            withinWindowStableKey = AgentAccessibilityService.stableNodeKey(
+                "primary.app", 10, "primary:id/target", "Switch", path,
+            ),
+            crossWindowStructureKey = AgentAccessibilityService.crossWindowStructureKey(
+                "primary.app", "primary:id/target", "Switch", path,
+            ),
+            viewId = "primary:id/target",
+            treePath = path,
             packageName = "primary.app",
             windowId = 10,
         )
-        val replacement = original.copy(id = 2, windowId = 11)
+        val replacement = original.copy(
+            id = 2,
+            windowId = 11,
+            withinWindowStableKey = AgentAccessibilityService.stableNodeKey(
+                "primary.app", 11, "primary:id/target", "Switch", path,
+            ),
+        )
         val identity = BoundElementIdentity.from(original)
-        val observation = Observation("primary.app", listOf(replacement), windowIds = setOf(11))
-        assertEquals(IdentityResolution.WindowRecreated, NodeSelector.resolveIdentity(observation, identity))
+        val before = Observation("primary.app", listOf(original), windowIds = setOf(10), windowPackages = mapOf(10 to "primary.app"))
+        val after = Observation("primary.app", listOf(replacement), windowIds = setOf(11), windowPackages = mapOf(11 to "primary.app"))
+        assertFalse(original.withinWindowStableKey == replacement.withinWindowStableKey)
+        assertEquals(original.crossWindowStructureKey, replacement.crossWindowStructureKey)
+        assertEquals(IdentityResolution.WindowRecreated, NodeSelector.resolveIdentity(after, identity))
+
+        val milestone = TaskMilestone(
+            "m1",
+            "target remains present",
+            listOf(UiPredicate(UiPredicateKind.ELEMENT_PRESENT, targetHint = "Target", description = "target present")),
+        )
+        val runtimePlan = TaskPlan("target", "primary.app", GoalContext("target"), listOf(milestone))
+        val preflight = RuntimeStepExecutor.preflight(
+            guard = ToolGuard(runtimePlan, "primary.app"),
+            ledger = RunLedger(runtimePlan),
+            proposed = AgentAction.ClickNode(1),
+            planningObservation = before,
+            executionObservation = after,
+            milestone = milestone,
+            packagePolicy = PackagePolicy(mutableSetOf("primary.app"), "primary.app"),
+            launchablePackages = setOf("primary.app"),
+            goal = runtimePlan.goal,
+        )
+        assertTrue(preflight.stale)
+    }
+
+    @Test
+    fun observationFingerprintIncludesWindowTopologyAndWithinWindowKey() {
+        val path = listOf(0, 1)
+        fun node(windowId: Int) = UiNodeSnapshot(
+            1,
+            "Target",
+            "",
+            "Button",
+            true,
+            false,
+            "0,0,100,30",
+            withinWindowStableKey = AgentAccessibilityService.stableNodeKey(
+                "primary.app", windowId, "primary:id/target", "Button", path,
+            ),
+            crossWindowStructureKey = AgentAccessibilityService.crossWindowStructureKey(
+                "primary.app", "primary:id/target", "Button", path,
+            ),
+            viewId = "primary:id/target",
+            treePath = path,
+            packageName = "primary.app",
+            windowId = windowId,
+        )
+        val first = Observation("primary.app", listOf(node(10)), windowIds = setOf(10), windowPackages = mapOf(10 to "primary.app"))
+        val recreated = Observation("primary.app", listOf(node(11)), windowIds = setOf(11), windowPackages = mapOf(11 to "primary.app"))
+        val topologyOnly = Observation("primary.app", emptyList(), windowIds = setOf(10), windowPackages = mapOf(10 to "primary.app"))
+        val changedTopologyOnly = Observation("primary.app", emptyList(), windowIds = setOf(11), windowPackages = mapOf(11 to "primary.app"))
+
+        assertFalse(first.observationId == recreated.observationId)
+        assertFalse(topologyOnly.observationId == changedTopologyOnly.observationId)
     }
 
     @Test
@@ -614,21 +910,38 @@ class RuntimeContractsTest {
             listOf(UiPredicate(UiPredicateKind.ELEMENT_DISAPPEARED, predicateId = "m1-p1", targetHint = "Dismiss", description = "gone")),
         )
         val plan = TaskPlan("dismiss", "primary.app", GoalContext("dismiss"), listOf(milestone))
+        val path = listOf(0, 1)
         val screen = Observation(
             "primary.app",
-            listOf(UiNodeSnapshot(1, "Dismiss", "", "Button", true, false, "0,0,100,30", packageName = "primary.app", windowId = 4, stableKey = "dismiss", treePath = listOf(0, 1))),
+            listOf(UiNodeSnapshot(
+                1,
+                "Dismiss",
+                "",
+                "Button",
+                true,
+                false,
+                "0,0,100,30",
+                withinWindowStableKey = AgentAccessibilityService.stableNodeKey("primary.app", 4, "primary:id/dismiss", "Button", path),
+                crossWindowStructureKey = AgentAccessibilityService.crossWindowStructureKey("primary.app", "primary:id/dismiss", "Button", path),
+                viewId = "primary:id/dismiss",
+                treePath = path,
+                packageName = "primary.app",
+                windowId = 4,
+            )),
             windowIds = setOf(4),
         )
         val bindings = PredicateBindingStore()
-        val prepared = bindings.prepareActionBinding(milestone, AgentAction.ClickNode(1, predicateId = "m1-p1"), screen, "run-1")
-        assertTrue(bindings.markDispatched(prepared.provisional))
-        assertTrue(bindings.commitDispatched(prepared.provisional))
-        assertEquals(BindingLifecycle.COMMITTED, bindings.get("m1", 0)?.lifecycle)
-
         val ledger = RunLedger(plan)
         val action = AgentAction.ClickNode(1, predicateId = "m1-p1")
-        ledger.recordDispatch(action, screen)
-        ledger.recordDispatch(action, screen)
+        val prepared = bindings.prepareActionBinding(milestone, action, screen, "run-1")
+        val actionKey = ledger.actionKey(action, screen)
+        assertTrue(bindings.commitMutation(prepared, actionKey, screen.observationId, emptyMap()))
+        assertTrue(bindings.markResultUnknown(prepared, actionKey))
+        assertEquals(BindingLifecycle.COMMITTED, bindings.get("m1", 0)?.lifecycle)
+        assertEquals(BindingOrigin.MUTATING_ACTION, bindings.get("m1", 0)?.origin)
+        assertEquals(BindingResultState.RESULT_UNKNOWN, bindings.get("m1", 0)?.resultState)
+
+        ledger.recordDispatch(action, screen, DispatchResultState.RESULT_UNKNOWN)
         assertTrue(ledger.blockRepeated(action, screen) != null)
         assertEquals(BindingLifecycle.COMMITTED, bindings.get("m1", 0)?.lifecycle)
     }

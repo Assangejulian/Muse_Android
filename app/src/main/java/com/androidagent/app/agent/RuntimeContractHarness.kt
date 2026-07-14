@@ -12,7 +12,11 @@ fun interface RuntimeHarnessPlanner {
 }
 
 fun interface RuntimeHarnessClock {
-    suspend fun afterAction(before: Observation, action: AgentAction, observe: suspend () -> Observation): Observation
+    suspend fun afterAction(
+        before: Observation,
+        action: AgentAction,
+        observe: suspend () -> Observation,
+    ): RuntimeStepSettleResult
 }
 
 data class RuntimeHarnessEvent(val phase: String, val detail: String = "")
@@ -45,6 +49,21 @@ class RuntimeContractHarness(
         val bindings = PredicateBindingStore()
         val recoveryPolicy = RecoveryPolicy()
         val counters = StopGateEvidenceCounters()
+        val engine = RuntimeStepEngine(object : RuntimeStepDriver {
+            override suspend fun executeDetailed(action: AgentAction, observation: Observation): ActionExecutionResult =
+                service.executeDetailed(action, observation)
+
+            override suspend fun settle(before: Observation, action: AgentAction): RuntimeStepSettleResult =
+                clock.afterAction(before, action, service::observe)
+
+            override suspend fun executeRecovery(
+                decision: RecoveryDecision,
+                observation: Observation,
+            ): RuntimeStepRecoveryResult {
+                val result = service.executeRecovery(decision.action, observation)
+                return RuntimeStepRecoveryResult(result.success, service.observe(), result.detail.ifBlank { result.status })
+            }
+        })
         var observation = service.observe().also { events += RuntimeHarnessEvent("fresh_observation", it.observationId) }
 
         repeat(maxSteps) { step ->
@@ -81,111 +100,45 @@ class RuntimeContractHarness(
             val executionObservation = service.observe()
             events += RuntimeHarnessEvent("fresh_execution_observation", executionObservation.observationId)
 
-            val preflight = RuntimeStepExecutor.preflight(
-                guard = ToolGuard(plan, packagePolicy),
-                ledger = ledger,
-                proposed = action,
-                planningObservation = observation,
-                executionObservation = executionObservation,
-                milestone = milestone,
-                packagePolicy = packagePolicy,
-                launchablePackages = launchablePackages,
-                goal = plan.goal,
+            val result = engine.execute(
+                RuntimeStepRequest(
+                    step = step + 1,
+                    proposed = action,
+                    planningObservation = observation,
+                    executionObservation = executionObservation,
+                    plan = plan,
+                    milestone = milestone,
+                    guard = ToolGuard(plan, packagePolicy),
+                    ledger = ledger,
+                    bindings = bindings,
+                    recoveryPolicy = recoveryPolicy,
+                    packagePolicy = packagePolicy,
+                    launchablePackages = launchablePackages,
+                    goal = plan.goal,
+                    targetPackage = packagePolicy.primaryPackage,
+                    evidenceCounters = counters,
+                    runId = "harness",
+                ),
             )
-            if (preflight.stale) {
-                events += RuntimeHarnessEvent("stale_observation", "action was planned from an older screen")
-                val decision = recoveryPolicy.decide(
-                    RecoveryContext(currentMilestoneId = milestone.id, failedAction = action, reason = RecoveryReason.SCREEN_UNCHANGED),
+            events += result.events.map { RuntimeHarnessEvent(it.phase, it.detail) }
+            observation = result.after
+            result.action?.let { executedAction ->
+                history += ActionRecord(
+                    step = step + 1,
+                    action = executedAction,
+                    success = result.execution?.success == true,
+                    beforeFingerprint = result.before.observationId,
+                    afterFingerprint = result.after.observationId,
+                    result = result.reason,
                 )
-                recordRecovery(events, service, decision.action, executionObservation)
-                observation = executionObservation
-                return@repeat
             }
-            val guarded = preflight.guarded
-            events += RuntimeHarnessEvent("tool_guard", if (guarded.action != null || guarded.shortCircuit != null) "allowed" else "rejected")
-            val guardedAction = preflight.action
-            if (guardedAction == null) {
-                val decision = recoveryPolicy.decide(RecoveryContext(currentMilestoneId = milestone.id, failedAction = action, reason = RecoveryReason.TARGET_MISSING))
-                recordRecovery(events, service, decision.action, executionObservation)
-                return@repeat
+            if (result.status == RuntimeStepStatus.ABORTED) {
+                return RuntimeHarnessResult(false, result.reason, events, ledger.evidenceSummary().lines())
             }
-            events += RuntimeHarnessEvent("safety_guard", if (preflight.safetyFailure == null) "allowed" else "rejected")
-            if (preflight.safetyFailure != null) {
-                val decision = recoveryPolicy.decide(RecoveryContext(currentMilestoneId = milestone.id, failedAction = guardedAction, reason = RecoveryReason.WRONG_PACKAGE))
-                recordRecovery(events, service, decision.action, executionObservation)
-                return@repeat
-            }
-            events += RuntimeHarnessEvent("duplicate", if (preflight.repeatedReason == null) "allowed" else "rejected")
-            if (preflight.repeatedReason != null) {
-                val decision = recoveryPolicy.decide(RecoveryContext(currentMilestoneId = milestone.id, failedAction = guardedAction, reason = RecoveryReason.REPEATED_ACTION))
-                recordRecovery(events, service, decision.action, executionObservation)
-                return@repeat
-            }
-            val prepared = bindings.prepareActionBinding(milestone, guardedAction, executionObservation, runId = "harness")
-            events += RuntimeHarnessEvent("prepare_binding", if (prepared.prepared) "prepared" else "rejected")
-            if (!prepared.prepared) {
-                val decision = recoveryPolicy.decide(RecoveryContext(currentMilestoneId = milestone.id, failedAction = guardedAction, reason = RecoveryReason.AMBIGUOUS_TARGET))
-                recordRecovery(events, service, decision.action, executionObservation)
-                return@repeat
-            }
-            if (guarded.shortCircuit != null || guardedAction is AgentAction.BindPredicate) {
-                bindings.commitAll(prepared.provisional)
-                events += RuntimeHarnessEvent("commit", "observation-only binding")
-                counters.successfulObservationActions++
-                val evidence = MilestoneEvaluator.evaluate(milestone, plan, executionObservation, packagePolicy.primaryPackage, bindings)
-                if (evidence.proven) {
-                    counters.deterministicEvidenceCount++
-                    counters.verifiedMilestones++
-                    bindings.markVerified(milestone.id)
-                    ledger.advance(evidence.details.joinToString(" | "))
-                }
-                events += RuntimeHarnessEvent("evaluate", "observation_only")
-                events += RuntimeHarnessEvent("stop_gate", if (evidence.proven) "local evidence" else "waiting")
-                observation = executionObservation
-                return@repeat
-            }
-            events += RuntimeHarnessEvent("execute", TraceSanitizer.actionType(guardedAction))
-            val execution = service.executeDetailed(guardedAction, executionObservation)
-            if (!execution.success) {
-                bindings.rollbackAll(prepared.provisional)
-                history += ActionRecord(step + 1, guardedAction, false, executionObservation.observationId, executionObservation.observationId, execution.status)
-                val decision = recoveryPolicy.decide(RecoveryContext(currentMilestoneId = milestone.id, failedAction = guardedAction, reason = RecoveryReason.INPUT_FAILED))
-                recordRecovery(events, service, decision.action, executionObservation)
-                return@repeat
-            }
-            events += RuntimeHarnessEvent("mark_dispatched", "action succeeded")
-            bindings.markDispatched(prepared.provisional)
-            bindings.commitDispatched(prepared.provisional)
-            events += RuntimeHarnessEvent("commit", "committed binding")
-            ledger.recordDispatch(guardedAction, executionObservation)
-            counters.successfulMutatingActions++
-            val after = clock.afterAction(executionObservation, guardedAction, service::observe)
-            events += RuntimeHarnessEvent("wait", after.observationId)
-            val afterEvidence = MilestoneEvaluator.evaluate(milestone, plan, after, packagePolicy.primaryPackage, bindings)
-            history += ActionRecord(step + 1, guardedAction, true, executionObservation.observationId, after.observationId, if (afterEvidence.proven) "evidence: local" else "progress")
-            observation = after
-            if (afterEvidence.proven) {
-                counters.deterministicEvidenceCount++
-                counters.verifiedMilestones++
-                bindings.markVerified(milestone.id)
-                ledger.advance(afterEvidence.details.joinToString(" | "))
-                events += RuntimeHarnessEvent("evaluate", "after:${milestone.id}")
-                events += RuntimeHarnessEvent("stop_gate", "local evidence")
-            } else {
-                events += RuntimeHarnessEvent("recover", "none")
-                events += RuntimeHarnessEvent("stop_gate", "not yet proven")
+            if (result.needsReplan) {
+                return RuntimeHarnessResult(false, result.reason, events, ledger.evidenceSummary().lines())
             }
         }
         return RuntimeHarnessResult(false, "harness step budget exhausted", events, ledger.evidenceSummary().lines())
-    }
-
-    private suspend fun recordRecovery(
-        events: MutableList<RuntimeHarnessEvent>,
-        service: RuntimeHarnessAccessibilityService,
-        action: RecoveryAction,
-        observation: Observation,
-    ) {
-        val result = service.executeRecovery(action, observation)
-        events += RuntimeHarnessEvent("recover", "${action.name}:${result.status}:${if (result.success) "success" else "failed"}")
     }
 }

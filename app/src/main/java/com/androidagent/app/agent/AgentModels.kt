@@ -11,7 +11,8 @@ data class UiNodeSnapshot(
     val clickable: Boolean,
     val editable: Boolean,
     val bounds: String,
-    val stableKey: String = "",
+    val withinWindowStableKey: String = "",
+    val crossWindowStructureKey: String = "",
     val viewId: String = "",
     val treePath: List<Int>? = null,
     val enabled: Boolean = true,
@@ -26,6 +27,29 @@ data class UiNodeSnapshot(
     val windowId: Int? = null,
 ) {
     val viewIdResourceName: String get() = viewId
+}
+
+/** Shared production key generation used by Accessibility and JVM contract tests. */
+object NodeIdentityKeys {
+    fun withinWindowStableKey(
+        packageName: String,
+        windowId: Int,
+        viewId: String,
+        className: String,
+        treePath: List<Int>,
+    ): String = digest(packageName, windowId.toString(), viewId, className, treePath.joinToString("/"))
+
+    fun crossWindowStructureKey(
+        packageName: String,
+        viewId: String,
+        className: String,
+        treePath: List<Int>,
+    ): String = digest(packageName, viewId, className, treePath.joinToString("/"))
+
+    private fun digest(vararg parts: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(parts.joinToString("|").toByteArray(Charsets.UTF_8))
+        .take(12)
+        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }
 
 data class ElementSelector(
@@ -43,7 +67,8 @@ data class BoundElementIdentity(
     val packageName: String,
     val windowId: Int?,
     val viewIdResourceName: String?,
-    val stableKey: String?,
+    val withinWindowStableKey: String?,
+    val crossWindowStructureKey: String?,
     val treePath: List<Int>?,
     val className: String,
     val initialBounds: String?,
@@ -55,7 +80,23 @@ data class BoundElementIdentity(
             packageName = node.packageName,
             windowId = node.windowId,
             viewIdResourceName = node.viewId.takeIf(String::isNotBlank),
-            stableKey = node.stableKey.takeIf(String::isNotBlank),
+            withinWindowStableKey = node.withinWindowStableKey.takeIf(String::isNotBlank)
+                ?: node.windowId?.let { windowId ->
+                    NodeIdentityKeys.withinWindowStableKey(
+                        node.packageName,
+                        windowId,
+                        node.viewId,
+                        node.className,
+                        node.treePath.orEmpty(),
+                    )
+                },
+            crossWindowStructureKey = node.crossWindowStructureKey.takeIf(String::isNotBlank)
+                ?: NodeIdentityKeys.crossWindowStructureKey(
+                    node.packageName,
+                    node.viewId,
+                    node.className,
+                    node.treePath.orEmpty(),
+                ),
             treePath = node.treePath,
             className = node.className,
             initialBounds = node.bounds.takeIf(String::isNotBlank),
@@ -246,8 +287,12 @@ object NodeSelector {
                 // A replacement activity normally exposes the same stable
                 // structure under a fresh window id. That is not evidence that
                 // the old element disappeared; it is an identity transition.
-                if (packageNodes.any { structurallyMatchesIgnoringWindow(it, identity) }) {
+                val replacements = structuralMatchesIgnoringWindow(packageNodes, identity)
+                if (replacements.size == 1) {
                     return IdentityResolution.WindowRecreated
+                }
+                if (replacements.size > 1) {
+                    return IdentityResolution.Ambiguous(replacements.size)
                 }
                 return IdentityResolution.BoundWindowGone
             }
@@ -287,8 +332,8 @@ object NodeSelector {
 
     private fun narrowIdentityCandidates(candidates: List<UiNodeSnapshot>, identity: BoundElementIdentity): List<UiNodeSnapshot> {
         var narrowed = candidates
-        identity.stableKey?.let { key ->
-            val byStableKey = narrowed.filter { it.stableKey == key }
+        identity.withinWindowStableKey?.let { key ->
+            val byStableKey = narrowed.filter { it.withinWindowStableKey == key }
             if (byStableKey.isNotEmpty()) narrowed = byStableKey
         }
         identity.treePath?.let { path ->
@@ -299,7 +344,7 @@ object NodeSelector {
             val byClass = narrowed.filter { it.className == identity.className }
             if (byClass.isNotEmpty()) narrowed = byClass
         }
-        val hasStrongIdentity = identity.viewIdResourceName != null || identity.stableKey != null || identity.treePath != null
+        val hasStrongIdentity = identity.viewIdResourceName != null || identity.withinWindowStableKey != null || identity.treePath != null
         if (narrowed.size > 1 || !hasStrongIdentity) {
             identity.initialBounds?.let { bounds ->
                 val parsed = parseBounds(bounds)
@@ -327,13 +372,32 @@ object NodeSelector {
             else -> resolution
         }
 
-    private fun structurallyMatchesIgnoringWindow(node: UiNodeSnapshot, identity: BoundElementIdentity): Boolean {
-        if (identity.packageName.isNotBlank() && node.packageName.isNotBlank() && node.packageName != identity.packageName) return false
-        if (identity.viewIdResourceName != null && node.viewId != identity.viewIdResourceName) return false
-        if (identity.stableKey != null && node.stableKey != identity.stableKey) return false
-        if (identity.className.isNotBlank() && node.className != identity.className) return false
-        if (identity.treePath != null && node.treePath != identity.treePath) return false
-        return identity.viewIdResourceName != null || identity.stableKey != null || identity.treePath != null
+    private fun structuralMatchesIgnoringWindow(
+        nodes: List<UiNodeSnapshot>,
+        identity: BoundElementIdentity,
+    ): List<UiNodeSnapshot> {
+        val packageMatches = nodes.filter { node ->
+            identity.packageName.isBlank() || node.packageName.isBlank() || node.packageName == identity.packageName
+        }
+        identity.viewIdResourceName?.let { viewId ->
+            val byViewIdAndClass = packageMatches.filter { node ->
+                node.viewId == viewId && (identity.className.isBlank() || node.className == identity.className)
+            }
+            if (byViewIdAndClass.size <= 1) return byViewIdAndClass
+            identity.treePath?.let { path ->
+                val byPath = byViewIdAndClass.filter { it.treePath == path }
+                if (byPath.isNotEmpty()) return byPath
+            }
+            return byViewIdAndClass
+        }
+        val structureKey = identity.crossWindowStructureKey ?: return emptyList()
+        val byStructure = packageMatches.filter { node ->
+            crossWindowKey(node) == structureKey &&
+                (identity.className.isBlank() || node.className == identity.className)
+        }
+        val initialBounds = identity.initialBounds ?: return byStructure
+        val nearBounds = byStructure.filter { boundsNear(it.bounds, initialBounds) }
+        return if (nearBounds.isNotEmpty()) nearBounds else emptyList()
     }
 
     fun resolve(observation: Observation, nodeId: Int?, selector: ElementSelector?): UiNodeSnapshot? {
@@ -348,6 +412,21 @@ object NodeSelector {
     private fun parseBounds(bounds: String): IntArray? = runCatching {
         bounds.split(',').map(String::toInt).toIntArray()
     }.getOrNull()?.takeIf { it.size == 4 }
+
+    private fun boundsNear(first: String, second: String): Boolean {
+        val current = parseBounds(first) ?: return false
+        val previous = parseBounds(second) ?: return false
+        return current.indices.all { index -> kotlin.math.abs(current[index] - previous[index]) <= BOUNDS_DRIFT_PX }
+    }
+
+    private fun crossWindowKey(node: UiNodeSnapshot): String = node.crossWindowStructureKey.ifBlank {
+        NodeIdentityKeys.crossWindowStructureKey(
+            node.packageName,
+            node.viewId,
+            node.className,
+            node.treePath.orEmpty(),
+        )
+    }
 
     private const val BOUNDS_DRIFT_PX = 24
 }
@@ -409,12 +488,25 @@ data class Observation(
         val stableContent = nodes.joinToString("|") { node ->
             val normalizedText = normalizeDynamicText(node.text)
             val normalizedDescription = normalizeDynamicText(node.description)
-            "${node.packageName}:${node.viewId}:${node.className}:$normalizedText:$normalizedDescription:" +
+            val withinWindowKey = node.withinWindowStableKey.ifBlank {
+                node.windowId?.let { windowId ->
+                    NodeIdentityKeys.withinWindowStableKey(
+                        node.packageName,
+                        windowId,
+                        node.viewId,
+                        node.className,
+                        node.treePath.orEmpty(),
+                    )
+                }.orEmpty()
+            }
+            "${node.packageName}:${node.windowId}:$withinWindowKey:${node.viewId}:${node.className}:$normalizedText:$normalizedDescription:" +
                 "${node.visible}:${node.enabled}:${node.clickable}:${node.editable}:${node.focused}:" +
                 "${node.checked}:${node.selected}:${node.scrollable}:${node.bounds}:${node.treePath?.joinToString("/")}"
         }
+        val topology = "windowIds=${windowIds.sorted().joinToString(",")};windowPackages=" +
+            windowPackages.toSortedMap().entries.joinToString(",") { (windowId, owner) -> "$windowId=$owner" }
         val digest = MessageDigest.getInstance("SHA-256")
-            .digest("$packageName:$imeVisible:$stableContent".toByteArray())
+            .digest("$packageName:$imeVisible:$topology:$stableContent".toByteArray())
             .take(12)
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
         return "$packageName:$digest"
@@ -434,7 +526,7 @@ data class Observation(
             append(" clickable=${node.clickable} editable=${node.editable} bounds=${node.bounds}")
             if (node.packageName.isNotBlank() && node.packageName != packageName) append(" package=${node.packageName}")
             if (node.viewId.isNotBlank()) append(" viewId=${node.viewId}")
-            append(" key=${node.stableKey} enabled=${node.enabled} focused=${node.focused}")
+            append(" withinKey=${node.withinWindowStableKey} enabled=${node.enabled} focused=${node.focused}")
             node.checked?.let { append(" checked=$it") }
             if (node.selected) append(" selected=true")
             if (node.scrollable) append(" scrollable=true")

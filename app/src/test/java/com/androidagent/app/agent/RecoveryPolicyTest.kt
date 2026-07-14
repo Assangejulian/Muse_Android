@@ -12,16 +12,16 @@ class RecoveryPolicyTest {
     }
 
     @Test
-    fun wrongPackageRelaunchesExpectedMilestonePackage() {
-        val decision = RecoveryPolicy().decide(
-            RecoveryContext(
-                expectedPackage = "secondary.app",
-                currentPackage = "primary.app",
-                currentMilestoneId = "external",
-                reason = RecoveryReason.WRONG_PACKAGE,
-            ),
+    fun wrongPackageReobservesThenReplansWithoutRelaunch() {
+        val policy = RecoveryPolicy()
+        val context = RecoveryContext(
+            expectedPackage = "secondary.app",
+            currentPackage = "primary.app",
+            currentMilestoneId = "external",
+            reason = RecoveryReason.WRONG_PACKAGE,
         )
-        assertEquals(RecoveryAction.RELAUNCH, decision.action)
+        assertEquals(RecoveryAction.REOBSERVE, policy.decide(context).action)
+        assertEquals(RecoveryAction.REPLAN, policy.decide(context).action)
     }
 
     @Test
@@ -54,5 +54,29 @@ class RecoveryPolicyTest {
         assertEquals(0, policy.consecutiveRecoveries)
         assertEquals(1, policy.totalRecoveries)
         assertEquals(RecoveryAction.REOBSERVE, policy.decide(context).action)
+    }
+
+    @Test
+    fun unknownResultReobservesWaitsThenReplans() {
+        val policy = RecoveryPolicy(maxRecoveries = 6)
+        val context = RecoveryContext(currentMilestoneId = "m1", reason = RecoveryReason.RESULT_UNKNOWN)
+
+        assertEquals(RecoveryAction.REOBSERVE, policy.decide(context).action)
+        assertEquals(RecoveryAction.WAIT, policy.decide(context).action)
+        assertEquals(RecoveryAction.REPLAN, policy.decide(context).action)
+    }
+
+    @Test
+    fun appNotRespondingRequiresTwoRecoveryObservationsBeforeRelaunch() {
+        val policy = RecoveryPolicy(maxRecoveries = 6)
+        val context = RecoveryContext(
+            expectedPackage = "example.app",
+            currentMilestoneId = "m1",
+            reason = RecoveryReason.APP_NOT_RESPONDING,
+        )
+
+        assertEquals(RecoveryAction.REOBSERVE, policy.decide(context).action)
+        assertEquals(RecoveryAction.WAIT, policy.decide(context).action)
+        assertEquals(RecoveryAction.RELAUNCH, policy.decide(context).action)
     }
 }
