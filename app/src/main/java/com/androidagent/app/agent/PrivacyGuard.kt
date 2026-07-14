@@ -14,28 +14,20 @@ object PrivacyGuard {
         "com.android.packageinstaller",
         "com.google.android.packageinstaller",
     )
-    private val blockedTerms = listOf(
-        "支付", "付款", "收银台", "购买", "充值", "转账", "银行卡", "验证码", "动态口令",
-        "登录密码", "修改密码", "实名认证", "身份证", "授权权限", "安装应用", "卸载应用",
-        "payment", "checkout", "purchase", "bank card", "verification code", "one-time password",
-        "password", "grant permission", "install app", "uninstall app",
-    )
     private val email = Regex("[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", RegexOption.IGNORE_CASE)
     private val phone = Regex("(?<!\\d)1\\d{10}(?!\\d)")
     private val longNumber = Regex("(?<!\\d)\\d{13,19}(?!\\d)")
     private val idCard = Regex("(?<!\\d)\\d{17}[0-9Xx](?!\\d)")
-    private val codeCandidate = Regex("(?i)(?:code|otp|verification|验证码)[^0-9]{0,12}(\\d{4,8})")
 
     fun prepare(observation: Observation): PrivacyDecision {
         val packageName = observation.packageName.lowercase()
         val packageBlocked = blockedPackages.any(packageName::startsWith)
         val passwordField = observation.nodes.any { it.visible && it.password }
-        val visibleText = observation.visibleText()
-        val matchedTerm = blockedTerms.firstOrNull { visibleText.contains(it, ignoreCase = true) }
+        val matchedTerm = SensitiveOperationPolicy.matchObservation(observation)
         val reason = when {
             packageBlocked -> "system permission or installer surface"
             passwordField -> "password field is visible"
-            matchedTerm != null -> "sensitive screen term detected: $matchedTerm"
+            matchedTerm != null -> "sensitive screen term detected: ${matchedTerm.term}"
             else -> null
         }
         return PrivacyDecision(
@@ -63,8 +55,13 @@ object PrivacyGuard {
         .replace(phone, "[redacted-phone]")
         .replace(idCard, "[redacted-id]")
         .replace(longNumber, "[redacted-number]")
-        .replace(codeCandidate) { "[redacted-otp]" }
+        .replace(
+            Regex("(?i)(?:code|otp|verification|one[- ]time|\\u9a8c\\u8bc1\\u7801|\\u52a8\\u6001\\u53e3\\u4ee4)[^0-9]{0,16}\\d{4,8}"),
+            "[redacted-otp]",
+        )
         .let { redacted ->
-            if (codeCandidate.containsMatchIn("$context $value")) "[redacted-otp]" else redacted
+            val contextHasCodeLabel = context.contains("code", true) || context.contains("otp", true) ||
+                context.contains("verification", true) || context.contains("\u9a8c\u8bc1\u7801") || context.contains("\u52a8\u6001\u53e3\u4ee4")
+            if (contextHasCodeLabel && value.trim().matches(Regex("\\d{4,8}"))) "[redacted-otp]" else redacted
         }
 }

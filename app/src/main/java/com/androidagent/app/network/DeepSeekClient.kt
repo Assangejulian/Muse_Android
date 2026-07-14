@@ -9,6 +9,7 @@ import com.androidagent.app.agent.TaskPlanException
 import com.androidagent.app.agent.TaskPlanParser
 import com.androidagent.app.agent.TransitionJudgement
 import com.androidagent.app.agent.VerificationResult
+import com.androidagent.app.agent.SensitiveOperationPolicy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -52,6 +53,7 @@ class DeepSeekClient(
             forcedChat || forcedAction -> input.substringAfter(' ', "").trim()
             else -> input.trim()
         }.take(4_000)
+        SensitiveOperationPolicy.validateGoal(cleanInput).getOrThrow()
         val system = """
             You are Muse, a friendly Chinese Android tablet assistant. Decide whether the user wants normal
             conversation or a real device operation. Return exactly one JSON object.
@@ -108,6 +110,7 @@ class DeepSeekClient(
         currentPackage: String? = observation.packageName,
         allowedPackages: Set<String> = allowedPackage?.let(::setOf) ?: emptySet(),
     ): PlannedAction {
+        SensitiveOperationPolicy.validateGoal(goal).getOrThrow()
         requireCompatibleModel(model)
         val system = """
             You control one private Android tablet for a narrow user-requested task.
@@ -117,7 +120,11 @@ class DeepSeekClient(
             ${packageContext(primaryPackage, currentPackage, allowedPackages)}
             Prefer node/text actions. Take one reversible step at a time.
             Never click the same toggle twice. Never declare success merely because the target app launched.
-            Use ensure_toggle when the goal requires a boolean control to be on and the target node exposes state.
+            Use ensure_toggle when the goal requires a boolean control and the target node exposes checked state.
+            Predicate kinds are PACKAGE_FOREGROUND, TEXT_PRESENT, EDITABLE_EQUALS, IME_HIDDEN, ELEMENT_PRESENT,
+            ELEMENT_DISAPPEARED, ELEMENT_ENABLED, ELEMENT_SELECTED, ELEMENT_CHECKED, ELEMENT_TEXT_EQUALS,
+            TOGGLE_STATE(expectedChecked), and auxiliary SEMANTIC_CLAIM. Never use fuzzy ELEMENT_STATE or TOGGLE_ON.
+            Target predicates are proven only after the runtime binds one unique live node; do not invent selectors.
             Use submit_input after exact text readback instead of typing the value again.
             Use finish only when current observable evidence directly proves the entire goal; the runtime Stop Gate
             will independently verify it. Use fail only for a clear non-transient blocker after reversible alternatives
@@ -199,6 +206,7 @@ class DeepSeekClient(
         currentPackage: String? = observation.packageName,
         allowedPackages: Set<String> = allowedPackage?.let(::setOf) ?: emptySet(),
     ): String = withContext(Dispatchers.IO) {
+        SensitiveOperationPolicy.validateGoal(goal).getOrThrow()
         val system = """
             You control one private Android tablet for a narrow user-requested task.
             Return exactly one JSON object and no prose.
@@ -220,7 +228,11 @@ class DeepSeekClient(
             ${packageContext(primaryPackage, currentPackage, allowedPackages)}
             Prefer node/text actions. Take one reversible step at a time.
             Never click the same toggle twice. Never declare success merely because the target app launched.
-            Use ensure_toggle when the goal requires a boolean control to be on and the target node exposes state.
+            Use ensure_toggle when the goal requires a boolean control and the target node exposes checked state.
+            Predicate kinds are PACKAGE_FOREGROUND, TEXT_PRESENT, EDITABLE_EQUALS, IME_HIDDEN, ELEMENT_PRESENT,
+            ELEMENT_DISAPPEARED, ELEMENT_ENABLED, ELEMENT_SELECTED, ELEMENT_CHECKED, ELEMENT_TEXT_EQUALS,
+            TOGGLE_STATE(expectedChecked), and auxiliary SEMANTIC_CLAIM. Never use fuzzy ELEMENT_STATE or TOGGLE_ON.
+            Target predicates are proven only after the runtime binds one unique live node; do not invent selectors.
             Use submit_input after exact text readback instead of typing the value again.
             Use finish only when current observable evidence directly proves the entire goal; the runtime Stop Gate
             will independently verify it. Use fail only for a clear non-transient blocker after reversible alternatives
@@ -280,18 +292,22 @@ class DeepSeekClient(
         failureContext: String = "",
         provider: String = "",
     ): TaskPlan = withContext(Dispatchers.IO) {
+        SensitiveOperationPolicy.validateGoal(goal.originalGoal).getOrThrow()
         val prompt = """
             You are the isolated Manager of an Android GUI agent. Decompose the complete immutable user goal into
             2-8 ordered, app-agnostic milestones. Return one JSON object:
             {"summary":"...","targetAppHint":"...","allowedPackages":["optional explicit package ids"],"milestones":[
               {"id":"m1","kind":"LAUNCH_APP|INPUT|INTERACTION|VERIFICATION|GENERIC","objective":"...","successPredicates":[
-                {"kind":"PACKAGE_FOREGROUND|TEXT_PRESENT|EDITABLE_EQUALS|IME_HIDDEN|ELEMENT_STATE|TOGGLE_ON|SEMANTIC_CLAIM",
-                 "valueRef":"goal_text","literal":"optional","targetPackage":"explicit.package.for-package-predicate",
-                 "target":{"packageName":"...","viewIdResourceName":"...","text":"...","className":"...","bounds":"..."},"description":"observable fact"}
+                {"kind":"PACKAGE_FOREGROUND|TEXT_PRESENT|EDITABLE_EQUALS|IME_HIDDEN|ELEMENT_PRESENT|ELEMENT_DISAPPEARED|ELEMENT_ENABLED|ELEMENT_SELECTED|ELEMENT_CHECKED|ELEMENT_TEXT_EQUALS|TOGGLE_STATE|SEMANTIC_CLAIM",
+                 "valueRef":"goal_text","literal":"optional","expectedChecked":true,"targetPackage":"explicit.package.for-package-predicate",
+                 "targetHint":"abstract description of the target control","target":{"packageName":"optional-after-binding","viewIdResourceName":"optional-after-binding","text":"optional-after-binding","className":"optional","bounds":"optional"},"description":"observable fact"}
               ]}
             ]}
             Use deterministic local predicates whenever possible. A dispatched action is never proof by itself.
-            PACKAGE_FOREGROUND must include targetPackage. TOGGLE_ON, EDITABLE_EQUALS, and ELEMENT_STATE must include a selector that uniquely identifies one node. Never return a semantic-only milestone.
+            You do not see the current Accessibility observation. Do not guess view IDs, tree paths, bounds, or exact selectors.
+            For target predicates emit targetHint and leave target unbound unless a stable target is explicitly known from user input.
+            PACKAGE_FOREGROUND must include targetPackage. TOGGLE_STATE must include expectedChecked. Every target predicate is bound by the runtime from a unique current node before its action; an unbound predicate can never be proven.
+            Never return a semantic-only milestone. SEMANTIC_CLAIM is only auxiliary evidence alongside a deterministic predicate.
             Use literal values only when the user explicitly supplied them or the current observation supplies them.
             Preserve IDs and already proven milestones when revising a plan; add explicit repair milestones for gaps.
 
@@ -346,6 +362,7 @@ class DeepSeekClient(
         afterScreenshotDataUrl: String? = null,
         provider: String = "",
     ): CriticResult = withContext(Dispatchers.IO) {
+        SensitiveOperationPolicy.validateGoal(goal).getOrThrow()
         if (before.stateFingerprint() == after.stateFingerprint() && beforeScreenshotDataUrl == null && afterScreenshotDataUrl == null) {
             return@withContext CriticResult(TransitionJudgement.NO_PROGRESS, "No stable accessibility-state change")
         }
@@ -356,6 +373,7 @@ class DeepSeekClient(
             Never trust the Actor's claim. Return JSON:
             {"judgement":"NO_PROGRESS|PROGRESS|MILESTONE_COMPLETE","evidence":"specific visible fact"}
             MILESTONE_COMPLETE requires direct evidence satisfying: ${milestone.successEvidence}
+            SEMANTIC_CLAIM alone can never complete a milestone. Treat typed predicates and runtime-bound targets as authoritative.
 
             Goal: $goal
             Current milestone: ${milestone.objective}
@@ -408,6 +426,7 @@ class DeepSeekClient(
         evidenceLedger: String = "No milestone evidence recorded",
         provider: String = "",
     ): VerificationResult = withContext(Dispatchers.IO) {
+        SensitiveOperationPolicy.validateGoal(goal.originalGoal).getOrThrow()
         val prompt = """
             Verify whether the Android task is fully complete now. App launch or navigation alone is not success
             for a multi-step goal. Require direct evidence on the current screen and in successful action history.
@@ -427,7 +446,7 @@ class DeepSeekClient(
             apiKey,
             baseUrl,
             model,
-            JSONArray().put(message("system", "Be a strict task-completion verifier. Return JSON only."))
+            JSONArray().put(message("system", "Be a strict task-completion verifier. Typed local predicates and bound targets are authoritative; semantic claims are auxiliary only. Return JSON only."))
                 .put(message("user", content)),
             0.0,
             1_024,

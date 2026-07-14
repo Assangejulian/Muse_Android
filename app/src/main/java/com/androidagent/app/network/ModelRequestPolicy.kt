@@ -23,19 +23,18 @@ internal object ProviderRequestPolicy {
 }
 
 internal object BaseUrlPolicy {
+    /** Model endpoints are always TLS-protected; no loopback HTTP exception exists. */
+    @Suppress("UNUSED_PARAMETER")
     fun validate(baseUrl: String, allowInsecureLocalDevelopment: Boolean = false): String {
         val normalized = baseUrl.trim().trimEnd('/')
         val uri = runCatching { URI(normalized) }.getOrElse { error("Invalid model service Base URL") }
         val scheme = uri.scheme?.lowercase()
         val host = uri.host?.lowercase().orEmpty()
-        require(scheme == "https" || scheme == "http") { "Base URL must use https://" }
-        if (scheme == "http") {
-            val loopback = host == "localhost" || host == "127.0.0.1" || host == "::1"
-            require(loopback || allowInsecureLocalDevelopment) {
-                "Insecure HTTP is only allowed for localhost or explicit local development mode"
-            }
-        }
+        require(scheme == "https") { "Base URL must use https://" }
         require(host.isNotBlank()) { "Base URL must include a host" }
+        require(uri.userInfo == null) { "Base URL must not include user information" }
+        require(uri.query == null) { "Base URL must not include a query" }
+        require(uri.fragment == null) { "Base URL must not include a fragment" }
         return normalized
     }
 }

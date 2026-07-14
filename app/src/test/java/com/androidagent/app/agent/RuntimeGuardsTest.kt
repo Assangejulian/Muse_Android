@@ -40,9 +40,9 @@ class RuntimeGuardsTest {
         val milestone = TaskMilestone(
             "verify",
             "verify",
-            listOf(UiPredicate(UiPredicateKind.TOGGLE_ON, target = ElementSelector(className = "Switch"), description = "state")),
+            listOf(UiPredicate(UiPredicateKind.TOGGLE_ON, target = ElementSelector(text = "toggle", className = "Switch"), description = "state")),
         )
-        val selected = Observation("example.app", listOf(UiNodeSnapshot(1, "", "", "Switch", true, false, "0,0,100,30", selected = true)))
+        val selected = Observation("example.app", listOf(UiNodeSnapshot(1, "toggle", "", "Switch", true, false, "0,0,100,30", selected = true)))
         val unselected = selected.copy(nodes = selected.nodes.map { it.copy(selected = false) })
         assertTrue(MilestoneEvaluator.evaluate(milestone, plan, selected, "example.app").proven)
         assertFalse(MilestoneEvaluator.evaluate(milestone, plan, unselected, "example.app").proven)

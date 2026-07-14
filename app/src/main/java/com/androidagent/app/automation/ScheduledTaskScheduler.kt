@@ -12,6 +12,9 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.androidagent.app.accessibility.AgentController
 import com.androidagent.app.data.SecureSettings
+import com.androidagent.app.agent.RuntimeOutcome
+import com.androidagent.app.agent.RuntimeResult
+import com.androidagent.app.agent.SensitiveOperationPolicy
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import java.security.MessageDigest
@@ -58,6 +61,7 @@ object ScheduledTaskScheduler {
     ) {
         require(request.taskId.isNotBlank()) { "taskId must not be blank" }
         require(request.goal.isNotBlank()) { "goal must not be blank" }
+        SensitiveOperationPolicy.validateGoal(request.goal).getOrThrow()
         val delayMillis = (request.triggerAtMillis - System.currentTimeMillis()).coerceAtLeast(1_000L)
         SecureSettings(context).apply {
             scheduledTaskId = request.taskId
@@ -104,25 +108,92 @@ object ScheduledTaskScheduler {
     }
 }
 
+enum class WorkerDecisionType { SUCCESS, RETRY, FAILURE }
+
+data class ScheduledWorkerDecision(
+    val type: WorkerDecisionType,
+    val outcome: RuntimeOutcome,
+    val reason: String,
+)
+
+object ScheduledWorkerResultMapper {
+    fun map(
+        runtimeResult: RuntimeResult?,
+        accessibilityConnected: Boolean,
+        agentBusy: Boolean,
+        timedOut: Boolean,
+        runAttemptCount: Int,
+    ): ScheduledWorkerDecision {
+        val result = runtimeResult ?: when {
+            timedOut -> RuntimeResult.failure(RuntimeOutcome.TIMEOUT, "Scheduled run timed out")
+            agentBusy -> RuntimeResult.failure(RuntimeOutcome.AGENT_BUSY, "Agent is already running")
+            !accessibilityConnected -> RuntimeResult.failure(RuntimeOutcome.ACCESSIBILITY_DISCONNECTED, "Accessibility service is disconnected")
+            else -> RuntimeResult.failure(RuntimeOutcome.INTERNAL_ERROR, "Scheduled run returned no result")
+        }
+        val retryable = result.outcome in setOf(
+            RuntimeOutcome.TRANSIENT_NETWORK_ERROR,
+            RuntimeOutcome.ACCESSIBILITY_DISCONNECTED,
+            RuntimeOutcome.AGENT_BUSY,
+            RuntimeOutcome.TIMEOUT,
+        )
+        val type = when {
+            result.outcome == RuntimeOutcome.SUCCESS -> WorkerDecisionType.SUCCESS
+            retryable && runAttemptCount < 3 -> WorkerDecisionType.RETRY
+            else -> WorkerDecisionType.FAILURE
+        }
+        return ScheduledWorkerDecision(type, result.outcome, result.reason)
+    }
+}
+
 class ScheduledAgentWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result {
         val settings = SecureSettings(applicationContext)
         val goal = inputData.getString("task_goal").orEmpty().ifBlank { settings.scheduledTaskGoal }
-        if (goal.isBlank() || settings.apiKey.isBlank()) return Result.failure()
-        if (!AgentController.state.value.accessibilityConnected || AgentController.state.value.running) return Result.retry()
+        if (goal.isBlank() || settings.apiKey.isBlank()) {
+            val decision = ScheduledWorkerResultMapper.map(
+                runtimeResult = RuntimeResult.failure(RuntimeOutcome.PERMANENT_PLAN_ERROR, "Scheduled task is missing a goal or API key"),
+                accessibilityConnected = AgentController.state.value.accessibilityConnected,
+                agentBusy = AgentController.state.value.running,
+                timedOut = false,
+                runAttemptCount = runAttemptCount,
+            )
+            return if (decision.type == WorkerDecisionType.RETRY) Result.retry() else Result.failure()
+        }
+        val goalSafetyFailure = SensitiveOperationPolicy.validateGoal(goal).exceptionOrNull()
+        if (goalSafetyFailure != null) return Result.failure()
+        if (!AgentController.state.value.accessibilityConnected || AgentController.state.value.running) {
+            val decision = ScheduledWorkerResultMapper.map(
+                runtimeResult = null,
+                accessibilityConnected = AgentController.state.value.accessibilityConnected,
+                agentBusy = AgentController.state.value.running,
+                timedOut = false,
+                runAttemptCount = runAttemptCount,
+            )
+            return if (decision.type == WorkerDecisionType.RETRY) Result.retry() else Result.failure()
+        }
         val wakeLock = (applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "Muse:ScheduledAgent")
         wakeLock.acquire(TimeUnit.MINUTES.toMillis(9))
         return try {
-            settings.taskGoal = goal
-            AgentController.start(applicationContext, settings)
+            AgentController.start(applicationContext, settings, goalOverride = goal)
             delay(1_000)
             val finished = withTimeoutOrNull(TimeUnit.MINUTES.toMillis(8)) {
                 while (AgentController.state.value.running) delay(500)
                 true
             } ?: false
             if (!finished) AgentController.stopWithReason("Scheduled run exceeded its worker deadline")
-            if (finished && AgentController.state.value.status.startsWith("Succeeded")) Result.success() else Result.retry()
+            val decision = ScheduledWorkerResultMapper.map(
+                runtimeResult = AgentController.lastResult,
+                accessibilityConnected = AgentController.state.value.accessibilityConnected,
+                agentBusy = AgentController.state.value.running,
+                timedOut = !finished,
+                runAttemptCount = runAttemptCount,
+            )
+            when (decision.type) {
+                WorkerDecisionType.SUCCESS -> Result.success()
+                WorkerDecisionType.RETRY -> Result.retry()
+                WorkerDecisionType.FAILURE -> Result.failure()
+            }
         } finally {
             if (AgentController.state.value.running && AgentController.state.value.goal == goal) {
                 AgentController.stopWithReason("Scheduled worker finished before the agent stopped")

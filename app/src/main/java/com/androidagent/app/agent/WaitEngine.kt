@@ -6,6 +6,16 @@ sealed interface WaitResult<out T> {
 }
 
 object WaitEngine {
+    /** A plain Wait action is a bounded delay followed by one observation. */
+    suspend fun waitForDuration(
+        milliseconds: Long,
+        observe: suspend () -> Observation,
+    ): WaitResult<Observation> {
+        require(milliseconds >= 0)
+        kotlinx.coroutines.delay(milliseconds)
+        return WaitResult.Satisfied(observe(), milliseconds)
+    }
+
     suspend fun waitForScreenChange(
         before: Observation,
         timeoutMillis: Long = 3_000L,

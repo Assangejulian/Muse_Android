@@ -13,7 +13,42 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
-data class RuntimeResult(val succeeded: Boolean, val reason: String)
+enum class RuntimeOutcome {
+    SUCCESS,
+    TRANSIENT_NETWORK_ERROR,
+    ACCESSIBILITY_DISCONNECTED,
+    AGENT_BUSY,
+    PERMANENT_PLAN_ERROR,
+    SAFETY_BLOCKED,
+    USER_CANCELLED,
+    TIMEOUT,
+    INTERNAL_ERROR,
+}
+
+data class RuntimeResult(val outcome: RuntimeOutcome, val reason: String) {
+    constructor(succeeded: Boolean, reason: String) : this(
+        if (succeeded) RuntimeOutcome.SUCCESS else runtimeOutcomeFromReason(reason),
+        reason,
+    )
+
+    val succeeded: Boolean get() = outcome == RuntimeOutcome.SUCCESS
+
+    companion object {
+        fun failure(outcome: RuntimeOutcome, reason: String): RuntimeResult = RuntimeResult(outcome, reason)
+    }
+}
+
+private fun runtimeOutcomeFromReason(reason: String): RuntimeOutcome = when {
+    reason.contains("SAFETY_BLOCKED", true) || reason.contains("safety", true) ||
+        reason.contains("privacy", true) || reason.contains("sensitive", true) -> RuntimeOutcome.SAFETY_BLOCKED
+    reason.contains("Manager plan", true) || reason.contains("plan failed", true) -> RuntimeOutcome.PERMANENT_PLAN_ERROR
+    reason.contains("network", true) || reason.contains("HTTP 429", true) || reason.contains("HTTP 5", true) -> RuntimeOutcome.TRANSIENT_NETWORK_ERROR
+    reason.contains("Accessibility", true) -> RuntimeOutcome.ACCESSIBILITY_DISCONNECTED
+    reason.contains("busy", true) -> RuntimeOutcome.AGENT_BUSY
+    reason.contains("deadline", true) || reason.contains("timeout", true) -> RuntimeOutcome.TIMEOUT
+    reason.contains("cancel", true) -> RuntimeOutcome.USER_CANCELLED
+    else -> RuntimeOutcome.INTERNAL_ERROR
+}
 
 private data class ScreenshotCapture(
     val dataUrl: String? = null,
@@ -34,6 +69,7 @@ class AgentRuntime(
     private val onPhase: (step: Int, phase: String) -> Unit,
     private val onLog: (String) -> Unit,
     private val onAction: (String) -> Unit = {},
+    private val goalOverride: String? = null,
 ) {
     private val client = DeepSeekClient()
     private val executionHistory = ExecutionHistory()
@@ -41,7 +77,7 @@ class AgentRuntime(
     private var lastWaitTimedOut = false
 
     suspend fun run(): RuntimeResult {
-        val immutableGoal = settings.taskGoal
+        val immutableGoal = goalOverride?.trim().takeUnless { it.isNullOrBlank() } ?: settings.taskGoal
         val apiKey = settings.apiKey
         val apps = AppCatalog(context.applicationContext).list()
         val launchablePackages = apps.mapTo(mutableSetOf()) { it.packageName }
@@ -75,6 +111,10 @@ class AgentRuntime(
                 if (settings.visionEnabled && !useVision) {
                     onLog("Vision is enabled but no vision API key is configured; using node-only mode")
                 }
+                val goalSafetyFailure = SensitiveOperationPolicy.validateGoal(immutableGoal).exceptionOrNull()
+                if (goalSafetyFailure != null) {
+                    return@withTimeout finish(false, "SAFETY_BLOCKED: ${goalSafetyFailure.message.orEmpty()}")
+                }
 
                 var plan = try {
                     client.createTaskPlan(
@@ -103,6 +143,9 @@ class AgentRuntime(
                 plan = ensureLaunchMilestone(plan, lockedPackage)
 
                 var ledger = RunLedger(plan)
+                val predicateBindings = PredicateBindingStore()
+                fun expectedRecoveryPackage(milestone: TaskMilestone?): String? =
+                    expectedPackage(milestone, lockedPackage, predicateBindings)
                 var guard = ToolGuard(plan, packagePolicy)
                 val history = mutableListOf("MANAGER_PLAN:\n${plan.compactText(0)}")
                 val toolTurns = mutableListOf<PlannerTurn>()
@@ -121,11 +164,29 @@ class AgentRuntime(
                     val rawBefore = observeWithPackage(lockedPackage)
                     if (step == 1 && !lockedPackage.isNullOrBlank() && rawBefore.packageName != lockedPackage) {
                         val launch = AgentAction.LaunchApp(lockedPackage!!)
+                        val launchSafetyFailure = SafetyGuard.validate(
+                            launch,
+                            rawBefore,
+                            packagePolicy,
+                            launchablePackages,
+                            goalContext,
+                        ).exceptionOrNull()
+                        if (launchSafetyFailure != null) {
+                            return@withTimeout finish(false, "SAFETY_BLOCKED: ${launchSafetyFailure.message.orEmpty()}")
+                        }
                         onPhase(step, "Acting")
                         onAction(describeAction(launch))
                         if (!service.execute(launch, rawBefore)) {
-                            val recovery = recoveryPolicy.decide(RecoveryReason.APP_NOT_RESPONDING, "initial-launch")
-                            val recovered = executeRecovery(recovery, step, rawBefore, lockedPackage, executionHistory)
+                            val recovery = recoveryPolicy.decide(
+                                RecoveryContext(
+                                    expectedPackage = lockedPackage,
+                                    currentPackage = rawBefore.packageName,
+                                    currentMilestoneId = "launch",
+                                    reason = RecoveryReason.APP_NOT_RESPONDING,
+                                    failedAction = launch,
+                                ),
+                            )
+                            val recovered = executeRecovery(recovery, step, rawBefore, lockedPackage, executionHistory, lockedPackage, ledger.currentMilestone, launch)
                             traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
                             if (!recovered.success) return@withTimeout finish(false, "Unable to launch the locked target app: ${recovered.detail}")
                             continue
@@ -140,8 +201,16 @@ class AgentRuntime(
                     }
                     val packageFailure = packageBoundaryFailure(rawBefore, lockedPackage, packagePolicy)
                     if (packageFailure != null) {
-                        val decision = recoveryPolicy.decide(RecoveryReason.WRONG_PACKAGE, rawBefore.packageName)
-                        val recovered = executeRecovery(decision, step, rawBefore, lockedPackage, executionHistory)
+                        val decision = recoveryPolicy.decide(
+                            RecoveryContext(
+                                expectedPackage = expectedRecoveryPackage(ledger.currentMilestone),
+                                currentPackage = rawBefore.packageName,
+                                currentMilestoneId = ledger.currentMilestone?.id,
+                                currentMilestoneKind = ledger.currentMilestone?.kind,
+                                reason = RecoveryReason.WRONG_PACKAGE,
+                            ),
+                        )
+                            val recovered = executeRecovery(decision, step, rawBefore, lockedPackage, executionHistory, expectedRecoveryPackage(ledger.currentMilestone), ledger.currentMilestone)
                         traceStore.event(runId, "RECOVERY", mapOf("reason" to decision.reason.name, "action" to decision.action.name, "result" to recovered.detail))
                         if (!recovered.success) return@withTimeout finish(false, recovered.detail)
                         if (decision.action == RecoveryAction.REPLAN) pendingReplanReason = packageFailure
@@ -184,6 +253,11 @@ class AgentRuntime(
                         }
                         val completed = ledger.currentMilestoneIndex
                         val prepared = prepareRevisedPlan(revised, plan, completed, lockedPackage)
+                        predicateBindings.retainCompleted(
+                            plan,
+                            prepared.first,
+                            plan.milestones.take(completed).mapTo(mutableSetOf()) { it.id },
+                        )
                         plan = prepared.first
                         packagePolicy = mergePlanPackages(packagePolicy, plan.allowedPackages, launchablePackages)
                         ledger.replacePlan(plan, prepared.second)
@@ -208,6 +282,7 @@ class AgentRuntime(
                             successfulToolCalls,
                             lockedPackage,
                             packagePolicy,
+                            predicateBindings,
                         )
                         if (verified.done) {
                             return@withTimeout finish(true, verified.reason)
@@ -226,6 +301,11 @@ class AgentRuntime(
                         )
                         val completed = ledger.currentMilestoneIndex
                         val prepared = prepareRevisedPlan(revised, plan, completed, lockedPackage)
+                        predicateBindings.retainCompleted(
+                            plan,
+                            prepared.first,
+                            plan.milestones.take(completed).mapTo(mutableSetOf()) { it.id },
+                        )
                         plan = prepared.first
                         packagePolicy = mergePlanPackages(packagePolicy, plan.allowedPackages, launchablePackages)
                         ledger.replacePlan(plan, prepared.second)
@@ -235,10 +315,11 @@ class AgentRuntime(
                         continue
                     }
 
-                    val deterministicBefore = MilestoneEvaluator.evaluate(milestone, plan, before, lockedPackage)
+                    val deterministicBefore = MilestoneEvaluator.evaluate(milestone, plan, before, lockedPackage, predicateBindings)
                     if (deterministicBefore.proven) {
                         val proof = deterministicBefore.details.joinToString(" | ")
                         history += "MILESTONE_PROVEN: ${ledger.advance(proof)}"
+                        recoveryPolicy.resetFailures()
                         traceStore.event(runId, "MILESTONE_PROVEN", mapOf("id" to milestone.id, "evidence" to proof, "source" to "deterministic"))
                         onLog("Milestone ${milestone.id} verified locally")
                         continue
@@ -247,11 +328,16 @@ class AgentRuntime(
                     val cycle = ledger.cyclePeriod()
                     if (ledger.noProgressCount >= MAX_NO_PROGRESS || (cycle != null && ledger.noProgressCount >= 2)) {
                         val recovery = recoveryPolicy.decide(
-                            if (cycle != null) RecoveryReason.ABAB_LOOP else RecoveryReason.SCREEN_UNCHANGED,
-                            milestone.id,
+                            RecoveryContext(
+                                expectedPackage = expectedRecoveryPackage(milestone),
+                                currentPackage = before.packageName,
+                                currentMilestoneId = milestone.id,
+                                currentMilestoneKind = milestone.kind,
+                                reason = if (cycle != null) RecoveryReason.ABAB_LOOP else RecoveryReason.SCREEN_UNCHANGED,
+                            ),
                         )
                         history += "RECOVERY: ${recovery.reason} -> ${recovery.action} (${recovery.detail})"
-                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory)
+                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone)
                         traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
                         if (!recovered.success) return@withTimeout finish(false, recovered.detail)
                         if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = recovery.reason.name
@@ -309,8 +395,17 @@ class AgentRuntime(
                             if (modelFailures >= MAX_MODEL_FAILURES || isFatalModelError(error)) {
                                 return@withTimeout finish(false, reason)
                             }
-                            val recovery = recoveryPolicy.decide(RecoveryReason.NETWORK_ERROR, "planner")
-                            val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory)
+                            val recovery = recoveryPolicy.decide(
+                                RecoveryContext(
+                                    expectedPackage = expectedRecoveryPackage(milestone),
+                                    currentPackage = before.packageName,
+                                    currentMilestoneId = milestone.id,
+                                    currentMilestoneKind = milestone.kind,
+                                    failedAction = null,
+                                    reason = RecoveryReason.NETWORK_ERROR,
+                                ),
+                            )
+                            val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone)
                             traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
                             if (!recovered.success) return@withTimeout finish(false, recovered.detail)
                             if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = reason
@@ -357,6 +452,7 @@ class AgentRuntime(
                             successfulToolCalls,
                             lockedPackage,
                             packagePolicy,
+                            predicateBindings,
                         )
                         if (verification.done) {
                             recordTurn(toolTurns, planned, toolResultJson(true, proposed, before, before, "verified_complete", verification.reason))
@@ -373,6 +469,11 @@ class AgentRuntime(
                             val revised = replan(plan, ledger, goalContext, appCatalog, targetHint, apiKey, settings.modelBaseUrl, settings.modelName, verification.reason)
                             val completed = ledger.currentMilestoneIndex
                             val prepared = prepareRevisedPlan(revised, plan, completed, lockedPackage)
+                            predicateBindings.retainCompleted(
+                                plan,
+                                prepared.first,
+                                plan.milestones.take(completed).mapTo(mutableSetOf()) { it.id },
+                            )
                             plan = prepared.first
                             packagePolicy = mergePlanPackages(packagePolicy, plan.allowedPackages, launchablePackages)
                             ledger.replacePlan(plan, prepared.second)
@@ -392,6 +493,11 @@ class AgentRuntime(
                         val revised = replan(plan, ledger, goalContext, appCatalog, targetHint, apiKey, settings.modelBaseUrl, settings.modelName, proposed.reason)
                         val completed = ledger.currentMilestoneIndex
                         val prepared = prepareRevisedPlan(revised, plan, completed, lockedPackage)
+                        predicateBindings.retainCompleted(
+                            plan,
+                            prepared.first,
+                            plan.milestones.take(completed).mapTo(mutableSetOf()) { it.id },
+                        )
                         plan = prepared.first
                         packagePolicy = mergePlanPackages(packagePolicy, plan.allowedPackages, launchablePackages)
                         ledger.replacePlan(plan, prepared.second)
@@ -410,8 +516,17 @@ class AgentRuntime(
                         ledger.record(StepTrace(milestone.id, before.observationId, proposed.toString(), before.observationId, TransitionJudgement.NO_PROGRESS, reason))
                         traceStore.event(runId, "PRE_TOOL_BLOCKED", mapOf("action" to TraceSanitizer.action(proposed), "reason" to reason))
                         onLog("Tool blocked: $reason")
-                        val recovery = recoveryPolicy.decide(classifyRecoveryReason(proposed, reason), milestone.id)
-                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory)
+                        val recovery = recoveryPolicy.decide(
+                            RecoveryContext(
+                                expectedPackage = expectedRecoveryPackage(milestone),
+                                currentPackage = before.packageName,
+                                currentMilestoneId = milestone.id,
+                                currentMilestoneKind = milestone.kind,
+                                failedAction = proposed,
+                                reason = classifyRecoveryReason(proposed, reason),
+                            ),
+                        )
+                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, proposed)
                         traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
                         if (!recovered.success) return@withTimeout finish(false, recovered.detail)
                         if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = reason
@@ -423,8 +538,40 @@ class AgentRuntime(
                         recordTurn(toolTurns, planned, toolResultJson(false, action, before, before, "target_required", reason))
                         history += "PRE_TOOL_BLOCKED: $action because $reason"
                         ledger.record(StepTrace(milestone.id, before.observationId, action.toString(), before.observationId, TransitionJudgement.NO_PROGRESS, reason))
-                        val recovery = recoveryPolicy.decide(RecoveryReason.TARGET_MISSING, milestone.id)
-                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory)
+                        val recovery = recoveryPolicy.decide(
+                            RecoveryContext(
+                                expectedPackage = expectedRecoveryPackage(milestone),
+                                currentPackage = before.packageName,
+                                currentMilestoneId = milestone.id,
+                                currentMilestoneKind = milestone.kind,
+                                failedAction = action,
+                                reason = RecoveryReason.TARGET_MISSING,
+                            ),
+                        )
+                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, action)
+                        if (!recovered.success) return@withTimeout finish(false, recovered.detail)
+                        if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = reason
+                        continue
+                    }
+
+                    val binding = predicateBindings.bindAction(milestone, action, before)
+                    if (!binding.bound) {
+                        val reason = "predicate target binding rejected: ${binding.reason}"
+                        recordTurn(toolTurns, planned, toolResultJson(false, action, before, before, "ambiguous_target", reason))
+                        history += "PRE_TOOL_BLOCKED: $action because $reason"
+                        ledger.record(StepTrace(milestone.id, before.observationId, action.toString(), before.observationId, TransitionJudgement.NO_PROGRESS, reason))
+                        val recovery = recoveryPolicy.decide(
+                            RecoveryContext(
+                                expectedPackage = expectedRecoveryPackage(milestone),
+                                currentPackage = before.packageName,
+                                currentMilestoneId = milestone.id,
+                                currentMilestoneKind = milestone.kind,
+                                failedAction = action,
+                                reason = RecoveryReason.AMBIGUOUS_TARGET,
+                            ),
+                        )
+                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, action)
+                        traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
                         if (!recovered.success) return@withTimeout finish(false, recovered.detail)
                         if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = reason
                         continue
@@ -444,8 +591,17 @@ class AgentRuntime(
                         history += "PRE_TOOL_BLOCKED: $action because $repeatedReason"
                         ledger.record(StepTrace(milestone.id, before.observationId, action.toString(), before.observationId, TransitionJudgement.NO_PROGRESS, repeatedReason))
                         onLog("Duplicate strategy blocked")
-                        val recovery = recoveryPolicy.decide(RecoveryReason.REPEATED_ACTION, milestone.id)
-                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory)
+                        val recovery = recoveryPolicy.decide(
+                            RecoveryContext(
+                                expectedPackage = expectedRecoveryPackage(milestone),
+                                currentPackage = before.packageName,
+                                currentMilestoneId = milestone.id,
+                                currentMilestoneKind = milestone.kind,
+                                failedAction = action,
+                                reason = RecoveryReason.REPEATED_ACTION,
+                            ),
+                        )
+                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, action)
                         traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
                         if (!recovered.success) return@withTimeout finish(false, recovered.detail)
                         if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = repeatedReason
@@ -466,7 +622,7 @@ class AgentRuntime(
                         continue
                     }
 
-                    val safetyFailure = SafetyGuard.validate(action, before, packagePolicy, launchablePackages).exceptionOrNull()
+                    val safetyFailure = SafetyGuard.validate(action, before, packagePolicy, launchablePackages, goalContext).exceptionOrNull()
                     if (safetyFailure != null) {
                         val reason = safetyFailure.message ?: "safety policy rejected the action"
                         recordTurn(toolTurns, planned, toolResultJson(false, action, before, before, "safety_rejected", reason))
@@ -474,8 +630,17 @@ class AgentRuntime(
                         ledger.record(StepTrace(milestone.id, before.observationId, action.toString(), before.observationId, TransitionJudgement.NO_PROGRESS, reason))
                         traceStore.event(runId, "PRE_TOOL_BLOCKED", mapOf("action" to TraceSanitizer.action(action), "reason" to reason))
                         onLog("Safety guard blocked: $reason")
-                        val recovery = recoveryPolicy.decide(classifyRecoveryReason(action, reason), milestone.id)
-                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory)
+                        val recovery = recoveryPolicy.decide(
+                            RecoveryContext(
+                                expectedPackage = expectedRecoveryPackage(milestone),
+                                currentPackage = before.packageName,
+                                currentMilestoneId = milestone.id,
+                                currentMilestoneKind = milestone.kind,
+                                failedAction = action,
+                                reason = classifyRecoveryReason(action, reason),
+                            ),
+                        )
+                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, action)
                         traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
                         if (!recovered.success) return@withTimeout finish(false, recovered.detail)
                         if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = reason
@@ -495,8 +660,17 @@ class AgentRuntime(
                         history += "TOOL_RESULT: $feedback"
                         executionHistory.record(ActionRecord(step, action, false, before.observationId, before.observationId, "${execution.status}: $reason"))
                         traceStore.event(runId, "TOOL_RESULT", mapOf("action" to TraceSanitizer.action(action), "status" to "FAILED", "before" to before.observationId))
-                        val recovery = recoveryPolicy.decide(classifyRecoveryReason(action, execution.status), milestone.id)
-                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory)
+                        val recovery = recoveryPolicy.decide(
+                            RecoveryContext(
+                                expectedPackage = expectedRecoveryPackage(milestone),
+                                currentPackage = before.packageName,
+                                currentMilestoneId = milestone.id,
+                                currentMilestoneKind = milestone.kind,
+                                failedAction = action,
+                                reason = classifyRecoveryReason(action, execution.status),
+                            ),
+                        )
+                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, action)
                         traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
                         if (!recovered.success) return@withTimeout finish(false, recovered.detail)
                         if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = reason
@@ -519,8 +693,17 @@ class AgentRuntime(
                     val rawAfter = awaitStableObservation(rawBefore, action)
                     if (lastWaitTimedOut) {
                         val reason = "screen did not settle after ${TraceSanitizer.action(action)}"
-                        val recovery = recoveryPolicy.decide(RecoveryReason.APP_NOT_RESPONDING, milestone.id)
-                        val recovered = executeRecovery(recovery, step, rawAfter, lockedPackage, executionHistory)
+                        val recovery = recoveryPolicy.decide(
+                            RecoveryContext(
+                                expectedPackage = expectedRecoveryPackage(milestone),
+                                currentPackage = rawAfter.packageName,
+                                currentMilestoneId = milestone.id,
+                                currentMilestoneKind = milestone.kind,
+                                reason = RecoveryReason.APP_NOT_RESPONDING,
+                                failedAction = action,
+                            ),
+                        )
+                        val recovered = executeRecovery(recovery, step, rawAfter, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, action)
                         traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
                         if (!recovered.success) return@withTimeout finish(false, reason)
                         if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = reason
@@ -529,8 +712,17 @@ class AgentRuntime(
                     val postPackageFailure = packageBoundaryFailure(rawAfter, lockedPackage, packagePolicy)
                     if (postPackageFailure != null) {
                         traceStore.event(runId, "PACKAGE_BOUNDARY_BLOCKED", mapOf("reason" to postPackageFailure, "package" to rawAfter.packageName))
-                        val recovery = recoveryPolicy.decide(RecoveryReason.WRONG_PACKAGE, rawAfter.packageName)
-                        val recovered = executeRecovery(recovery, step, rawAfter, lockedPackage, executionHistory)
+                        val recovery = recoveryPolicy.decide(
+                            RecoveryContext(
+                                expectedPackage = expectedRecoveryPackage(milestone),
+                                currentPackage = rawAfter.packageName,
+                                currentMilestoneId = milestone.id,
+                                currentMilestoneKind = milestone.kind,
+                                reason = RecoveryReason.WRONG_PACKAGE,
+                                failedAction = action,
+                            ),
+                        )
+                        val recovered = executeRecovery(recovery, step, rawAfter, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, action)
                         traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
                         if (!recovered.success) return@withTimeout finish(false, recovered.detail)
                         if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = postPackageFailure
@@ -544,8 +736,18 @@ class AgentRuntime(
                     }
                     val after = afterPrivacy.observation
                     ledger.observe(after)
+                    if (before.packageName != after.packageName) {
+                        val fromPackage = before.packageName.ifBlank { "unknown" }
+                        val toPackage = after.packageName.ifBlank { "unknown" }
+                        history += "PACKAGE_SWITCH: $fromPackage -> $toPackage"
+                        traceStore.event(
+                            runId,
+                            "PACKAGE_SWITCH",
+                            mapOf("fromPackage" to fromPackage, "toPackage" to toPackage),
+                        )
+                    }
 
-                    val deterministicAfter = MilestoneEvaluator.evaluate(milestone, plan, after, lockedPackage)
+                    val deterministicAfter = MilestoneEvaluator.evaluate(milestone, plan, after, lockedPackage, predicateBindings)
                     val changed = before.observationId != after.observationId
                     var judgement = when {
                         deterministicAfter.proven -> TransitionJudgement.MILESTONE_COMPLETE
@@ -590,7 +792,7 @@ class AgentRuntime(
                         } catch (error: Throwable) {
                             CriticResult(TransitionJudgement.PROGRESS, "Local state changed; semantic critic unavailable: ${error.message.orEmpty()}")
                         }
-                        if (critic.judgement == TransitionJudgement.MILESTONE_COMPLETE && semanticCompletionAllowed(milestone, plan, after, lockedPackage)) {
+                        if (critic.judgement == TransitionJudgement.MILESTONE_COMPLETE && semanticCompletionAllowed(milestone, plan, after, lockedPackage, predicateBindings)) {
                             judgement = TransitionJudgement.MILESTONE_COMPLETE
                             evidence = critic.evidence
                         } else if (critic.judgement == TransitionJudgement.NO_PROGRESS) {
@@ -628,7 +830,10 @@ class AgentRuntime(
                     onLog("Result: ${translateJudgement(judgement)} 路 ${evidence.take(100)}")
                     if (judgement == TransitionJudgement.MILESTONE_COMPLETE) {
                         history += "MILESTONE_PROVEN: ${ledger.advance(evidence)}"
+                        recoveryPolicy.resetFailures()
                         traceStore.event(runId, "MILESTONE_PROVEN", mapOf("id" to milestone.id, "evidence" to evidence, "source" to "postcondition"))
+                    } else if (judgement == TransitionJudgement.PROGRESS) {
+                        recoveryPolicy.resetFailures()
                     }
                 }
 
@@ -661,6 +866,7 @@ class AgentRuntime(
         successfulToolCalls: Int,
         lockedPackage: String?,
         packagePolicy: PackagePolicy,
+        predicateBindings: PredicateBindingStore? = null,
     ): VerificationResult {
         onPhase(step, "Verifying")
         ledger.currentMilestone?.let {
@@ -700,9 +906,9 @@ class AgentRuntime(
         }
 
         val finalMilestone = plan.milestones.lastOrNull()
-        val hasToggleContract = finalMilestone?.successPredicates?.any { it.kind == UiPredicateKind.TOGGLE_ON } == true
+        val hasToggleContract = finalMilestone?.successPredicates?.any { it.kind == UiPredicateKind.TOGGLE_STATE } == true
         if (hasToggleContract) {
-            val local = MilestoneEvaluator.evaluate(finalMilestone!!, plan, observation, lockedPackage)
+            val local = MilestoneEvaluator.evaluate(finalMilestone!!, plan, observation, lockedPackage, predicateBindings)
             if (!local.proven) return VerificationResult(false, "Toggle completion lacks a deterministic ON state")
         }
         return verification
@@ -733,17 +939,14 @@ class AgentRuntime(
 
     private suspend fun awaitStableObservation(before: Observation, action: AgentAction): Observation {
         lastWaitTimedOut = false
+        if (action is AgentAction.Wait) {
+            return (WaitEngine.waitForDuration(action.milliseconds, service::observe) as WaitResult.Satisfied).value
+        }
         val result = when (action) {
             is AgentAction.LaunchApp -> WaitEngine.waitForPackage(
                 packageName = action.packageName,
                 timeoutMillis = LAUNCH_SETTLE_MS,
                 pollMillis = STABILITY_POLL_MS,
-                observe = service::observe,
-            )
-            is AgentAction.Wait -> WaitEngine.waitForScreenStable(
-                timeoutMillis = action.milliseconds,
-                pollMillis = STABILITY_POLL_MS,
-                requiredSamples = REQUIRED_STABLE_SAMPLES,
                 observe = service::observe,
             )
             else -> WaitEngine.waitForScreenStable(
@@ -838,6 +1041,22 @@ class AgentRuntime(
         }
     }
 
+    private fun expectedPackage(
+        milestone: TaskMilestone?,
+        primaryPackage: String?,
+        bindings: PredicateBindingStore? = null,
+    ): String? {
+        val explicit = milestone?.successPredicates
+            ?.firstOrNull { it.kind == UiPredicateKind.PACKAGE_FOREGROUND }
+            ?.let { it.targetPackage ?: it.target?.packageName }
+        if (!explicit.isNullOrBlank()) return explicit
+        val boundPackage = milestone?.successPredicates?.indices
+            ?.asSequence()
+            ?.mapNotNull { index -> bindings?.get(milestone.id, index)?.boundPackage }
+            ?.firstOrNull { it.isNotBlank() }
+        return boundPackage ?: primaryPackage
+    }
+
     private fun mergePlanPackages(
         current: PackagePolicy,
         requested: Set<String>,
@@ -857,6 +1076,7 @@ class AgentRuntime(
         plan: TaskPlan,
         observation: Observation,
         targetPackage: String?,
+        predicateBindings: PredicateBindingStore? = null,
     ): Boolean {
         val hasHardPredicate = milestone.successPredicates.any {
             it.kind in setOf(
@@ -864,8 +1084,13 @@ class AgentRuntime(
                 UiPredicateKind.TEXT_PRESENT,
                 UiPredicateKind.EDITABLE_EQUALS,
                 UiPredicateKind.IME_HIDDEN,
-                UiPredicateKind.ELEMENT_STATE,
-                UiPredicateKind.TOGGLE_ON,
+                UiPredicateKind.ELEMENT_PRESENT,
+                UiPredicateKind.ELEMENT_DISAPPEARED,
+                UiPredicateKind.ELEMENT_ENABLED,
+                UiPredicateKind.ELEMENT_SELECTED,
+                UiPredicateKind.ELEMENT_CHECKED,
+                UiPredicateKind.ELEMENT_TEXT_EQUALS,
+                UiPredicateKind.TOGGLE_STATE,
             )
         }
         if (!hasHardPredicate) return false
@@ -874,6 +1099,7 @@ class AgentRuntime(
             plan,
             observation,
             targetPackage,
+            predicateBindings,
         ).proven
         return hardPredicatesProven
     }
@@ -910,16 +1136,7 @@ class AgentRuntime(
         .toString()
 
     private fun observationDelta(before: Observation, after: Observation): String {
-        val oldText = before.nodes.asSequence().filter { it.visible && !it.password }.map { "${it.text} ${it.description}".trim() }.filter(String::isNotBlank).toSet()
-        val newText = after.nodes.asSequence().filter { it.visible && !it.password }.map { "${it.text} ${it.description}".trim() }.filter(String::isNotBlank).toSet()
-        val added = (newText - oldText).take(5)
-        val removed = (oldText - newText).take(3)
-        return buildString {
-            append("UI changed")
-            if (before.packageName != after.packageName) append("; package ${before.packageName} -> ${after.packageName}")
-            if (added.isNotEmpty()) append("; added=${added.joinToString(" | ")}")
-            if (removed.isNotEmpty()) append("; removed=${removed.joinToString(" | ")}")
-        }.take(800)
+        return TraceSanitizer.observationDelta(before, after)
     }
 
     private fun describeAction(action: AgentAction): String = when (action) {
@@ -939,15 +1156,7 @@ class AgentRuntime(
     }
 
     private fun actionTarget(action: AgentAction, observation: Observation): String = when (action) {
-        is AgentAction.ClickNode -> observation.nodes.firstOrNull { it.id == action.nodeId }?.let {
-            "#${it.id} text=${it.text.take(80)} description=${it.description.take(80)} viewId=${it.viewId} bounds=${it.bounds}"
-        } ?: "missing node #${action.nodeId}"
-        is AgentAction.ClickText -> "text=${action.text.take(120)}"
-        is AgentAction.InputText -> "editable=#${action.nodeId ?: 0} chars=${action.text.length}"
-        is AgentAction.SubmitInput -> "editable=#${action.nodeId ?: 0}"
-        is AgentAction.TapPoint -> "normalized=${action.x},${action.y}"
-        is AgentAction.EnsureToggle -> "toggle=#${action.nodeId} desired=${action.desired}"
-        else -> ""
+        else -> TraceSanitizer.actionTarget(action, observation)
     }
 
     private fun resolveTarget(configured: String, goal: String, apps: List<Pair<String, String>>): String? {
@@ -976,10 +1185,16 @@ class AgentRuntime(
         before: Observation,
         lockedPackage: String?,
         history: ExecutionHistory,
+        expectedPackage: String? = null,
+        currentMilestone: TaskMilestone? = null,
+        failedAction: AgentAction? = null,
     ): RecoveryExecution {
         val result = when (decision.action) {
             RecoveryAction.REOBSERVE -> RecoveryExecution(true, service.observe(), "re-observed current screen")
-            RecoveryAction.WAIT -> {
+            RecoveryAction.WAIT -> if (decision.reason == RecoveryReason.NETWORK_ERROR) {
+                delay(recoveryPolicy.networkBackoffMillis(decision.failureCount))
+                RecoveryExecution(true, service.observe(), "network backoff completed")
+            } else {
                 when (val waited = WaitEngine.waitForScreenStable(
                     timeoutMillis = RECOVERY_WAIT_MS,
                     pollMillis = RECOVERY_POLL_MS,
@@ -995,7 +1210,7 @@ class AgentRuntime(
                 RecoveryExecution(success, service.observe(), if (success) "back/dismiss executed" else "back/dismiss failed")
             }
             RecoveryAction.RELAUNCH -> {
-                val target = lockedPackage
+                val target = expectedPackage ?: lockedPackage
                 if (target.isNullOrBlank()) {
                     RecoveryExecution(false, service.observe(), "relaunch requested without a locked package")
                 } else {

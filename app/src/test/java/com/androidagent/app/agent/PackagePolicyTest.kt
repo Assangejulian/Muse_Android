@@ -57,4 +57,15 @@ class PackagePolicyTest {
             ),
         )
     }
+
+    @Test
+    fun temporaryExternalPackagesMustBeExplicitlyDeclared() {
+        val policy = PackagePolicy(
+            primaryPackage = "primary.app",
+            allowTemporaryExternalPackages = true,
+            temporaryPackages = setOf("picker.app"),
+        )
+        assertTrue(policy.allows("picker.app"))
+        assertFalse(policy.allows("arbitrary.app"))
+    }
 }

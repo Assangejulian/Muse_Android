@@ -38,6 +38,32 @@ data class ElementSelector(
     val bounds: String? = null,
 )
 
+object ElementSelectorValidation {
+    private val boundsPattern = Regex("^-?\\d+,-?\\d+,-?\\d+,-?\\d+$")
+
+    fun validate(selector: ElementSelector): Result<Unit> = runCatching {
+        require(selector.packageName?.isNotBlank() != false) { "selector.packageName must not be blank" }
+        require(selector.viewIdResourceName?.isNotBlank() != false) { "selector.viewIdResourceName must not be blank" }
+        require(selector.text?.isNotBlank() != false) { "selector.text must not be blank" }
+        require(selector.description?.isNotBlank() != false) { "selector.description must not be blank" }
+        require(selector.className?.isNotBlank() != false) { "selector.className must not be blank" }
+        require(selector.treePath == null || selector.treePath.isNotEmpty()) { "selector.treePath must not be empty" }
+        require(selector.treePath == null || selector.treePath.all { it >= 0 }) { "selector.treePath contains a negative index" }
+        require(selector.bounds == null || boundsPattern.matches(selector.bounds)) { "selector.bounds has invalid format" }
+        selector.bounds?.let {
+            val values = it.split(',').map(String::toInt)
+            require(values[2] > values[0] && values[3] > values[1]) { "selector.bounds must have positive size" }
+        }
+        require(
+            selector.viewIdResourceName != null || selector.text != null || selector.description != null ||
+                selector.treePath != null || selector.bounds != null || (selector.packageName != null && selector.className != null),
+        ) { "selector must include a real identifying field" }
+        require(selector.className == null || selector.text != null || selector.description != null || selector.viewIdResourceName != null || selector.treePath != null || selector.bounds != null || selector.packageName != null) {
+            "className cannot identify a selector by itself"
+        }
+    }
+}
+
 /** Resolves an element against a fresh observation without trusting a stale numeric id. */
 object NodeSelector {
     fun from(snapshot: UiNodeSnapshot): ElementSelector = ElementSelector(
@@ -51,36 +77,34 @@ object NodeSelector {
     )
 
     fun matchingNodes(observation: Observation, selector: ElementSelector): List<UiNodeSnapshot> {
+        if (ElementSelectorValidation.validate(selector).isFailure) return emptyList()
         val scoped = observation.nodes.filter { node ->
             selector.packageName.isNullOrBlank() || node.packageName == selector.packageName
         }
+        var candidates = scoped
         selector.viewIdResourceName?.let { viewId ->
-            val matches = scoped.filter { it.viewId == viewId }
-            if (matches.isNotEmpty()) return matches
+            candidates = candidates.filter { it.viewId == viewId }
+            if (candidates.isEmpty()) return emptyList()
+            if (candidates.size == 1) return candidates
         }
-        if (selector.text != null && selector.className != null) {
-            val matches = scoped.filter { it.text == selector.text && it.className == selector.className }
-            if (matches.isNotEmpty()) return matches
+        selector.text?.let { text ->
+            candidates = candidates.filter { it.text == text }
+            if (candidates.size <= 1) return candidates
         }
-        if (selector.description != null && selector.className != null) {
-            val matches = scoped.filter { it.description == selector.description && it.className == selector.className }
-            if (matches.isNotEmpty()) return matches
+        selector.description?.let { description ->
+            candidates = candidates.filter { it.description == description }
+            if (candidates.size <= 1) return candidates
         }
-        if (selector.className != null && selector.text == null && selector.description == null) {
-            val matches = scoped.filter { it.className == selector.className }
-            if (matches.isNotEmpty()) return matches
+        selector.className?.let { className ->
+            candidates = candidates.filter { it.className == className }
+            if (candidates.size <= 1) return candidates
         }
         selector.treePath?.let { path ->
-            val matches = scoped.filter { it.treePath == path }
-            if (matches.isNotEmpty()) return matches
+            candidates = candidates.filter { it.treePath == path }
+            if (candidates.size <= 1) return candidates
         }
-        selector.bounds?.let { bounds ->
-            val matches = scoped.filter { it.bounds == bounds }
-            if (matches.isNotEmpty()) return matches
-        }
-        // A selector is an assertion, not a broad package filter.  Returning the
-        // whole scope here would turn a failed selector into an arbitrary click.
-        return emptyList()
+        selector.bounds?.let { bounds -> candidates = candidates.filter { it.bounds == bounds } }
+        return candidates
     }
 
     fun resolve(observation: Observation, nodeId: Int?, selector: ElementSelector?): UiNodeSnapshot? {
@@ -103,7 +127,7 @@ object ElementSelectorJson {
         val path = json.optJSONArray("treePath")?.let { array ->
             buildList { for (index in 0 until array.length()) add(array.getInt(index)) }
         }
-        return ElementSelector(
+        val selector = ElementSelector(
             packageName = json.optString("packageName").ifBlank { null },
             viewIdResourceName = json.optString("viewIdResourceName").ifBlank { null },
             text = json.optString("text").ifBlank { null },
@@ -112,6 +136,8 @@ object ElementSelectorJson {
             treePath = path,
             bounds = json.optString("bounds").ifBlank { null },
         )
+        ElementSelectorValidation.validate(selector).getOrThrow()
+        return selector
     }
 }
 

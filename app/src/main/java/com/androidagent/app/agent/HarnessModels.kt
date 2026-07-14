@@ -18,8 +18,19 @@ enum class UiPredicateKind {
     TEXT_PRESENT,
     EDITABLE_EQUALS,
     IME_HIDDEN,
-    ELEMENT_STATE,
+    ELEMENT_PRESENT,
+    ELEMENT_DISAPPEARED,
+    ELEMENT_ENABLED,
+    ELEMENT_SELECTED,
+    ELEMENT_CHECKED,
+    ELEMENT_TEXT_EQUALS,
+    TOGGLE_STATE,
+    /** Legacy input accepted only by the parser and normalized to TOGGLE_STATE. */
+    @Deprecated("Use TOGGLE_STATE(expectedChecked=true)")
     TOGGLE_ON,
+    /** Legacy fuzzy state predicate; new plans must not use it. */
+    @Deprecated("Use a typed ELEMENT_* predicate")
+    ELEMENT_STATE,
     SEMANTIC_CLAIM,
 }
 
@@ -32,15 +43,25 @@ data class UiPredicate(
     val target: ElementSelector? = null,
     /** Explicit package contract for PACKAGE_FOREGROUND. */
     val targetPackage: String? = null,
+    /** Manager-stage description used before a concrete observation is available. */
+    val targetHint: String? = null,
+    /** Required checked value for TOGGLE_STATE. */
+    val expectedChecked: Boolean? = null,
+    val predicateId: String? = null,
 )
 
 class TaskPlanException(message: String, cause: Throwable? = null) : IllegalStateException(message, cause)
 
 object TaskPlanValidator {
     private val targetRequired = setOf(
-        UiPredicateKind.TOGGLE_ON,
+        UiPredicateKind.TOGGLE_STATE,
         UiPredicateKind.EDITABLE_EQUALS,
-        UiPredicateKind.ELEMENT_STATE,
+        UiPredicateKind.ELEMENT_PRESENT,
+        UiPredicateKind.ELEMENT_DISAPPEARED,
+        UiPredicateKind.ELEMENT_ENABLED,
+        UiPredicateKind.ELEMENT_SELECTED,
+        UiPredicateKind.ELEMENT_CHECKED,
+        UiPredicateKind.ELEMENT_TEXT_EQUALS,
     )
 
     fun requireValid(plan: TaskPlan): TaskPlan {
@@ -53,8 +74,19 @@ object TaskPlanValidator {
             throw TaskPlanException("Task plan contains a semantic-only milestone without a local verification condition")
         }
         plan.milestones.flatMap { it.successPredicates }.forEach { predicate ->
+            if (predicate.kind == UiPredicateKind.ELEMENT_STATE) {
+                throw TaskPlanException("ELEMENT_STATE is ambiguous; use a typed ELEMENT_* predicate")
+            }
+            if (predicate.kind == UiPredicateKind.TOGGLE_ON) {
+                throw TaskPlanException("TOGGLE_ON is legacy; use TOGGLE_STATE(expectedChecked=true)")
+            }
             if (predicate.kind in targetRequired) {
-                if (predicate.target == null) throw TaskPlanException("${predicate.kind} requires a unique target selector")
+                if (predicate.target == null && predicate.targetHint.isNullOrBlank()) {
+                    throw TaskPlanException("${predicate.kind} requires a target description before binding")
+                }
+            }
+            if (predicate.kind == UiPredicateKind.TOGGLE_STATE) {
+                if (predicate.expectedChecked == null) throw TaskPlanException("TOGGLE_STATE requires expectedChecked")
             }
             if (predicate.kind == UiPredicateKind.PACKAGE_FOREGROUND) {
                 if (predicate.targetPackage.isNullOrBlank() && predicate.target?.packageName.isNullOrBlank()) {
@@ -84,19 +116,20 @@ data class TaskPlan(
         appendLine("targetApp=$targetAppHint")
         appendLine("allowedPackages=${allowedPackages.joinToString(",").ifBlank { "none" }}")
         appendLine("goal=${goal.originalGoal.take(4_000)}")
-        milestones.forEachIndexed { index, milestone ->
+            milestones.forEachIndexed { index, milestone ->
             val status = when {
                 index < currentIndex -> "completed"
                 index == currentIndex -> "current"
                 else -> "pending"
             }
-            appendLine("${milestone.id} [$status/${milestone.kind}] ${milestone.objective}; evidence=${milestone.successEvidence}")
-            milestone.successPredicates.forEach { predicate ->
-                val target = predicate.target?.let { selector ->
+                appendLine("${milestone.id} [$status/${milestone.kind}] ${milestone.objective}; evidence=${milestone.successEvidence}")
+                milestone.successPredicates.forEach { predicate ->
+                    val target = predicate.target?.let { selector ->
                     "target=${selector.viewIdResourceName ?: selector.text ?: selector.description ?: selector.bounds ?: "selector"}"
                 }.orEmpty()
                 val targetPackage = predicate.targetPackage?.let { "targetPackage=$it" }.orEmpty()
-                if (target.isNotBlank() || targetPackage.isNotBlank()) appendLine("  ${predicate.kind} $target $targetPackage")
+                val targetHint = predicate.targetHint?.let { "targetHint=$it" }.orEmpty()
+                if (target.isNotBlank() || targetPackage.isNotBlank() || targetHint.isNotBlank()) appendLine("  ${predicate.kind} $target $targetPackage $targetHint")
             }
         }
     }
@@ -109,7 +142,7 @@ data class TaskPlan(
     }
 
     fun repairStartIndex(): Int = milestones.indexOfFirst {
-        it.successPredicates.any { predicate -> predicate.kind in setOf(UiPredicateKind.SEMANTIC_CLAIM, UiPredicateKind.TOGGLE_ON) }
+        it.successPredicates.any { predicate -> predicate.kind in setOf(UiPredicateKind.SEMANTIC_CLAIM, UiPredicateKind.TOGGLE_STATE) }
     }.let { if (it >= 0) it else milestones.lastIndex.coerceAtLeast(0) }
 }
 
@@ -181,16 +214,24 @@ object TaskPlanParser {
         return buildList {
             for (index in 0 until predicates.length()) {
                 val predicate = predicates.getJSONObject(index)
-                val kind = UiPredicateKind.valueOf(predicate.getString("kind").uppercase())
+                val rawKind = UiPredicateKind.valueOf(predicate.getString("kind").uppercase())
+                require(rawKind != UiPredicateKind.ELEMENT_STATE) {
+                    "ELEMENT_STATE is ambiguous; use a typed ELEMENT_* predicate"
+                }
+                val legacyToggle = rawKind == UiPredicateKind.TOGGLE_ON
+                val kind = if (legacyToggle) UiPredicateKind.TOGGLE_STATE else rawKind
                 val valueRef = predicate.optString("valueRef").trim().ifBlank { null }
                 val literal = predicate.optString("literal").trim().ifBlank { null }
                 require(valueRef == null || valueRef == "goal_text") { "Unknown predicate valueRef" }
-                if (kind in setOf(UiPredicateKind.TEXT_PRESENT, UiPredicateKind.EDITABLE_EQUALS, UiPredicateKind.ELEMENT_STATE)) {
+                if (kind in setOf(UiPredicateKind.TEXT_PRESENT, UiPredicateKind.EDITABLE_EQUALS, UiPredicateKind.ELEMENT_TEXT_EQUALS)) {
                     require(valueRef != null || literal != null) { "$kind requires a value" }
                 }
                 val target = ElementSelectorJson.parse(predicate.optJSONObject("target"))
                 val targetPackage = predicate.optString("targetPackage").trim().ifBlank {
                     predicate.optString("packageName").trim().ifBlank { target?.packageName }
+                }
+                val targetHint = predicate.optString("targetHint").trim().ifBlank {
+                    predicate.optString("targetDescription").trim().ifBlank { null }
                 }
                 add(
                     UiPredicate(
@@ -200,6 +241,9 @@ object TaskPlanParser {
                         description = predicate.optString("description", kind.name).trim().ifBlank { kind.name },
                         target = target,
                         targetPackage = targetPackage,
+                        targetHint = targetHint,
+                        expectedChecked = if (legacyToggle) true else if (predicate.has("expectedChecked")) predicate.optBoolean("expectedChecked") else null,
+                        predicateId = predicate.optString("predicateId").trim().ifBlank { null },
                     ),
                 )
             }

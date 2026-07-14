@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import com.androidagent.app.accessibility.AgentController
 import com.androidagent.app.agent.AgentTraceStore
 import com.androidagent.app.agent.AgentUiState
+import com.androidagent.app.agent.SensitiveOperationPolicy
 import com.androidagent.app.automation.ScheduleCommandParser
 import com.androidagent.app.automation.ScheduledTaskScheduler
 import com.androidagent.app.apps.AppCatalog
@@ -342,7 +343,7 @@ private fun DrawerContent(
             if (nextRunAt > System.currentTimeMillis()) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column {
-                        Text("每日任务已排程", color = Color(0xFF80DDA8))
+                        Text("计划任务已排程", color = Color(0xFF80DDA8))
                         Text(formatScheduleTime(nextRunAt), color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
                     }
                     TextButton(onClick = onCancelSchedule) { Text("停用", color = Color(0xFFDFA39F)) }
@@ -464,7 +465,7 @@ private fun ChatWorkspace(
     LaunchedEffect(state.running, state.outcome, conversation.id) {
         if (ownsActiveRun && !state.running && state.outcome.isNotBlank()) {
             val prefix = when {
-                state.status.startsWith("Succeeded") -> "执行完成"
+                state.status.substringBefore(':') == "Succeeded" -> "执行完成"
                 state.status == "Stopped" || state.status == "Cancelled" -> "执行已停止"
                 else -> "执行未完成"
             }
@@ -544,13 +545,21 @@ private fun ChatWorkspace(
                             updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
                         } else if (ScheduleCommandParser.isCommand(text)) {
                             val request = ScheduleCommandParser.parse(text)
-                            val response = if (request == null) {
+                            val goalRisk = request?.let { SensitiveOperationPolicy.matchGoal(it.goal) }
+                            val response = if (goalRisk != null) {
+                                "安全策略已拦截敏感调度目标：${goalRisk.term}"
+                            } else if (request == null) {
                                 "Usage: /schedule <triggerAtMillis>|<goal>"
                             } else {
                                 ScheduledTaskScheduler.schedule(context, request)
                                 "Scheduled task ${request.taskId} for ${request.triggerAtMillis}"
                             }
                             updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
+                        } else if (SensitiveOperationPolicy.matchGoal(
+                                if (text.startsWith("/run ", ignoreCase = true)) text.substringAfter(' ').trim() else text,
+                            ) != null
+                        ) {
+                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "安全策略已拦截敏感操作目标。请勿让 Muse 执行支付、验证码、密码或权限变更。")))
                         } else if (settings.apiKey.isBlank()) {
                             updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先在侧栏配置当前模型的 API Key。")))
                         } else {
@@ -562,7 +571,10 @@ private fun ChatWorkspace(
                                     val response = when (decision) {
                                         is InteractionDecision.Chat -> decision.reply
                                         is InteractionDecision.Action -> {
-                                            if (!state.accessibilityConnected) {
+                                            val goalRisk = SensitiveOperationPolicy.matchGoal(decision.goal)
+                                            if (goalRisk != null) {
+                                                "安全策略已拦截敏感操作目标：${goalRisk.term}"
+                                            } else if (!state.accessibilityConnected) {
                                                 "这个请求需要操作设备，请先在侧栏开启并连接 Muse 无障碍服务。"
                                             } else {
                                                 // Preserve the immutable user wording; the router may summarize but must not mutate locked entities.
@@ -642,7 +654,7 @@ private fun RunStatusPanel(state: AgentUiState, onShowTrace: () -> Unit) {
                     Text(log, color = Muted, style = MaterialTheme.typography.bodySmall, maxLines = 1)
                 }
                 if (!state.running && state.outcome.isNotBlank()) {
-                    Text(state.outcome, color = if (state.status.startsWith("Succeeded")) Accent else Color(0xFF9B2C2C), maxLines = 3)
+                    Text(state.outcome, color = if (state.status.substringBefore(':') == "Succeeded") Accent else Color(0xFF9B2C2C), maxLines = 3)
                 }
                 TextButton(onClick = onShowTrace, modifier = Modifier.align(Alignment.End)) { Text("查看完整轨迹") }
             }
@@ -679,7 +691,7 @@ private fun translateStatus(status: String): String = when {
     status == "Stopped" -> "已停止"
     status == "Cancelled" -> "已取消"
     status == "Failed" -> "执行失败"
-    status.startsWith("Succeeded") -> "已完成"
+    status.substringBefore(':') == "Succeeded" -> "已完成"
     else -> status
 }
 

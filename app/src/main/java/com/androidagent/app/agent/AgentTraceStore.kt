@@ -15,17 +15,18 @@ class AgentTraceStore(context: Context) {
         database.writableDatabase.insertOrThrow("runs", null, ContentValues().apply {
             put("id", runId)
             put("goal", TraceSanitizer.goal(goal))
-            put("model", model)
+            put("model", TraceSanitizer.sanitizeString(model, 120))
             put("status", "RUNNING")
             put("started_at", System.currentTimeMillis())
         })
+        purgeRetention()
         return runId
     }
 
     fun event(runId: String, type: String, payload: Map<String, Any?>) {
         database.writableDatabase.insertOrThrow("events", null, ContentValues().apply {
             put("run_id", runId)
-            put("event_type", type)
+            put("event_type", TraceSanitizer.eventType(type))
             put("payload", JSONObject(TraceSanitizer.payload(payload)).toString())
             put("created_at", System.currentTimeMillis())
         })
@@ -42,8 +43,31 @@ class AgentTraceStore(context: Context) {
     fun purgeOlderThan(retentionMillis: Long, nowMillis: Long = System.currentTimeMillis()) {
         require(retentionMillis >= 0) { "retentionMillis must not be negative" }
         val cutoff = nowMillis - retentionMillis
-        database.writableDatabase.delete("events", "created_at < ?", arrayOf(cutoff.toString()))
         database.writableDatabase.delete("runs", "started_at < ?", arrayOf(cutoff.toString()))
+    }
+
+    /** Enforces both the seven-day retention and a bounded recent-run count. */
+    fun purgeRetention(
+        retentionMillis: Long = DEFAULT_RETENTION_MILLIS,
+        maxRuns: Int = DEFAULT_MAX_RUNS,
+        nowMillis: Long = System.currentTimeMillis(),
+    ) {
+        require(retentionMillis >= 0) { "retentionMillis must not be negative" }
+        require(maxRuns > 0) { "maxRuns must be positive" }
+        val db = database.writableDatabase
+        db.beginTransaction()
+        try {
+            val cutoff = nowMillis - retentionMillis
+            db.delete("runs", "started_at < ?", arrayOf(cutoff.toString()))
+            db.delete(
+                "runs",
+                "id NOT IN (SELECT id FROM runs ORDER BY started_at DESC LIMIT ?)",
+                arrayOf(maxRuns.toString()),
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     fun clearAll() {
@@ -72,9 +96,14 @@ class AgentTraceStore(context: Context) {
             events.forEach { appendLine(it) }
         }.take(24_000)
     }
+
+    private companion object {
+        const val DEFAULT_RETENTION_MILLIS = 7L * 24 * 60 * 60 * 1_000
+        const val DEFAULT_MAX_RUNS = 20
+    }
 }
 
-private class TraceDatabase(context: Context) : SQLiteOpenHelper(context, "muse_agent_traces.db", null, 1) {
+private class TraceDatabase(context: Context) : SQLiteOpenHelper(context, "muse_agent_traces.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """CREATE TABLE runs (
@@ -98,11 +127,14 @@ private class TraceDatabase(context: Context) : SQLiteOpenHelper(context, "muse_
             )""".trimIndent(),
         )
         db.execSQL("CREATE INDEX trace_events_run_idx ON events(run_id, id)")
+        db.execSQL("CREATE INDEX trace_runs_started_idx ON runs(started_at DESC)")
     }
 
     override fun onConfigure(db: SQLiteDatabase) {
         db.setForeignKeyConstraintsEnabled(true)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) db.execSQL("CREATE INDEX IF NOT EXISTS trace_runs_started_idx ON runs(started_at DESC)")
+    }
 }

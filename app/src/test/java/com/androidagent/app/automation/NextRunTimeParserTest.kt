@@ -2,6 +2,8 @@ package com.androidagent.app.automation
 
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import com.androidagent.app.agent.RuntimeOutcome
+import com.androidagent.app.agent.RuntimeResult
 import java.time.LocalDateTime
 
 class NextRunTimeParserTest {
@@ -35,5 +37,25 @@ class NextRunTimeParserTest {
     fun malformedScheduleCommandDoesNotSilentlySchedule() {
         assertEquals(null, ScheduleCommandParser.parse("/schedule tomorrow|open app"))
         assertEquals(null, ScheduleCommandParser.parse("/schedule 12345"))
+    }
+
+    @Test
+    fun workerMapsStructuredOutcomesWithoutStatusStringMatching() {
+        assertEquals(
+            WorkerDecisionType.SUCCESS,
+            ScheduledWorkerResultMapper.map(RuntimeResult.failure(RuntimeOutcome.SUCCESS, "done"), true, false, false, 0).type,
+        )
+        assertEquals(
+            WorkerDecisionType.RETRY,
+            ScheduledWorkerResultMapper.map(RuntimeResult.failure(RuntimeOutcome.TRANSIENT_NETWORK_ERROR, "network"), true, false, false, 1).type,
+        )
+        assertEquals(
+            WorkerDecisionType.FAILURE,
+            ScheduledWorkerResultMapper.map(RuntimeResult.failure(RuntimeOutcome.SAFETY_BLOCKED, "blocked"), true, false, false, 0).type,
+        )
+        assertEquals(
+            WorkerDecisionType.FAILURE,
+            ScheduledWorkerResultMapper.map(RuntimeResult.failure(RuntimeOutcome.TRANSIENT_NETWORK_ERROR, "network"), true, false, false, 3).type,
+        )
     }
 }

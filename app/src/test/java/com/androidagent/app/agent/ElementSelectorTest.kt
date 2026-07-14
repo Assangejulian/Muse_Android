@@ -2,6 +2,7 @@ package com.androidagent.app.agent
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ElementSelectorTest {
@@ -32,6 +33,37 @@ class ElementSelectorTest {
         assertNull(NodeSelector.resolve(observation, 1, selector))
     }
 
-    private fun node(id: Int, text: String, bounds: String) =
-        UiNodeSnapshot(id, text, "", "Button", true, false, bounds, packageName = "example.app")
+    @Test
+    fun selectorParserRejectsEmptyPackageOnlyClassOnlyAndBadBounds() {
+        assertTrue(runCatching { ElementSelectorJson.parse(org.json.JSONObject("{}")) }.isFailure)
+        assertTrue(runCatching { ElementSelectorJson.parse(org.json.JSONObject("{\"packageName\":\"example.app\"}")) }.isFailure)
+        assertTrue(runCatching { ElementSelectorJson.parse(org.json.JSONObject("{\"className\":\"Button\"}")) }.isFailure)
+        assertTrue(runCatching { ElementSelectorJson.parse(org.json.JSONObject("{\"text\":\"x\",\"bounds\":\"bad\"}")) }.isFailure)
+        assertTrue(runCatching { ElementSelectorJson.parse(org.json.JSONObject("{\"text\":\"x\",\"treePath\":[]}")) }.isFailure)
+    }
+
+    @Test
+    fun textOnlyAndDescriptionOnlySelectorsRequireUniqueMatch() {
+        val observation = Observation("example.app", listOf(
+            node(1, "Unique", "", "Button", "0,0,100,30"),
+            node(2, "Other", "Info", "Button", "0,40,100,70"),
+        ))
+        assertEquals(1, NodeSelector.matchingNodes(observation, ElementSelector(text = "Unique")).single().id)
+        assertEquals(2, NodeSelector.matchingNodes(observation, ElementSelector(description = "Info")).single().id)
+    }
+
+    @Test
+    fun duplicateViewIdCanBeDisambiguatedByTextOrTreePath() {
+        val observation = Observation("example.app", listOf(
+            node(1, "A", "", "Button", "0,0,100,30").copy(viewId = "example:id/action", treePath = listOf(0)),
+            node(2, "B", "", "Button", "0,40,100,70").copy(viewId = "example:id/action", treePath = listOf(1)),
+        ))
+        assertEquals(2, NodeSelector.resolve(observation, null, ElementSelector(viewIdResourceName = "example:id/action", text = "B"))?.id)
+        assertEquals(1, NodeSelector.resolve(observation, null, ElementSelector(viewIdResourceName = "example:id/action", treePath = listOf(0)))?.id)
+    }
+
+    private fun node(id: Int, text: String, bounds: String) = node(id, text, "", "Button", bounds)
+
+    private fun node(id: Int, text: String, description: String, className: String, bounds: String) =
+        UiNodeSnapshot(id, text, description, className, true, false, bounds, packageName = "example.app")
 }

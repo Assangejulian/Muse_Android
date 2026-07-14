@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.androidagent.app.agent.AgentRuntime
 import com.androidagent.app.agent.AgentUiState
+import com.androidagent.app.agent.RuntimeResult
 import com.androidagent.app.data.SecureSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -26,32 +27,39 @@ object AgentController {
     private var runJob: Job? = null
     @Volatile
     private var runGeneration: Long = 0
+    @Volatile
+    var lastResult: RuntimeResult? = null
+        private set
 
     fun setAccessibilityConnected(connected: Boolean) = update { copy(accessibilityConnected = connected) }
     fun setCurrentPackage(packageName: String) = update { copy(currentPackage = packageName) }
 
     @Synchronized
-    fun start(context: Context, settings: SecureSettings) {
+    fun start(context: Context, settings: SecureSettings, goalOverride: String? = null) {
         if (runJob?.isActive == true) return
         val generation = ++runGeneration
+        val effectiveGoal = goalOverride?.trim().takeUnless { it.isNullOrBlank() } ?: settings.taskGoal
+        lastResult = null
         update {
             copy(
                 step = 0,
                 maxSteps = 24,
                 status = "Preparing",
-                goal = settings.taskGoal,
+                goal = effectiveGoal,
                 currentAction = "",
                 outcome = "",
                 logs = emptyList(),
             )
         }
-        if (settings.apiKey.isBlank() || settings.taskGoal.isBlank()) {
+        if (settings.apiKey.isBlank() || effectiveGoal.isBlank()) {
+            lastResult = RuntimeResult.failure(com.androidagent.app.agent.RuntimeOutcome.PERMANENT_PLAN_ERROR, "API key and task are required")
             log("API key and task are required")
             updateFor(generation) { copy(status = "Failed", outcome = "API key and task are required") }
             return
         }
         val service = AgentAccessibilityService.current()
         if (service == null) {
+            lastResult = RuntimeResult.failure(com.androidagent.app.agent.RuntimeOutcome.ACCESSIBILITY_DISCONNECTED, "Accessibility service is not connected")
             log("Accessibility service is not connected")
             updateFor(generation) {
                 copy(status = "Failed", outcome = "Accessibility service is not connected", accessibilityConnected = false)
@@ -69,7 +77,9 @@ object AgentController {
                     onPhase = { step, phase -> updateFor(generation) { copy(step = step, status = phase) } },
                     onLog = { message -> logFor(generation, message) },
                     onAction = { action -> updateFor(generation) { copy(currentAction = action) } },
+                    goalOverride = goalOverride,
                 ).run()
+                lastResult = result
                 if (result.succeeded) {
                     logFor(generation, "Verified completion: ${result.reason}")
                     updateFor(generation) { copy(status = "Succeeded: ${result.reason}", outcome = result.reason) }
@@ -78,8 +88,10 @@ object AgentController {
                     updateFor(generation) { copy(status = "Failed", outcome = result.reason) }
                 }
             } catch (_: CancellationException) {
+                lastResult = RuntimeResult.failure(com.androidagent.app.agent.RuntimeOutcome.USER_CANCELLED, "Run cancelled")
                 updateFor(generation) { copy(status = "Cancelled", outcome = "Run cancelled") }
             } catch (error: Throwable) {
+                lastResult = RuntimeResult.failure(com.androidagent.app.agent.RuntimeOutcome.INTERNAL_ERROR, error.message ?: error::class.simpleName.orEmpty())
                 Log.e(TAG, "Agent runtime failed", error)
                 logFor(generation, "Failed: ${error.message ?: error::class.simpleName}")
                 updateFor(generation) {

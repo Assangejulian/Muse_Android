@@ -2,22 +2,205 @@ package com.androidagent.app.agent
 
 data class PredicateEvidence(val proven: Boolean, val details: List<String>)
 
+data class PredicateBinding(
+    val milestoneId: String,
+    val predicateIndex: Int,
+    val predicateId: String?,
+    val boundSelector: ElementSelector,
+    val boundObservationId: String,
+    val boundPackage: String,
+)
+
+data class BindingResult(
+    val bound: Boolean,
+    val binding: PredicateBinding? = null,
+    val reason: String = "",
+)
+
+/**
+ * Runtime-owned binding ledger. Manager plans may contain only target hints;
+ * this ledger records the unique node selected from the live observation
+ * immediately before the action that may change the screen.
+ */
+class PredicateBindingStore {
+    private val bindings = linkedMapOf<String, PredicateBinding>()
+
+    fun all(): List<PredicateBinding> = bindings.values.toList()
+
+    fun get(milestoneId: String, predicateIndex: Int): PredicateBinding? =
+        bindings[key(milestoneId, predicateIndex)]
+
+    fun bind(
+        milestone: TaskMilestone,
+        predicateIndex: Int,
+        node: UiNodeSnapshot,
+        observation: Observation,
+    ): BindingResult {
+        val predicate = milestone.successPredicates.getOrNull(predicateIndex)
+            ?: return BindingResult(false, reason = "predicate index is out of range")
+        val selector = NodeSelector.from(node)
+        val matches = NodeSelector.matchingNodes(observation, selector)
+        if (matches.size != 1) return BindingResult(false, reason = if (matches.isEmpty()) "target missing" else "target is ambiguous")
+        val binding = PredicateBinding(
+            milestoneId = milestone.id,
+            predicateIndex = predicateIndex,
+            predicateId = predicate.predicateId,
+            boundSelector = selector,
+            boundObservationId = observation.observationId,
+            boundPackage = node.packageName.ifBlank { observation.packageName },
+        )
+        bindings[key(milestone.id, predicateIndex)] = binding
+        return BindingResult(true, binding)
+    }
+
+    fun bindAction(milestone: TaskMilestone, action: AgentAction, observation: Observation): BindingResult {
+        val target = actionTarget(action, observation)
+            ?: return BindingResult(false, reason = "action target is missing or ambiguous")
+        val candidateKinds = when (action) {
+            is AgentAction.InputText, is AgentAction.SubmitInput -> setOf(UiPredicateKind.EDITABLE_EQUALS, UiPredicateKind.ELEMENT_TEXT_EQUALS)
+            is AgentAction.EnsureToggle -> setOf(UiPredicateKind.TOGGLE_STATE, UiPredicateKind.TOGGLE_ON, UiPredicateKind.ELEMENT_CHECKED, UiPredicateKind.ELEMENT_SELECTED)
+            is AgentAction.ClickNode, is AgentAction.ClickText -> setOf(
+                UiPredicateKind.ELEMENT_PRESENT, UiPredicateKind.ELEMENT_DISAPPEARED,
+                UiPredicateKind.ELEMENT_ENABLED, UiPredicateKind.ELEMENT_SELECTED,
+                UiPredicateKind.ELEMENT_CHECKED, UiPredicateKind.ELEMENT_TEXT_EQUALS,
+            )
+            else -> emptySet()
+        }
+        if (candidateKinds.isEmpty()) return BindingResult(true)
+        val candidates = milestone.successPredicates.mapIndexedNotNull { index, predicate ->
+            if (predicate.kind !in candidateKinds || get(milestone.id, index) != null) return@mapIndexedNotNull null
+            val hint = predicate.targetHint?.trim().orEmpty()
+            if (hint.isNotBlank() && !targetMatchesHint(target, hint)) return@mapIndexedNotNull null
+            val selectorMatches = predicate.target?.let { NodeSelector.matchingNodes(observation, it) }
+            if (selectorMatches != null && selectorMatches.size != 1) {
+                return BindingResult(false, reason = if (selectorMatches.isEmpty()) "predicate target missing" else "predicate target is ambiguous")
+            }
+            if (selectorMatches != null && !sameNode(target, selectorMatches.single())) {
+                return BindingResult(false, reason = "action target conflicts with predicate target")
+            }
+            index
+        }
+        if (candidates.isEmpty()) return BindingResult(true)
+        var firstBinding: BindingResult? = null
+        candidates.forEach { index ->
+            val result = bind(milestone, index, target, observation)
+            if (!result.bound) return result
+            if (firstBinding == null) firstBinding = result
+        }
+        return firstBinding ?: BindingResult(true)
+    }
+
+    fun retainCompleted(previous: TaskPlan, revised: TaskPlan, completedIds: Set<String>) {
+        val revisedKeys = revised.milestones.flatMap { milestone ->
+            milestone.successPredicates.indices.map { index -> key(milestone.id, index) }
+        }.toSet()
+        val retained = bindings.filter { (bindingKey, binding) ->
+            if (bindingKey !in revisedKeys) {
+                false
+            } else if (binding.milestoneId in completedIds) {
+                true
+            } else {
+                val previousPredicate = previous.milestones
+                    .firstOrNull { it.id == binding.milestoneId }
+                    ?.successPredicates
+                    ?.getOrNull(binding.predicateIndex)
+                val revisedPredicate = revised.milestones
+                    .firstOrNull { it.id == binding.milestoneId }
+                    ?.successPredicates
+                    ?.getOrNull(binding.predicateIndex)
+                previousPredicate != null && revisedPredicate != null && predicatesRemainBound(previousPredicate, revisedPredicate)
+            }
+        }
+        bindings.clear()
+        bindings.putAll(retained)
+    }
+
+    private fun predicatesRemainBound(previous: UiPredicate, revised: UiPredicate): Boolean {
+        if (previous.predicateId != null || revised.predicateId != null) return previous.predicateId == revised.predicateId
+        return previous.kind == revised.kind &&
+            previous.valueRef == revised.valueRef &&
+            previous.literal == revised.literal &&
+            previous.target == revised.target &&
+            previous.targetPackage == revised.targetPackage &&
+            previous.targetHint == revised.targetHint &&
+            previous.expectedChecked == revised.expectedChecked
+    }
+
+    private fun actionTarget(action: AgentAction, observation: Observation): UiNodeSnapshot? = when (action) {
+        is AgentAction.ClickText -> {
+            val matches = observation.nodes.filter { it.visible && it.enabled && !it.editable &&
+                (it.text.equals(action.text, true) || it.description.equals(action.text, true)) }
+            matches.singleOrNull()
+        }
+        is AgentAction.ClickNode -> NodeSelector.resolve(observation, action.nodeId, action.selector)
+        is AgentAction.InputText -> if (action.nodeId != null || action.target != null) {
+            NodeSelector.resolve(observation, action.nodeId, action.target)
+        } else {
+            observation.nodes.filter { it.visible && it.enabled && it.editable && !it.password }.singleOrNull { it.focused }
+        }
+        is AgentAction.SubmitInput -> if (action.nodeId != null || action.target != null) {
+            NodeSelector.resolve(observation, action.nodeId, action.target)
+        } else {
+            observation.nodes.filter { it.visible && it.enabled && it.editable && !it.password }.singleOrNull { it.focused }
+        }
+        is AgentAction.EnsureToggle -> NodeSelector.resolve(observation, action.nodeId, action.selector)
+        else -> null
+    }
+
+    private fun targetMatchesHint(node: UiNodeSnapshot, hint: String): Boolean {
+        val lower = hint.lowercase()
+        return node.text.lowercase().contains(lower) || node.description.lowercase().contains(lower) ||
+            node.className.lowercase().contains(lower) || node.viewId.lowercase().contains(lower)
+    }
+
+    private fun sameNode(first: UiNodeSnapshot, second: UiNodeSnapshot): Boolean {
+        if (first.packageName.isNotBlank() && second.packageName.isNotBlank() && first.packageName != second.packageName) return false
+        if (first.viewId.isNotBlank() && second.viewId.isNotBlank()) return first.viewId == second.viewId
+        if (first.treePath != null && second.treePath != null) return first.treePath == second.treePath
+        if (first.bounds == second.bounds && first.className == second.className) {
+            return first.text == second.text || first.description == second.description ||
+                (first.text.isBlank() && second.text.isBlank() && first.description.isBlank() && second.description.isBlank())
+        }
+        return first.id == second.id
+    }
+
+    private fun key(milestoneId: String, predicateIndex: Int): String = "$milestoneId#$predicateIndex"
+}
+
 object MilestoneEvaluator {
     fun evaluate(
         milestone: TaskMilestone,
         plan: TaskPlan,
         observation: Observation,
         targetPackage: String?,
+        bindings: PredicateBindingStore? = null,
+        predicateIndices: Set<Int>? = null,
     ): PredicateEvidence {
         val details = mutableListOf<String>()
-        val results = milestone.successPredicates.map { predicate ->
+        val results = milestone.successPredicates.mapIndexedNotNull { predicateIndex, predicate ->
+            if (predicateIndices != null && predicateIndex !in predicateIndices) return@mapIndexedNotNull null
+            if (predicate.kind == UiPredicateKind.SEMANTIC_CLAIM) {
+                details += "${predicate.kind}=AUXILIARY: ${predicate.description}"
+                return@mapIndexedNotNull null
+            }
             val value = when (predicate.valueRef) {
                 "goal_text" -> plan.goal.originalGoal
                 else -> predicate.literal
             }
-            val target = predicate.target?.let { selector ->
-                NodeSelector.matchingNodes(observation, selector).singleOrNull()
-            }
+            val bound = bindings?.get(milestone.id, predicateIndex)
+            val targetSelector = bound?.boundSelector ?: predicate.target
+            val targetMatches = targetSelector?.let { selector -> NodeSelector.matchingNodes(observation, selector) } ?: emptyList()
+            val target = targetMatches.singleOrNull()
+            val bindingRequired = predicate.kind in setOf(
+                UiPredicateKind.EDITABLE_EQUALS,
+                UiPredicateKind.ELEMENT_PRESENT,
+                UiPredicateKind.ELEMENT_DISAPPEARED,
+                UiPredicateKind.ELEMENT_ENABLED,
+                UiPredicateKind.ELEMENT_SELECTED,
+                UiPredicateKind.ELEMENT_CHECKED,
+                UiPredicateKind.ELEMENT_TEXT_EQUALS,
+                UiPredicateKind.TOGGLE_STATE,
+            )
             val proven = when (predicate.kind) {
                 UiPredicateKind.PACKAGE_FOREGROUND ->
                     observation.packageName == (
@@ -26,31 +209,38 @@ object MilestoneEvaluator {
                             ?: targetPackage
                         )
 
-                UiPredicateKind.TEXT_PRESENT -> value != null && if (predicate.target != null) {
+                UiPredicateKind.TEXT_PRESENT -> value != null && if (predicate.target != null || bound != null) {
                     target?.let { node ->
-                        node.visible && node.enabled && !node.password && !node.isInputMethod &&
+                        node.visible && !node.password && !node.isInputMethod &&
                             (node.text.equals(value, true) || node.description.equals(value, true))
                     } == true
                 } else {
                     observation.nodes.any { node ->
-                        node.visible && node.enabled && !node.password && !node.isInputMethod &&
+                        node.visible && !node.password && !node.isInputMethod &&
                             (node.text.equals(value, true) || node.description.equals(value, true))
                     }
                 }
 
-                UiPredicateKind.EDITABLE_EQUALS -> value != null && target?.let { node ->
+                UiPredicateKind.EDITABLE_EQUALS -> bindingRequired && bound != null && value != null && target?.let { node ->
                     node.visible && node.enabled && node.editable && !node.password && node.text == value
                 } == true
 
                 UiPredicateKind.IME_HIDDEN -> !observation.imeVisible
+                UiPredicateKind.ELEMENT_PRESENT -> bindingRequired && bound != null && targetMatches.size == 1 && targetMatches.single().visible
+                UiPredicateKind.ELEMENT_DISAPPEARED -> bindingRequired && bound != null && targetMatches.isEmpty()
+                UiPredicateKind.ELEMENT_ENABLED -> bindingRequired && bound != null && target?.let { it.visible && it.enabled } == true
+                UiPredicateKind.ELEMENT_SELECTED -> bindingRequired && bound != null && target?.let { it.visible && it.selected } == true
+                UiPredicateKind.ELEMENT_CHECKED -> bindingRequired && bound != null && target?.let { it.visible && it.checked == true } == true
+                UiPredicateKind.ELEMENT_TEXT_EQUALS -> bindingRequired && bound != null && value != null && target?.let { node ->
+                    node.visible && (node.text == value || node.description == value)
+                } == true
+                UiPredicateKind.TOGGLE_STATE -> bindingRequired && bound != null && target?.let { node ->
+                    node.visible && node.checked != null && node.checked == predicate.expectedChecked
+                } == true
                 UiPredicateKind.TOGGLE_ON -> target?.let { node ->
-                    node.visible && node.enabled && (node.checked == true || node.selected)
+                    node.visible && (node.checked == true || node.selected)
                 } == true
-                UiPredicateKind.ELEMENT_STATE -> value != null && target?.let { node ->
-                    node.visible && node.enabled && (
-                        node.text.equals(value, true) || node.description.equals(value, true) || node.viewId == value
-                        )
-                } == true
+                UiPredicateKind.ELEMENT_STATE -> false
                 UiPredicateKind.SEMANTIC_CLAIM -> false
             }
             details += "${predicate.kind}=${if (proven) "PROVEN" else "UNKNOWN"}: ${predicate.description}"
@@ -64,6 +254,7 @@ object MilestoneEvaluator {
         plan: TaskPlan,
         observation: Observation,
         targetPackage: String?,
+        bindings: PredicateBindingStore? = null,
     ): PredicateEvidence {
         val hardPredicates = milestone.successPredicates.filter { predicate ->
             predicate.kind in setOf(
@@ -71,12 +262,24 @@ object MilestoneEvaluator {
                 UiPredicateKind.TEXT_PRESENT,
                 UiPredicateKind.EDITABLE_EQUALS,
                 UiPredicateKind.IME_HIDDEN,
-                UiPredicateKind.ELEMENT_STATE,
-                UiPredicateKind.TOGGLE_ON,
+                UiPredicateKind.ELEMENT_PRESENT,
+                UiPredicateKind.ELEMENT_DISAPPEARED,
+                UiPredicateKind.ELEMENT_ENABLED,
+                UiPredicateKind.ELEMENT_SELECTED,
+                UiPredicateKind.ELEMENT_CHECKED,
+                UiPredicateKind.ELEMENT_TEXT_EQUALS,
+                UiPredicateKind.TOGGLE_STATE,
             )
         }
         if (hardPredicates.isEmpty()) return PredicateEvidence(true, listOf("No deterministic predicates"))
-        return evaluate(milestone.copy(successPredicates = hardPredicates), plan, observation, targetPackage)
+        return evaluate(
+            milestone,
+            plan,
+            observation,
+            targetPackage,
+            bindings,
+            milestone.successPredicates.indices.filter { milestone.successPredicates[it] in hardPredicates }.toSet(),
+        )
     }
 }
 
@@ -85,6 +288,7 @@ data class PackagePolicy(
     val primaryPackage: String? = null,
     val allowSystemUi: Boolean = false,
     val allowTemporaryExternalPackages: Boolean = false,
+    val temporaryPackages: Set<String> = emptySet(),
 ) {
     fun allows(packageName: String, isSystemUi: Boolean = isSystemUiPackage(packageName)): Boolean {
         if (packageName.isBlank()) return false
@@ -94,7 +298,7 @@ data class PackagePolicy(
         if (isPermissionOrInstallerPackage(normalized)) return false
         if (isSystemUiPackage(normalized) || isSystemUi || normalized == "android") return allowSystemUi
         if (normalized in allowedPackages.map(String::lowercase).toSet()) return true
-        return allowTemporaryExternalPackages && packageName != primaryPackage
+        return allowTemporaryExternalPackages && normalized in temporaryPackages.map(String::lowercase).toSet()
     }
 
     companion object {
@@ -147,10 +351,8 @@ class ToolGuard(
         observation: Observation,
         milestone: TaskMilestone? = null,
     ): GuardResult {
-        if (milestone?.kind == TaskMilestoneKind.LAUNCH_APP &&
-            packagePolicy.primaryPackage != null && observation.packageName != packagePolicy.primaryPackage
-        ) {
-            return GuardResult(AgentAction.LaunchApp(packagePolicy.primaryPackage))
+        if (milestone?.kind == TaskMilestoneKind.LAUNCH_APP && observation.packageName != launchPackage(milestone)) {
+            launchPackage(milestone)?.let { return GuardResult(AgentAction.LaunchApp(it)) }
         }
         when (action) {
             is AgentAction.ClickNode -> {
@@ -174,6 +376,9 @@ class ToolGuard(
             is AgentAction.InputText -> {
                 if (action.text.length > MAX_INPUT_LENGTH) return GuardResult(null, "input_text is too long")
                 val target = resolveEditable(observation, action.nodeId, action.target)
+                if ((action.nodeId != null || action.target != null) && target == null) {
+                    return GuardResult(null, "input_text selector did not resolve to a unique editable target")
+                }
                 if (target == null) {
                     val editable = editableNodes(observation)
                     if (editable.count { it.focused } == 1) return GuardResult(action)
@@ -184,6 +389,9 @@ class ToolGuard(
 
             is AgentAction.SubmitInput -> {
                 val target = resolveEditable(observation, action.nodeId, action.target)
+                if ((action.nodeId != null || action.target != null) && target == null) {
+                    return GuardResult(null, "submit_input selector did not resolve to a unique editable target")
+                }
                 val editable = editableNodes(observation)
                 if (target == null && editable.count { it.focused } == 0 && editable.size != 1) {
                     return GuardResult(null, "submit_input target is ambiguous or missing")
@@ -212,9 +420,9 @@ class ToolGuard(
     }
 
     fun requiredWorkflowAction(observation: Observation, milestone: TaskMilestone? = null): AgentAction? =
-        if (milestone?.kind == TaskMilestoneKind.LAUNCH_APP &&
-            packagePolicy.primaryPackage != null && observation.packageName != packagePolicy.primaryPackage
-        ) AgentAction.LaunchApp(packagePolicy.primaryPackage) else null
+        if (milestone?.kind == TaskMilestoneKind.LAUNCH_APP) {
+            launchPackage(milestone)?.takeIf { observation.packageName != it }?.let(AgentAction::LaunchApp)
+        } else null
 
     fun recordDispatch(@Suppress("UNUSED_PARAMETER") action: AgentAction) = Unit
 
@@ -232,6 +440,11 @@ class ToolGuard(
         val value = packageName.orEmpty().lowercase()
         return value.contains("inputmethod") || value.contains("keyboard") || value.endsWith(".ime") || value.contains(".ime.")
     }
+
+    private fun launchPackage(milestone: TaskMilestone): String? = milestone.successPredicates
+        .firstOrNull { it.kind == UiPredicateKind.PACKAGE_FOREGROUND }
+        ?.let { it.targetPackage ?: it.target?.packageName }
+        ?: packagePolicy.primaryPackage
 
     private companion object { const val MAX_INPUT_LENGTH = 2_000 }
 }
