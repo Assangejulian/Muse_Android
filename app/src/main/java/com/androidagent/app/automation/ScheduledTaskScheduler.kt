@@ -12,6 +12,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.androidagent.app.accessibility.AgentController
+import com.androidagent.app.accessibility.AgentStopCause
 import com.androidagent.app.data.SecureSettings
 import com.androidagent.app.agent.RuntimeOutcome
 import com.androidagent.app.agent.RuntimeResult
@@ -208,8 +209,15 @@ class ScheduledAgentWorker(context: Context, parameters: WorkerParameters) : Cor
                 while (AgentController.isRunning(runId)) delay(500)
                 true
             } ?: false
-            if (!finished) AgentController.stopWithReason("Scheduled run exceeded its worker deadline", runId)
-            val completedResult = AgentController.resultForRun(runId)
+            if (!finished) {
+                AgentController.cancelRun(AgentStopCause.WORKER_TIMEOUT, runId)
+                // Cancellation is cooperative. Wait for the controller to
+                // write the run-scoped result before consuming it.
+                withTimeoutOrNull(TimeUnit.SECONDS.toMillis(5)) {
+                    while (AgentController.isRunning(runId) || AgentController.resultForRun(runId) == null) delay(50)
+                }
+            }
+            val completedResult = AgentController.consumeResult(runId)
             val decision = ScheduledWorkerResultMapper.map(
                 runtimeResult = completedResult,
                 accessibilityConnected = AgentController.state.value.accessibilityConnected,
@@ -221,11 +229,11 @@ class ScheduledAgentWorker(context: Context, parameters: WorkerParameters) : Cor
                 WorkerDecisionType.SUCCESS -> Result.success()
                 WorkerDecisionType.RETRY -> Result.retry()
                 WorkerDecisionType.FAILURE -> Result.failure()
-            }.also { AgentController.removeResult(runId) }
+            }
         } finally {
             startedRunId?.let { runId ->
                 if (AgentController.isRunning(runId)) {
-                    AgentController.stopWithReason("Scheduled worker finished before the agent stopped", runId)
+                    AgentController.cancelRun(AgentStopCause.APP_SHUTDOWN, runId)
                 }
             }
             if (wakeLock.isHeld) wakeLock.release()

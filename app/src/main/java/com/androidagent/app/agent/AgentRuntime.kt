@@ -58,6 +58,7 @@ class AgentRuntime(
     private val onAction: (String) -> Unit = {},
     private val goalOverride: String? = null,
     private val runIdOverride: String? = null,
+    private val cancellationOutcomeProvider: () -> RuntimeOutcome? = { null },
 ) {
     private val client = DeepSeekClient()
     private val executionHistory = ExecutionHistory()
@@ -518,11 +519,25 @@ class AgentRuntime(
                         continue
                     }
 
-                    val observationBound = proposed is AgentAction.ClickText || proposed is AgentAction.ClickNode ||
-                        proposed is AgentAction.TapPoint || proposed is AgentAction.InputText ||
-                        proposed is AgentAction.SubmitInput || proposed is AgentAction.EnsureToggle || proposed is AgentAction.BindPredicate
-                    val executionObservation = if (observationBound) service.observe() else rawBefore
-                    if (observationBound && executionObservation.observationId != rawBefore.observationId) {
+                    // The planner may have spent time on a model call. Always
+                    // refresh the execution observation before any local guard
+                    // or side effect, regardless of action type.
+                    val executionObservation = service.observe()
+                    val preflight = RuntimeStepExecutor.preflight(
+                        guard = guard,
+                        ledger = ledger,
+                        proposed = proposed,
+                        // Compare fresh execution state with the local raw
+                        // snapshot, not the redacted model copy whose
+                        // fingerprint may intentionally differ.
+                        planningObservation = rawBefore,
+                        executionObservation = executionObservation,
+                        milestone = milestone,
+                        packagePolicy = packagePolicy,
+                        launchablePackages = launchablePackages,
+                        goal = goalContext,
+                    )
+                    if (preflight.stale) {
                         val reason = "screen changed before tool dispatch; re-observe before acting"
                         val current = PrivacyGuard.prepare(executionObservation).observation
                         recordTurn(toolTurns, planned, toolResultJson(false, proposed, before, current, "stale_observation", reason))
@@ -532,11 +547,10 @@ class AgentRuntime(
                         continue
                     }
 
-                    // Guard and safety checks run against the same fresh
-                    // observation that will be used for provisional binding
-                    // and service execution.
-                    val guarded = guard.normalizeAndValidate(proposed, executionObservation, milestone)
-                    val action = guarded.action ?: guarded.shortCircuit?.let { proposed }
+                    // Guard, local safety, and duplicate checks share this
+                    // exact fresh snapshot before binding or execution.
+                    val guarded = preflight.guarded
+                    val action = preflight.action
                     if (action == null) {
                         val reason = guarded.rejection ?: "pre-tool policy rejected the action"
                         val feedback = toolResultJson(false, proposed, before, before, "policy_rejected", reason)
@@ -591,33 +605,10 @@ class AgentRuntime(
                         continue
                     }
 
-                    val repeatedReason = ledger.blockRepeated(action, before)
-                    if (repeatedReason != null) {
-                        recordTurn(toolTurns, planned, toolResultJson(false, action, before, before, "duplicate_action", repeatedReason))
-                        history += "PRE_TOOL_BLOCKED: $action because $repeatedReason"
-                        ledger.record(StepTrace(milestone.id, before.observationId, action.toString(), before.observationId, TransitionJudgement.NO_PROGRESS, repeatedReason))
-                        onLog("Duplicate strategy blocked")
-                        val recovery = recoveryPolicy.decide(
-                            RecoveryContext(
-                                expectedPackage = expectedRecoveryPackage(milestone),
-                                currentPackage = before.packageName,
-                                currentMilestoneId = milestone.id,
-                                currentMilestoneKind = milestone.kind,
-                                failedAction = action,
-                                reason = RecoveryReason.REPEATED_ACTION,
-                            ),
-                        )
-                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, action, packagePolicy, launchablePackages, goalContext)
-                        traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
-                        if (!recovered.success) return@withTimeout finish(RuntimeOutcome.INTERNAL_ERROR, recovered.detail)
-                        if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = repeatedReason
-                        continue
-                    }
-
                     var provisionalBindings = emptyList<ProvisionalPredicateBinding>()
-                    val safetyFailure = SafetyGuard.validate(action, executionObservation, packagePolicy, launchablePackages, goalContext).exceptionOrNull()
+                    val safetyFailure = preflight.safetyFailure
                     if (safetyFailure != null) {
-                        val reason = safetyFailure.message ?: "safety policy rejected the action"
+                        val reason = safetyFailure.ifBlank { "safety policy rejected the action" }
                         recordTurn(toolTurns, planned, toolResultJson(false, action, before, before, "safety_rejected", reason))
                         history += "PRE_TOOL_BLOCKED: $action because $reason"
                         ledger.record(StepTrace(milestone.id, before.observationId, action.toString(), before.observationId, TransitionJudgement.NO_PROGRESS, reason))
@@ -637,6 +628,29 @@ class AgentRuntime(
                         traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
                         if (!recovered.success) return@withTimeout finish(RuntimeOutcome.INTERNAL_ERROR, recovered.detail)
                         if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = reason
+                        continue
+                    }
+
+                    val repeatedReason = preflight.repeatedReason
+                    if (repeatedReason != null) {
+                        recordTurn(toolTurns, planned, toolResultJson(false, action, before, before, "duplicate_action", repeatedReason))
+                        history += "PRE_TOOL_BLOCKED: $action because $repeatedReason"
+                        ledger.record(StepTrace(milestone.id, before.observationId, action.toString(), before.observationId, TransitionJudgement.NO_PROGRESS, repeatedReason))
+                        onLog("Duplicate strategy blocked")
+                        val recovery = recoveryPolicy.decide(
+                            RecoveryContext(
+                                expectedPackage = expectedRecoveryPackage(milestone),
+                                currentPackage = executionObservation.packageName,
+                                currentMilestoneId = milestone.id,
+                                currentMilestoneKind = milestone.kind,
+                                failedAction = action,
+                                reason = RecoveryReason.REPEATED_ACTION,
+                            ),
+                        )
+                        val recovered = executeRecovery(recovery, step, executionObservation, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, action, packagePolicy, launchablePackages, goalContext)
+                        traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
+                        if (!recovered.success) return@withTimeout finish(RuntimeOutcome.INTERNAL_ERROR, recovered.detail)
+                        if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = repeatedReason
                         continue
                     }
 
@@ -738,7 +752,7 @@ class AgentRuntime(
                         return@withTimeout finish(RuntimeOutcome.INTERNAL_ERROR, "Predicate binding commit failed after successful action")
                     }
                     guard.recordDispatch(action)
-                    ledger.recordDispatch(action, before)
+                    ledger.recordDispatch(action, executionObservation)
                     if (action !is AgentAction.Wait && action !is AgentAction.BindPredicate) {
                         evidenceCounters.successfulMutatingActions += 1
                     }
@@ -912,10 +926,11 @@ class AgentRuntime(
             finish(RuntimeOutcome.TIMEOUT, "five-minute run deadline exceeded")
         } catch (cancelled: CancellationException) {
             activeBindings?.rollbackRun(runId)
+            val cancellationOutcome = cancellationOutcomeProvider() ?: RuntimeOutcome.USER_CANCELLED
             runCatching {
-                traceStore.event(runId, "RUN_FINISHED", mapOf("outcome" to RuntimeOutcome.USER_CANCELLED.name, "reasonCode" to RuntimeOutcome.USER_CANCELLED.name))
+                traceStore.event(runId, "RUN_FINISHED", mapOf("outcome" to cancellationOutcome.name, "reasonCode" to cancellationOutcome.name))
             }
-            runCatching { traceStore.finish(runId, "CANCELLED", "cancelled by user") }
+            runCatching { traceStore.finish(runId, "CANCELLED", cancellationOutcome.name) }
             throw cancelled
         } catch (failure: TaskPlanException) {
             activeBindings?.rollbackRun(runId)

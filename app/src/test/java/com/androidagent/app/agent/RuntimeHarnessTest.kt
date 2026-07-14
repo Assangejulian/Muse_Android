@@ -116,6 +116,31 @@ class RuntimeHarnessTest {
         assertTrue(result.events.any { it.phase == "commit" })
     }
 
+    @Test
+    fun productionStyleNonEmptyWindowDismissalCompletes() = runBlocking {
+        val target = UiNodeSnapshot(
+            1, "Dismiss", "", "Button", true, false, "0,0,100,40",
+            viewId = "example:id/dismiss", packageName = "example.app", windowId = 7,
+        )
+        val initial = Observation("example.app", listOf(target), windowIds = setOf(7))
+        val service = WindowDismissService(initial)
+        val result = RuntimeContractHarness(
+            service = service,
+            planner = FakePlanner { AgentAction.ClickNode(1) },
+            clock = FakeClock(),
+            launchablePackages = setOf("example.app"),
+            packagePolicy = PackagePolicy(allowedPackages = mutableSetOf("example.app"), primaryPackage = "example.app"),
+        ).run(disappearedPlan())
+
+        assertTrue(result.completed)
+        val phases = result.events.map { it.phase }
+        assertTrue(phases.indexOf("planner") < phases.indexOf("fresh_execution_observation"))
+        assertTrue(phases.indexOf("fresh_execution_observation") < phases.indexOf("tool_guard"))
+        assertTrue(phases.indexOf("tool_guard") < phases.indexOf("safety_guard"))
+        assertTrue(phases.indexOf("safety_guard") < phases.indexOf("prepare_binding"))
+        assertTrue(phases.indexOf("mark_dispatched") < phases.indexOf("commit"))
+    }
+
     private fun harness(
         service: FakeAccessibilityService,
         planner: RuntimeHarnessPlanner,
@@ -180,5 +205,23 @@ class RuntimeHarnessTest {
             calls++
             return observe()
         }
+    }
+
+    private class WindowDismissService(initial: Observation) : RuntimeHarnessAccessibilityService {
+        private var current = initial
+
+        override suspend fun observe(): Observation = current
+
+        override suspend fun executeDetailed(action: AgentAction, observation: Observation): ActionExecutionResult {
+            current = Observation(
+                "example.app",
+                listOf(UiNodeSnapshot(2, "Ready", "", "TextView", false, false, "0,50,100,80", packageName = "example.app", windowId = 7)),
+                windowIds = setOf(7),
+            )
+            return ActionExecutionResult(true, "executed", "window target dismissed")
+        }
+
+        override suspend fun executeRecovery(action: RecoveryAction, observation: Observation): ActionExecutionResult =
+            ActionExecutionResult(true, "recovered", action.name)
     }
 }

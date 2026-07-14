@@ -22,6 +22,14 @@ import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
+enum class AgentStopCause {
+    USER_REQUEST,
+    ACCESSIBILITY_INTERRUPTED,
+    ACCESSIBILITY_DISCONNECTED,
+    WORKER_TIMEOUT,
+    APP_SHUTDOWN,
+}
+
 sealed interface AgentStartResult {
     data class Started(val runId: String) : AgentStartResult
     data class Busy(val activeRunId: String) : AgentStartResult
@@ -35,6 +43,7 @@ object AgentController {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val mutableState = MutableStateFlow(AgentUiState())
     private val results = ConcurrentHashMap<String, RuntimeResult>()
+    private val stopCauses = ConcurrentHashMap<String, AgentStopCause>()
     private val resultOrder = ArrayDeque<String>()
 
     val state: StateFlow<AgentUiState> = mutableState.asStateFlow()
@@ -62,13 +71,19 @@ object AgentController {
 
     /** Atomically consumes a completed run result for one caller (for example WorkManager). */
     @Synchronized
-    fun consumeResult(runId: String): RuntimeResult? = results.remove(runId).also { resultOrder.remove(runId) }
+    fun consumeResult(runId: String): RuntimeResult? = results.remove(runId).also {
+        resultOrder.remove(runId)
+        stopCauses.remove(runId)
+    }
 
     @Synchronized
     fun removeResult(runId: String) {
         results.remove(runId)
         resultOrder.remove(runId)
+        stopCauses.remove(runId)
     }
+
+    fun stopCauseFor(runId: String): AgentStopCause? = stopCauses[runId]
 
     fun currentRunId(): String? = activeRunId
 
@@ -135,6 +150,7 @@ object AgentController {
                     onAction = { action -> updateFor(generation) { copy(currentAction = action) } },
                     goalOverride = goalOverride,
                     runIdOverride = runId,
+                    cancellationOutcomeProvider = { stopCauses[runId]?.runtimeOutcome() },
                 ).run()
                 storeResult(generation, runId, result)
                 if (result.succeeded) {
@@ -145,8 +161,11 @@ object AgentController {
                     updateFor(generation) { copy(status = "Failed", outcome = result.reason) }
                 }
             } catch (_: CancellationException) {
-                storeResult(generation, runId, RuntimeResult.failure(RuntimeOutcome.USER_CANCELLED, "Run cancelled", runId))
-                updateFor(generation) { copy(status = "Cancelled", outcome = "Run cancelled") }
+                val cause = stopCauses[runId] ?: AgentStopCause.APP_SHUTDOWN
+                val outcome = cause.runtimeOutcome()
+                val reason = cause.reason()
+                storeResult(generation, runId, RuntimeResult.failure(outcome, reason, runId))
+                updateFor(generation) { copy(status = if (outcome == RuntimeOutcome.TIMEOUT) "Timed out" else "Cancelled", outcome = reason) }
             } catch (error: Throwable) {
                 val result = RuntimeResult.failure(RuntimeOutcome.INTERNAL_ERROR, error.message ?: error::class.simpleName.orEmpty(), runId)
                 storeResult(generation, runId, result)
@@ -164,28 +183,37 @@ object AgentController {
 
     @Synchronized
     fun stop() {
-        cancelRun("Stopped by user", null)
+        cancelRun(AgentStopCause.USER_REQUEST, null, "Stopped by user")
     }
 
     @Synchronized
     fun stopWithReason(reason: String) {
-        cancelRun(reason, null)
+        cancelRun(AgentStopCause.USER_REQUEST, null, reason)
     }
 
     @Synchronized
     fun stopWithReason(reason: String, runId: String): Boolean = cancelRun(reason, runId)
 
-    private fun cancelRun(reason: String, requestedRunId: String?): Boolean {
+    fun stopWithCause(cause: AgentStopCause, runId: String? = null, reason: String = cause.reason()): Boolean =
+        cancelRun(cause, runId, reason)
+
+    @Synchronized
+    fun cancelRun(cause: AgentStopCause, requestedRunId: String? = null, reason: String = cause.reason()): Boolean {
         val currentId = activeRunId
         if (requestedRunId != null && requestedRunId != currentId) return false
-        runGeneration += 1
         val job = runJob
         if (job == null) return false
+        currentId?.let { stopCauses[it] = cause }
+        runGeneration += 1
         job?.cancel(CancellationException(reason))
         update { copy(running = job.isActive, status = "Stopping", currentAction = "", outcome = reason) }
         log(reason)
         return true
     }
+
+    @Synchronized
+    private fun cancelRun(reason: String, requestedRunId: String?): Boolean =
+        cancelRun(AgentStopCause.USER_REQUEST, requestedRunId, reason)
 
     @Synchronized
     private fun completeRun(generation: Long, runId: String, completedJob: Job?) {
@@ -206,7 +234,9 @@ object AgentController {
             resultOrder.remove(runId)
             resultOrder.addLast(runId)
             while (resultOrder.size > MAX_RETAINED_RESULTS) {
-                results.remove(resultOrder.removeFirst())
+                val evicted = resultOrder.removeFirst()
+                results.remove(evicted)
+                stopCauses.remove(evicted)
             }
         }
         if (generation == runGeneration) lastResult = normalized
@@ -232,3 +262,25 @@ object AgentController {
 
     private const val MAX_RETAINED_RESULTS = 20
 }
+
+object AgentStopCausePolicy {
+    fun outcome(cause: AgentStopCause): RuntimeOutcome = when (cause) {
+        AgentStopCause.USER_REQUEST -> RuntimeOutcome.USER_CANCELLED
+        AgentStopCause.ACCESSIBILITY_INTERRUPTED,
+        AgentStopCause.ACCESSIBILITY_DISCONNECTED,
+        -> RuntimeOutcome.ACCESSIBILITY_DISCONNECTED
+        AgentStopCause.WORKER_TIMEOUT -> RuntimeOutcome.TIMEOUT
+        AgentStopCause.APP_SHUTDOWN -> RuntimeOutcome.USER_CANCELLED
+    }
+
+    fun reason(cause: AgentStopCause): String = when (cause) {
+        AgentStopCause.USER_REQUEST -> "Run cancelled by user"
+        AgentStopCause.ACCESSIBILITY_INTERRUPTED -> "Accessibility service interrupted"
+        AgentStopCause.ACCESSIBILITY_DISCONNECTED -> "Accessibility service disconnected"
+        AgentStopCause.WORKER_TIMEOUT -> "Scheduled run exceeded its worker deadline"
+        AgentStopCause.APP_SHUTDOWN -> "Application shutdown cancelled the run"
+    }
+}
+
+private fun AgentStopCause.runtimeOutcome(): RuntimeOutcome = AgentStopCausePolicy.outcome(this)
+private fun AgentStopCause.reason(): String = AgentStopCausePolicy.reason(this)

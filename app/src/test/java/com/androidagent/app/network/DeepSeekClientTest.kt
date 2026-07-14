@@ -164,6 +164,8 @@ class DeepSeekClientTest {
             "android_action",
             NativePlannerProtocol.toolChoice().getJSONObject("function").getString("name"),
         )
+        val selector = parameters.getJSONObject("properties").getJSONObject("selector")
+        assertTrue(selector.getJSONArray("anyOf").length() >= 5)
     }
 
     @Test

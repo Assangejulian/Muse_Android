@@ -219,13 +219,13 @@ class DeepSeekClient(
             Available actions:
             {"action":"launch_app","packageName":"an exact package from INSTALLED APPS"}
             {"action":"click_text","text":"visible text","predicateId":"m2-p1"}
-            {"action":"click_node","nodeId":1,"selector":{"className":"optional"},"predicateId":"m2-p1"}
+            {"action":"click_node","nodeId":1,"predicateId":"m2-p1"}
             {"action":"tap_point","x":0..1000,"y":0..1000}
             {"action":"swipe","direction":"up|down|left|right"}
-            {"action":"input_text","nodeId":1,"text":"exact text","mode":"REPLACE|APPEND|CLEAR","submit":false,"target":{"className":"optional"},"predicateId":"m2-p1"}
-            {"action":"submit_input","nodeId":1,"target":{"className":"optional"},"predicateId":"m2-p1"}
+            {"action":"input_text","nodeId":1,"text":"exact text","mode":"REPLACE|APPEND|CLEAR","submit":false,"predicateId":"m2-p1"}
+            {"action":"submit_input","nodeId":1,"predicateId":"m2-p1"}
             {"action":"ensure_toggle","nodeId":1,"desired":true,"predicateId":"m2-p1"}
-            {"action":"bind_predicate","predicateId":"m2-p1","nodeId":7,"selector":{"viewIdResourceName":"optional","className":"optional"}}
+            {"action":"bind_predicate","predicateId":"m2-p1","nodeId":7}
             {"action":"back"} {"action":"home"}
             {"action":"wait","milliseconds":1000}
             {"action":"finish","reason":"direct observable completion evidence"}

@@ -297,6 +297,19 @@ internal object NativePlannerProtocol {
                 .put("treePath", JSONObject().put("type", "array").put("items", JSONObject().put("type", "integer")))
                 .put("bounds", JSONObject().put("type", "string")),
         )
+        .put(
+            "anyOf",
+            JSONArray(
+                listOf(
+                    JSONObject().put("required", JSONArray().put("viewIdResourceName")),
+                    JSONObject().put("required", JSONArray().put("text")),
+                    JSONObject().put("required", JSONArray().put("description")),
+                    JSONObject().put("required", JSONArray().put("treePath")),
+                    JSONObject().put("required", JSONArray().put("bounds")),
+                    JSONObject().put("required", JSONArray().put("packageName").put("className")),
+                ),
+            ),
+        )
 
     private fun message(role: String, content: Any): JSONObject =
         JSONObject().put("role", role).put("content", content)

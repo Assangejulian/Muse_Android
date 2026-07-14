@@ -78,6 +78,10 @@ enum class TargetHintResult { MATCH, NO_MATCH, AMBIGUOUS }
 
 /** Conservative hint matching used only for conflict checks and candidate scoring. */
 object TargetHintMatcher {
+    private data class HintScore(val semantic: Int, val structure: Int) {
+        val total: Int get() = semantic + structure
+    }
+
     fun semanticallyEquivalent(first: String?, second: String?): Boolean {
         val left = first.orEmpty()
         val right = second.orEmpty()
@@ -87,12 +91,15 @@ object TargetHintMatcher {
 
     fun match(hint: String, node: UiNodeSnapshot): TargetHintResult =
         if (hint.isBlank()) TargetHintResult.NO_MATCH else {
-            val fields = listOf(node.text, node.description, node.viewId, node.className)
-            if (score(hint, fields) > 0) TargetHintResult.MATCH else TargetHintResult.NO_MATCH
+            if (score(hint, node).semantic > 0) TargetHintResult.MATCH else TargetHintResult.NO_MATCH
         }
 
     fun match(hint: String, nodes: List<UiNodeSnapshot>): TargetHintResult {
-        val matches = nodes.count { match(hint, it) == TargetHintResult.MATCH }
+        if (hint.isBlank()) return TargetHintResult.NO_MATCH
+        val scored = nodes.map { it to score(hint, it) }.filter { it.second.semantic > 0 }
+        if (scored.isEmpty()) return TargetHintResult.NO_MATCH
+        val best = scored.maxOf { it.second.total }
+        val matches = scored.count { it.second.total == best }
         return when {
             matches == 1 -> TargetHintResult.MATCH
             matches > 1 -> TargetHintResult.AMBIGUOUS
@@ -100,30 +107,81 @@ object TargetHintMatcher {
         }
     }
 
-    private fun score(hint: String, fields: List<String>): Int {
-        val normalizedFields = fields.map(::normalize).filter(String::isNotBlank)
-        val combined = normalizedFields.joinToString(" ")
-        val englishTokens = Regex("[a-z0-9]+").findAll(hint.lowercase(Locale.ROOT)).map { it.value }.toList()
-        val chineseSegments = Regex("[\\p{IsHan}]{2,}").findAll(hint).map { it.value }.toList()
-        var score = 0
-        englishTokens.forEach { token ->
-            val aliases = genericAliases[token].orEmpty() + token
-            if (aliases.any { alias -> combined.contains(alias) || normalizedFields.any { field -> alias.contains(field) && field.length >= 2 } }) score++
+    private fun score(hint: String, node: UiNodeSnapshot): HintScore {
+        val fields = listOf(node.text, node.description, node.viewId)
+            .filter(String::isNotBlank)
+            .map(::normalize)
+        val fieldTokens = fields.flatMap { Regex("[a-z0-9]+|[\\p{IsHan}]{1,}").findAll(it).map { match -> match.value }.toList() }
+        var semantic = 0
+        var structure = 0
+
+        Regex("[a-z0-9]+").findAll(hint.lowercase(Locale.ROOT)).forEach { match ->
+            val token = match.value
+            val generic = token in genericEnglish
+            val fieldMatch = fieldTokens.any { field -> englishTokenMatches(token, field) }
+            if (generic) {
+                if (classMatches(node.className, token)) structure += 2
+            } else if (fieldMatch) {
+                semantic += if (fieldTokens.any { it == token }) 100 else 60
+            }
         }
-        chineseSegments.forEach { segment ->
-            if (combined.contains(normalize(segment)) || normalizedFields.any { field -> field.contains(normalize(segment)) }) score += 2
+
+        chineseSemanticSegments(hint).forEach { segment ->
+            if (fields.any { it.contains(segment) }) semantic += 90
         }
-        if (englishTokens.isNotEmpty() && score * 2 >= englishTokens.size) return score
-        return if (chineseSegments.isNotEmpty() && score > 0) score else 0
+
+        // A control class can support a semantic match but can never create
+        // one by itself. This prevents a generic "switch" hint from selecting
+        // the first switch on a page.
+        return HintScore(semantic = semantic, structure = structure.coerceAtMost(6))
     }
 
     private fun normalize(value: String): String = value.trim().lowercase(Locale.ROOT)
         .replace(Regex("[\\p{Punct}\\p{Z}\\s]+"), "")
 
+    private fun englishTokenMatches(token: String, field: String): Boolean {
+        if (token.length < 3) return field == token
+        if (field == token) return true
+        if (field.removeSuffix("s") == token || token.removeSuffix("s") == field) return true
+        return field.contains(token) || token.contains(field) && field.length >= 3
+    }
+
+    private fun classMatches(className: String, token: String): Boolean {
+        val normalized = className.lowercase(Locale.ROOT)
+        return genericAliases[token].orEmpty().any { normalized.contains(it) } || normalized.contains(token)
+    }
+
+    private fun chineseSemanticSegments(hint: String): Set<String> {
+        val genericWords = listOf("设置", "按钮", "开关", "选项", "控件", "页面")
+        val runs = Regex("[\\p{IsHan}]+").findAll(hint).map { it.value }
+        return runs.flatMap { raw ->
+            var cleaned = raw
+            genericWords.forEach { word -> cleaned = cleaned.replace(word, "") }
+            buildSet {
+                for (start in cleaned.indices) {
+                    for (length in 2..4) {
+                        if (start + length <= cleaned.length) add(cleaned.substring(start, start + length))
+                    }
+                }
+            }
+        }.filter(String::isNotBlank).toSet()
+    }
+
+    private val genericEnglish = setOf(
+        "toggle", "switch", "checkbox", "radiobutton", "button", "control", "field", "input", "edittext", "textfield",
+        "settings", "setting", "option", "page",
+    )
+
     private val genericAliases = mapOf(
-        "toggle" to setOf("switch", "checkbox", "radiobutton"),
-        "switch" to setOf("toggle", "checkbox", "radiobutton"),
-        "button" to setOf("action", "control"),
+        "toggle" to setOf("switch", "checkbox", "radiobutton", "toggle"),
+        "switch" to setOf("switch", "checkbox", "radiobutton", "toggle"),
+        "checkbox" to setOf("switch", "checkbox", "radiobutton", "toggle"),
+        "radiobutton" to setOf("switch", "checkbox", "radiobutton", "toggle"),
+        "button" to setOf("button", "action", "control"),
+        "control" to setOf("button", "control"),
         "field" to setOf("input", "edittext", "textfield"),
+        "input" to setOf("input", "edittext", "textfield"),
+        "edittext" to setOf("input", "edittext", "textfield"),
+        "textfield" to setOf("input", "edittext", "textfield"),
     )
 }

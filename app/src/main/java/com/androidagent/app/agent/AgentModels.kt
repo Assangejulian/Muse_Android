@@ -73,10 +73,14 @@ data class BoundElementIdentity(
 /** Result of resolving a binding against a fresh accessibility observation. */
 sealed interface IdentityResolution {
     data class Found(val node: UiNodeSnapshot) : IdentityResolution
-    data object MissingInSameContext : IdentityResolution
+    /** The bound window is still present, but the bound node is absent. */
+    data object MissingInSameWindow : IdentityResolution
+    /** The bound window disappeared while the package remained foreground. */
+    data object BoundWindowGone : IdentityResolution
     data class Ambiguous(val count: Int) : IdentityResolution
     data object PackageChanged : IdentityResolution
-    data object WindowChanged : IdentityResolution
+    /** A same-package replacement window contains the bound structure. */
+    data object WindowRecreated : IdentityResolution
     data object IdentityInvalidated : IdentityResolution
 }
 
@@ -218,7 +222,15 @@ object NodeSelector {
         }
         if (packageNodes.isEmpty()) {
             return if (identity.windowId == null && observation.packageName == identity.packageName) {
-                IdentityResolution.MissingInSameContext
+                IdentityResolution.MissingInSameWindow
+            } else if (identity.windowId != null && observation.packageName == identity.packageName) {
+                val windowStillBelongsToPackage = observation.windowPackages[identity.windowId]?.let { it == identity.packageName }
+                    ?: (identity.windowId in observation.windowIds)
+                if (windowStillBelongsToPackage) {
+                    IdentityResolution.MissingInSameWindow
+                } else {
+                    IdentityResolution.BoundWindowGone
+                }
             } else {
                 IdentityResolution.IdentityInvalidated
             }
@@ -226,7 +238,19 @@ object NodeSelector {
 
         if (identity.windowId != null) {
             val sameWindow = packageNodes.filter { it.windowId == identity.windowId }
-            if (sameWindow.isEmpty()) return IdentityResolution.WindowChanged
+            if (sameWindow.isEmpty()) {
+                val windowStillBelongsToPackage = observation.windowPackages[identity.windowId]?.let { it == identity.packageName }
+                    ?: (identity.windowId in observation.windowIds)
+                if (windowStillBelongsToPackage) return IdentityResolution.MissingInSameWindow
+
+                // A replacement activity normally exposes the same stable
+                // structure under a fresh window id. That is not evidence that
+                // the old element disappeared; it is an identity transition.
+                if (packageNodes.any { structurallyMatchesIgnoringWindow(it, identity) }) {
+                    return IdentityResolution.WindowRecreated
+                }
+                return IdentityResolution.BoundWindowGone
+            }
             return resolveWithinContext(sameWindow, identity)
         }
         return resolveWithinContext(packageNodes, identity)
@@ -237,7 +261,7 @@ object NodeSelector {
             val byViewId = candidates.filter { it.viewId == identity.viewIdResourceName }
             // A captured view id is a hard identity. Its disappearance must
             // not fall back to an arbitrary same-class node.
-            if (byViewId.isEmpty()) return IdentityResolution.MissingInSameContext
+            if (byViewId.isEmpty()) return IdentityResolution.MissingInSameWindow
             byViewId
         } else {
             candidates
@@ -247,7 +271,7 @@ object NodeSelector {
             narrowed.size == 1 -> IdentityResolution.Found(narrowed.single())
             narrowed.size > 1 -> IdentityResolution.Ambiguous(narrowed.size)
             else -> if (identity.viewIdResourceName == null) {
-                IdentityResolution.MissingInSameContext
+                IdentityResolution.MissingInSameWindow
             } else {
                 IdentityResolution.IdentityInvalidated
             }
@@ -299,9 +323,18 @@ object NodeSelector {
     fun disappearanceResolution(observation: Observation, identity: BoundElementIdentity): IdentityResolution =
         when (val resolution = resolveIdentity(observation, identity)) {
             IdentityResolution.IdentityInvalidated -> IdentityResolution.IdentityInvalidated
-            IdentityResolution.MissingInSameContext -> IdentityResolution.MissingInSameContext
+            IdentityResolution.MissingInSameWindow -> IdentityResolution.MissingInSameWindow
             else -> resolution
         }
+
+    private fun structurallyMatchesIgnoringWindow(node: UiNodeSnapshot, identity: BoundElementIdentity): Boolean {
+        if (identity.packageName.isNotBlank() && node.packageName.isNotBlank() && node.packageName != identity.packageName) return false
+        if (identity.viewIdResourceName != null && node.viewId != identity.viewIdResourceName) return false
+        if (identity.stableKey != null && node.stableKey != identity.stableKey) return false
+        if (identity.className.isNotBlank() && node.className != identity.className) return false
+        if (identity.treePath != null && node.treePath != identity.treePath) return false
+        return identity.viewIdResourceName != null || identity.stableKey != null || identity.treePath != null
+    }
 
     fun resolve(observation: Observation, nodeId: Int?, selector: ElementSelector?): UiNodeSnapshot? {
         if (selector != null) {
@@ -363,6 +396,10 @@ data class Observation(
     val packageName: String,
     val nodes: List<UiNodeSnapshot>,
     val imeVisible: Boolean = false,
+    /** Window ids observed in this snapshot, including windows with no meaningful nodes. */
+    val windowIds: Set<Int> = nodes.mapNotNull { it.windowId }.toSet(),
+    /** Optional package ownership for windows that have no emitted nodes. */
+    val windowPackages: Map<Int, String> = emptyMap(),
 ) {
     val observationId: String get() = stateFingerprint()
 

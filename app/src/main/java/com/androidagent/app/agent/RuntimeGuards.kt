@@ -2,7 +2,7 @@ package com.androidagent.app.agent
 
 data class PredicateEvidence(val proven: Boolean, val details: List<String>)
 
-enum class BindingLifecycle { PREPARED, DISPATCHED, COMMITTED, VERIFIED, INVALIDATED }
+enum class BindingLifecycle { PREPARED, DISPATCHED, COMMITTED, VERIFIED, INVALIDATED, REBIND_REQUIRED }
 
 /** Local evidence counters used by the Stop Gate; tool volume is not evidence. */
 data class StopGateEvidenceCounters(
@@ -39,6 +39,7 @@ data class BindingPreparation(
     val prepared: Boolean,
     val provisional: List<ProvisionalPredicateBinding> = emptyList(),
     val reason: String = "",
+    val inferredExistingBinding: PredicateBinding? = null,
 ) {
     val bound: Boolean get() = prepared
 }
@@ -88,7 +89,8 @@ class PredicateBindingStore {
             if (selectorMatches.size != 1) {
                 return BindingResult(false, reason = if (selectorMatches.isEmpty()) "predicate target missing" else "predicate target is ambiguous")
             }
-            if (!sameNode(node, selectorMatches.single())) {
+            val existing = bindings[key(milestone.id, predicateIndex)]
+            if (!sameNode(node, selectorMatches.single()) && existing?.lifecycle != BindingLifecycle.REBIND_REQUIRED) {
                 return BindingResult(false, reason = "target conflicts with predicate selector")
             }
         }
@@ -114,10 +116,17 @@ class PredicateBindingStore {
             if (existing.lifecycle == BindingLifecycle.INVALIDATED) {
                 return BindingResult(false, reason = "predicate binding was invalidated")
             }
+            if (existing.lifecycle == BindingLifecycle.REBIND_REQUIRED && predicate.kind == UiPredicateKind.ELEMENT_DISAPPEARED) {
+                return BindingResult(false, reason = "disappeared predicate cannot be rebound after its window identity changed")
+            }
             return if (sameBindingIdentity(existing, binding)) {
                 BindingResult(true, binding = existing, reason = "already_bound")
             } else {
-                BindingResult(false, reason = "predicate binding conflicts with an existing target")
+                if (existing.lifecycle == BindingLifecycle.REBIND_REQUIRED) {
+                    BindingResult(true, binding = binding, provisional = ProvisionalPredicateBinding(binding), reason = "rebind_required")
+                } else {
+                    BindingResult(false, reason = "predicate binding conflicts with an existing target")
+                }
             }
         }
         return BindingResult(true, binding, ProvisionalPredicateBinding(binding))
@@ -128,6 +137,11 @@ class PredicateBindingStore {
         val existing = bindings[key(binding.milestoneId, binding.predicateIndex)]
         if (existing != null) {
             if (existing.lifecycle == BindingLifecycle.VERIFIED || existing.lifecycle == BindingLifecycle.INVALIDATED) return false
+            if (existing.lifecycle == BindingLifecycle.REBIND_REQUIRED) {
+                if (existing.predicateId != binding.predicateId) return false
+                bindings[key(binding.milestoneId, binding.predicateIndex)] = binding
+                return true
+            }
             if (!sameBindingIdentity(existing, binding)) return false
             return true
         }
@@ -156,9 +170,9 @@ class PredicateBindingStore {
     fun bindAction(milestone: TaskMilestone, action: AgentAction, observation: Observation, runId: String? = null): BindingResult {
         val preparation = prepareActionBinding(milestone, action, observation, runId)
         if (!preparation.prepared) return BindingResult(false, reason = preparation.reason)
-        commitAll(preparation.provisional)
+        if (!commitAll(preparation.provisional)) return BindingResult(false, reason = "predicate binding commit failed")
         val first = preparation.provisional.firstOrNull()?.binding
-        return BindingResult(true, first, preparation.provisional.firstOrNull())
+        return BindingResult(true, first ?: preparation.inferredExistingBinding, preparation.provisional.firstOrNull())
     }
 
     /** Read-only binding preparation performed after fresh observation and safety checks. */
@@ -185,46 +199,78 @@ class PredicateBindingStore {
         }
         if (candidateKinds.isEmpty()) return BindingPreparation(true)
         val requestedPredicateId = actionPredicateId(action)
-        val alreadyBound = mutableSetOf<Int>()
-        val candidates = milestone.successPredicates.mapIndexedNotNull { index, predicate ->
-            if (predicate.kind !in candidateKinds) return@mapIndexedNotNull null
+        data class Candidate(val index: Int, val existing: PredicateBinding?)
+        val candidates = mutableListOf<Candidate>()
+        var rejection: String? = null
+        milestone.successPredicates.forEachIndexed { index, predicate ->
+            if (predicate.kind !in candidateKinds) return@forEachIndexed
             val effectiveId = predicate.predicateId ?: TaskPlanValidator.predicateIdFor(milestone.id, index)
-            if (requestedPredicateId != null && requestedPredicateId != effectiveId) return@mapIndexedNotNull null
+            if (requestedPredicateId != null && requestedPredicateId != effectiveId) return@forEachIndexed
             val hint = predicate.targetHint?.trim().orEmpty()
-            if (hint.isNotBlank() && !targetMatchesHint(target, hint)) return@mapIndexedNotNull null
+            if (hint.isNotBlank() && !targetMatchesHint(target, hint)) {
+                if (get(milestone.id, index) != null && requestedPredicateId == null) {
+                    rejection = "action target conflicts with existing predicate binding"
+                }
+                return@forEachIndexed
+            }
             val selectorMatches = predicate.target?.let { NodeSelector.matchingNodes(observation, it) }
             if (selectorMatches != null && selectorMatches.size != 1) {
-                if (requestedPredicateId != null) {
-                    return BindingPreparation(false, reason = if (selectorMatches.isEmpty()) "predicate target missing" else "predicate target is ambiguous")
+                if (requestedPredicateId == effectiveId || get(milestone.id, index) != null) {
+                    rejection = if (selectorMatches.isEmpty()) "predicate target missing" else "predicate target is ambiguous"
                 }
-                // A selector that does not describe this action is simply not
-                // a compatible predicate.  An ambiguous selector remains a
-                // hard safety failure because we cannot know which predicate
-                // the action would satisfy.
-                if (selectorMatches.isEmpty()) return@mapIndexedNotNull null
-                return BindingPreparation(false, reason = "predicate target is ambiguous")
+                return@forEachIndexed
             }
             if (selectorMatches != null && !sameNode(target, selectorMatches.single())) {
-                if (requestedPredicateId != null) return BindingPreparation(false, reason = "action target conflicts with predicate target")
-                return@mapIndexedNotNull null
+                val existing = get(milestone.id, index)
+                val canRebind = existing != null && existing.lifecycle != BindingLifecycle.VERIFIED &&
+                    existing.lifecycle != BindingLifecycle.INVALIDATED &&
+                    NodeSelector.resolveIdentity(observation, existing.identity) in setOf(
+                        IdentityResolution.WindowRecreated,
+                        IdentityResolution.IdentityInvalidated,
+                    ) && predicate.kind != UiPredicateKind.ELEMENT_DISAPPEARED
+                if (requestedPredicateId == effectiveId && !canRebind) {
+                    rejection = "action target conflicts with predicate target"
+                } else if (existing != null && !canRebind) {
+                    rejection = "action target conflicts with existing predicate binding"
+                }
+                return@forEachIndexed
             }
             val existing = get(milestone.id, index)
             if (existing != null) {
                 if (existing.lifecycle == BindingLifecycle.VERIFIED) {
-                    return BindingPreparation(false, reason = "predicate is already verified")
+                    rejection = "predicate is already verified"
+                    return@forEachIndexed
                 }
                 if (existing.lifecycle == BindingLifecycle.INVALIDATED) {
-                    return BindingPreparation(false, reason = "predicate binding was invalidated")
+                    rejection = "predicate binding was invalidated"
+                    return@forEachIndexed
                 }
-                if (requestedPredicateId != effectiveId) return@mapIndexedNotNull null
                 val resolution = NodeSelector.resolveIdentity(observation, existing.identity)
-                if (resolution !is IdentityResolution.Found || !sameNode(target, resolution.node)) {
-                    return BindingPreparation(false, reason = "action target conflicts with existing predicate binding")
+                when (resolution) {
+                    is IdentityResolution.Found -> {
+                        if (!sameNode(target, resolution.node)) {
+                            rejection = "action target conflicts with existing predicate binding"
+                            return@forEachIndexed
+                        }
+                    }
+                    IdentityResolution.WindowRecreated,
+                    IdentityResolution.IdentityInvalidated,
+                    -> {
+                        if (predicate.kind == UiPredicateKind.ELEMENT_DISAPPEARED) {
+                            rejection = "disappeared predicate cannot be rebound after its window identity changed"
+                            return@forEachIndexed
+                        }
+                        bindings[key(milestone.id, index)] = existing.copy(lifecycle = BindingLifecycle.REBIND_REQUIRED)
+                    }
+                    else -> {
+                        rejection = "action target conflicts with existing predicate binding"
+                        return@forEachIndexed
+                    }
                 }
-                alreadyBound += index
             }
-            index
+            candidates += Candidate(index, get(milestone.id, index))
         }
+        rejection?.let { return BindingPreparation(false, reason = it) }
         if (candidates.isEmpty()) {
             return if (requestedPredicateId == null) BindingPreparation(true)
             else BindingPreparation(false, reason = "predicateId does not match a compatible current predicate")
@@ -232,14 +278,16 @@ class PredicateBindingStore {
         if (requestedPredicateId == null && candidates.size > 1) {
             return BindingPreparation(false, reason = "multiple compatible predicates; predicateId is required")
         }
-        val prepared = candidates.filterNot { it in alreadyBound }.map { index ->
-            val result = prepareBinding(milestone, index, target, observation, runId)
-            if (!result.bound || result.provisional == null) {
-                return BindingPreparation(false, reason = result.reason)
-            }
-            result.provisional
+        val candidate = candidates.single()
+        val existing = get(milestone.id, candidate.index) ?: candidate.existing
+        if (existing != null && existing.lifecycle != BindingLifecycle.REBIND_REQUIRED) {
+            return BindingPreparation(true, inferredExistingBinding = existing, reason = "inferred_existing_binding")
         }
-        return BindingPreparation(true, prepared)
+        val result = prepareBinding(milestone, candidate.index, target, observation, runId)
+        if (!result.bound || result.provisional == null) {
+            return BindingPreparation(false, reason = result.reason)
+        }
+        return BindingPreparation(true, listOf(result.provisional), reason = if (existing != null) "rebind_required" else "")
     }
 
     private fun prepareExplicitBinding(
@@ -263,10 +311,23 @@ class PredicateBindingStore {
                 return BindingPreparation(false, reason = "predicate binding was invalidated")
             }
             val resolution = NodeSelector.resolveIdentity(observation, existing.identity)
-            return if (resolution is IdentityResolution.Found && sameNode(target, resolution.node)) {
-                BindingPreparation(true, reason = "already_bound")
-            } else {
-                BindingPreparation(false, reason = "predicate binding conflicts with an existing target")
+            when (resolution) {
+                is IdentityResolution.Found -> {
+                    return if (sameNode(target, resolution.node)) {
+                        BindingPreparation(true, inferredExistingBinding = existing, reason = "already_bound")
+                    } else {
+                        BindingPreparation(false, reason = "predicate binding conflicts with an existing target")
+                    }
+                }
+                IdentityResolution.WindowRecreated,
+                IdentityResolution.IdentityInvalidated,
+                -> {
+                    if (predicate.kind == UiPredicateKind.ELEMENT_DISAPPEARED) {
+                        return BindingPreparation(false, reason = "disappeared predicate cannot be rebound after its window identity changed")
+                    }
+                    bindings[key(milestone.id, index)] = existing.copy(lifecycle = BindingLifecycle.REBIND_REQUIRED)
+                }
+                else -> return BindingPreparation(false, reason = "predicate binding conflicts with an existing target")
             }
         }
         if (predicate.targetHint?.isNotBlank() == true && !targetMatchesHint(target, predicate.targetHint)) {
@@ -275,10 +336,13 @@ class PredicateBindingStore {
         predicate.target?.let { selector ->
             val matches = NodeSelector.matchingNodes(observation, selector)
             if (matches.size != 1) return BindingPreparation(false, reason = if (matches.isEmpty()) "predicate target missing" else "predicate target is ambiguous")
-            if (!sameNode(target, matches.single())) return BindingPreparation(false, reason = "bind_predicate target conflicts with predicate selector")
+            val existing = get(milestone.id, index)
+            if (!sameNode(target, matches.single()) && existing?.lifecycle != BindingLifecycle.REBIND_REQUIRED) {
+                return BindingPreparation(false, reason = "bind_predicate target conflicts with predicate selector")
+            }
         }
         val result = prepareBinding(milestone, index, target, observation, runId)
-        return if (result.bound && result.provisional != null) BindingPreparation(true, listOf(result.provisional))
+        return if (result.bound && result.provisional != null) BindingPreparation(true, listOf(result.provisional), reason = "rebind_required")
         else BindingPreparation(false, reason = result.reason)
     }
 
@@ -412,8 +476,8 @@ class PredicateBindingStore {
         return existing != null && (
             existing.lifecycle == BindingLifecycle.VERIFIED ||
                 existing.lifecycle == BindingLifecycle.INVALIDATED ||
-                !sameBindingIdentity(existing, binding)
-            )
+                (existing.lifecycle != BindingLifecycle.REBIND_REQUIRED && !sameBindingIdentity(existing, binding))
+        )
     }
 
     private fun sameBindingIdentity(first: PredicateBinding, second: PredicateBinding): Boolean =
@@ -435,10 +499,31 @@ object MilestoneEvaluator {
         bindings: PredicateBindingStore? = null,
         predicateIndices: Set<Int>? = null,
         runId: String? = null,
+        computePositiveEvidence: Boolean = true,
     ): PredicateEvidence {
         val details = mutableListOf<String>()
+        val indices = predicateIndices ?: milestone.successPredicates.indices.toSet()
+        val positiveIndices = indices.filter { index ->
+            milestone.successPredicates.getOrNull(index)?.kind in POSITIVE_POSTCONDITION_KINDS
+        }.toSet()
+        val positiveEvidence = if (!computePositiveEvidence || positiveIndices.isEmpty()) {
+            false
+        } else {
+            positiveIndices.any { positiveIndex ->
+                evaluate(
+                    milestone = milestone,
+                    plan = plan,
+                    observation = observation,
+                    targetPackage = targetPackage,
+                    bindings = bindings,
+                    predicateIndices = setOf(positiveIndex),
+                    runId = runId,
+                    computePositiveEvidence = false,
+                ).proven
+            }
+        }
         val results = milestone.successPredicates.mapIndexedNotNull { predicateIndex, predicate ->
-            if (predicateIndices != null && predicateIndex !in predicateIndices) return@mapIndexedNotNull null
+            if (predicateIndex !in indices) return@mapIndexedNotNull null
             if (predicate.kind == UiPredicateKind.SEMANTIC_CLAIM) {
                 details += "${predicate.kind}=AUXILIARY: ${predicate.description}"
                 return@mapIndexedNotNull null
@@ -499,7 +584,15 @@ object MilestoneEvaluator {
 
                 UiPredicateKind.IME_HIDDEN -> !observation.imeVisible
                 UiPredicateKind.ELEMENT_PRESENT -> bindingRequired && concreteTarget && targetMatches.size == 1 && targetMatches.single().visible
-                UiPredicateKind.ELEMENT_DISAPPEARED -> bindingRequired && bound != null && identityResolution == IdentityResolution.MissingInSameContext
+                UiPredicateKind.ELEMENT_DISAPPEARED -> bindingRequired && bound != null && when (identityResolution) {
+                    IdentityResolution.MissingInSameWindow -> true
+                    IdentityResolution.BoundWindowGone -> boundWindowGoneCanProve(
+                        binding = bound,
+                        observation = observation,
+                        positiveEvidence = positiveEvidence,
+                    )
+                    else -> false
+                }
                 UiPredicateKind.ELEMENT_ENABLED -> bindingRequired && concreteTarget && target?.let { it.visible && it.enabled } == true
                 UiPredicateKind.ELEMENT_SELECTED -> bindingRequired && concreteTarget && target?.let { it.visible && it.selected } == true
                 UiPredicateKind.ELEMENT_CHECKED -> bindingRequired && concreteTarget && target?.let { it.visible && it.checked == true } == true
@@ -515,11 +608,50 @@ object MilestoneEvaluator {
                 UiPredicateKind.ELEMENT_STATE -> false
                 UiPredicateKind.SEMANTIC_CLAIM -> false
             }
-            details += "${predicate.kind}=${if (proven) "PROVEN" else "UNKNOWN"}: ${predicate.description}"
+            val detail = if (!proven && predicate.kind == UiPredicateKind.ELEMENT_DISAPPEARED && identityResolution == IdentityResolution.BoundWindowGone && !positiveEvidence) {
+                "bound window disappeared but a positive postcondition is required"
+            } else {
+                predicate.description
+            }
+            details += "${predicate.kind}=${if (proven) "PROVEN" else "UNKNOWN"}: $detail"
             proven
         }
         return PredicateEvidence(results.isNotEmpty() && results.all { it }, details)
     }
+
+    private fun boundWindowGoneCanProve(
+        binding: PredicateBinding,
+        observation: Observation,
+        positiveEvidence: Boolean,
+    ): Boolean {
+        if (binding.lifecycle != BindingLifecycle.COMMITTED && binding.lifecycle != BindingLifecycle.VERIFIED) return false
+        if (binding.boundPackage.isBlank() || observation.packageName != binding.boundPackage) return false
+        if (!positiveEvidence) return false
+        val identity = binding.identity
+        val samePackageNodes = observation.nodes.filter { node ->
+            identity.packageName.isBlank() || node.packageName == identity.packageName
+        }
+        // A replacement node with the same hard identity means this is a
+        // recreated/moved target, not a proven disappearance.
+        return samePackageNodes.none { node ->
+            (identity.viewIdResourceName != null && node.viewId == identity.viewIdResourceName) ||
+                (identity.stableKey != null && node.stableKey == identity.stableKey && node.className == identity.className) ||
+                (identity.treePath != null && node.treePath == identity.treePath && node.className == identity.className)
+        }
+    }
+
+    private val POSITIVE_POSTCONDITION_KINDS = setOf(
+        UiPredicateKind.PACKAGE_FOREGROUND,
+        UiPredicateKind.TEXT_PRESENT,
+        UiPredicateKind.EDITABLE_EQUALS,
+        UiPredicateKind.IME_HIDDEN,
+        UiPredicateKind.ELEMENT_PRESENT,
+        UiPredicateKind.ELEMENT_ENABLED,
+        UiPredicateKind.ELEMENT_SELECTED,
+        UiPredicateKind.ELEMENT_CHECKED,
+        UiPredicateKind.ELEMENT_TEXT_EQUALS,
+        UiPredicateKind.TOGGLE_STATE,
+    )
 
     fun evaluateHardPredicates(
         milestone: TaskMilestone,

@@ -63,14 +63,14 @@ class AgentAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         Log.w(TAG, "Accessibility service interrupted")
-        if (AgentController.state.value.running) {
-            AgentController.stopWithReason("Accessibility service interrupted")
+        if (AgentController.currentRunId() != null) {
+            AgentController.stopWithCause(AgentStopCause.ACCESSIBILITY_INTERRUPTED)
         }
     }
 
     override fun onDestroy() {
         if (AgentController.currentRunId() != null) {
-            AgentController.stopWithReason("Accessibility service disconnected")
+            AgentController.stopWithCause(AgentStopCause.ACCESSIBILITY_DISCONNECTED)
         }
         if (::overlayController.isInitialized) overlayController.hide()
         serviceScope.cancel()
@@ -105,7 +105,17 @@ class AgentAccessibilityService : AccessibilityService() {
             observableWindows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
                 ?.root?.packageName?.toString().orEmpty()
         }
-        return Observation(foregroundPackage, nodes.take(MAX_NODES), imeVisible)
+        val windowIds = observableWindows.mapTo(linkedSetOf()) { it.id }
+        val windowPackages = observableWindows.mapNotNull { window ->
+            window.root?.packageName?.toString()?.takeIf(String::isNotBlank)?.let { window.id to it }
+        }.toMap()
+        return Observation(
+            packageName = foregroundPackage,
+            nodes = nodes.take(MAX_NODES),
+            imeVisible = imeVisible,
+            windowIds = windowIds,
+            windowPackages = windowPackages,
+        )
     }
 
     private fun collectNodes(
