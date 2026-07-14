@@ -42,4 +42,17 @@ class RecoveryPolicyTest {
         assertEquals(RecoveryAction.WAIT, policy.decide(context).action)
         assertEquals(RecoveryAction.ABORT, policy.decide(context).action)
     }
+
+    @Test
+    fun progressResetsConsecutiveRecoveryBudgetButKeepsDiagnostics() {
+        val policy = RecoveryPolicy(maxRecoveries = 2)
+        val context = RecoveryContext(currentMilestoneId = "m1", reason = RecoveryReason.SCREEN_UNCHANGED)
+        policy.decide(context)
+        assertEquals(1, policy.consecutiveRecoveries)
+        assertEquals(1, policy.totalRecoveries)
+        policy.resetFailures("m1")
+        assertEquals(0, policy.consecutiveRecoveries)
+        assertEquals(1, policy.totalRecoveries)
+        assertEquals(RecoveryAction.REOBSERVE, policy.decide(context).action)
+    }
 }

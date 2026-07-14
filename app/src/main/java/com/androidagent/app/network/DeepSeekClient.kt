@@ -1,5 +1,6 @@
 package com.androidagent.app.network
 
+import com.androidagent.app.BuildConfig
 import com.androidagent.app.agent.Observation
 import com.androidagent.app.agent.ActionParser
 import com.androidagent.app.agent.CriticResult
@@ -33,8 +34,10 @@ sealed interface InteractionDecision {
 }
 
 class DeepSeekClient(
-    private val allowInsecureLocalDevelopment: Boolean = false,
+    allowInsecureLocalDevelopment: Boolean = BuildConfig.DEBUG,
 ) {
+    // A release build can never opt into cleartext through a caller-provided flag.
+    private val allowInsecureLocalDevelopment = BuildConfig.DEBUG && allowInsecureLocalDevelopment
     private val client = sharedClient
     private val legacyPlannerModels = mutableSetOf<String>()
 
@@ -53,7 +56,7 @@ class DeepSeekClient(
             forcedChat || forcedAction -> input.substringAfter(' ', "").trim()
             else -> input.trim()
         }.take(4_000)
-        SensitiveOperationPolicy.validateGoal(cleanInput).getOrThrow()
+        if (forcedAction) SensitiveOperationPolicy.validateGoal(cleanInput).getOrThrow()
         val system = """
             You are Muse, a friendly Chinese Android tablet assistant. Decide whether the user wants normal
             conversation or a real device operation. Return exactly one JSON object.
@@ -121,6 +124,9 @@ class DeepSeekClient(
             Prefer node/text actions. Take one reversible step at a time.
             Never click the same toggle twice. Never declare success merely because the target app launched.
             Use ensure_toggle when the goal requires a boolean control and the target node exposes checked state.
+            If a target predicate has no side-effect action, use bind_predicate with its stable predicateId;
+            bind_predicate only inspects and binds the current unique element and never clicks or types.
+            When several compatible predicates exist, every action must include the intended predicateId.
             Predicate kinds are PACKAGE_FOREGROUND, TEXT_PRESENT, EDITABLE_EQUALS, IME_HIDDEN, ELEMENT_PRESENT,
             ELEMENT_DISAPPEARED, ELEMENT_ENABLED, ELEMENT_SELECTED, ELEMENT_CHECKED, ELEMENT_TEXT_EQUALS,
             TOGGLE_STATE(expectedChecked), and auxiliary SEMANTIC_CLAIM. Never use fuzzy ELEMENT_STATE or TOGGLE_ON.
@@ -229,6 +235,8 @@ class DeepSeekClient(
             Prefer node/text actions. Take one reversible step at a time.
             Never click the same toggle twice. Never declare success merely because the target app launched.
             Use ensure_toggle when the goal requires a boolean control and the target node exposes checked state.
+            Use bind_predicate with a stable predicateId for observation-only target binding; it has no side effect.
+            Include predicateId whenever more than one success predicate could match the action target.
             Predicate kinds are PACKAGE_FOREGROUND, TEXT_PRESENT, EDITABLE_EQUALS, IME_HIDDEN, ELEMENT_PRESENT,
             ELEMENT_DISAPPEARED, ELEMENT_ENABLED, ELEMENT_SELECTED, ELEMENT_CHECKED, ELEMENT_TEXT_EQUALS,
             TOGGLE_STATE(expectedChecked), and auxiliary SEMANTIC_CLAIM. Never use fuzzy ELEMENT_STATE or TOGGLE_ON.
@@ -305,6 +313,7 @@ class DeepSeekClient(
             ]}
             Use deterministic local predicates whenever possible. A dispatched action is never proof by itself.
             You do not see the current Accessibility observation. Do not guess view IDs, tree paths, bounds, or exact selectors.
+            Predicate IDs are stable milestone-local contracts; the runtime may complete binding only from a fresh observation.
             For target predicates emit targetHint and leave target unbound unless a stable target is explicitly known from user input.
             PACKAGE_FOREGROUND must include targetPackage. TOGGLE_STATE must include expectedChecked. Every target predicate is bound by the runtime from a unique current node before its action; an unbound predicate can never be proven.
             Never return a semantic-only milestone. SEMANTIC_CLAIM is only auxiliary evidence alongside a deterministic predicate.

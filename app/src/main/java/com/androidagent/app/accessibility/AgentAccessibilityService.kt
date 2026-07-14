@@ -170,6 +170,7 @@ class AgentAccessibilityService : AccessibilityService() {
         is AgentAction.InputText -> inputTextDetailed(action, observation)
         is AgentAction.SubmitInput -> submitInputDetailed(action, observation)
         is AgentAction.EnsureToggle -> result(ensureToggle(action, observation), "toggle_updated", "ensure_toggle")
+        is AgentAction.BindPredicate -> ActionExecutionResult(false, "not_executable", "bind_predicate is runtime-only")
         is AgentAction.Back -> result(performGlobalAction(GLOBAL_ACTION_BACK), "back", "back")
         is AgentAction.Home -> result(performGlobalAction(GLOBAL_ACTION_HOME), "home", "home")
         is AgentAction.Wait -> ActionExecutionResult(true, "waited", "wait")
@@ -228,10 +229,10 @@ class AgentAccessibilityService : AccessibilityService() {
                     NodeClickPolicy.isSafeBounds(bounds.left, bounds.top, bounds.right, bounds.bottom, bitmap.width, bitmap.height)
                 }
                 .singleOrNull() ?: return false
-            Log.i(TAG, "OCR fallback matched text=$target bounds=$candidate")
+            Log.i(TAG, "OCR fallback matched chars=${target.length} bounds=$candidate")
             tap(candidate.exactCenterX(), candidate.exactCenterY())
         } catch (error: Throwable) {
-            Log.w(TAG, "OCR fallback failed for text=$target", error)
+            Log.w(TAG, "OCR fallback failed chars=${target.length}", error)
             false
         } finally {
             bitmap.recycle()

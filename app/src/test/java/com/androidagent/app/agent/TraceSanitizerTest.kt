@@ -52,4 +52,11 @@ class TraceSanitizerTest {
         assertFalse(payload["arbitrary"].toString().contains("user chat body"))
         assertTrue(payload["arbitrary"].toString().contains("sha256="))
     }
+
+    @Test
+    fun traceRetainsSafeActionAndOutcomeCodesOnly() {
+        assertEquals("INPUT_TEXT", TraceSanitizer.actionType(AgentAction.InputText("hidden")))
+        assertEquals("TIMEOUT", TraceSanitizer.reasonCode("TIMEOUT: worker deadline"))
+        assertEquals("UNCLASSIFIED", TraceSanitizer.reasonCode("raw user sentence with private data"))
+    }
 }

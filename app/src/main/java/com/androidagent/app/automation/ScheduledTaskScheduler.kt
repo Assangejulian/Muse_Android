@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.PowerManager
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
+import androidx.work.BackoffPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
@@ -71,6 +72,7 @@ object ScheduledTaskScheduler {
         val work = OneTimeWorkRequestBuilder<ScheduledAgentWorker>()
             .setInputData(workDataOf("task_id" to request.taskId, "task_goal" to request.goal))
             .setInitialDelay(delayMillis, TimeUnit.MILLISECONDS)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(uniqueName(request.taskId), policy, work)
@@ -124,8 +126,7 @@ object ScheduledWorkerResultMapper {
         timedOut: Boolean,
         runAttemptCount: Int,
     ): ScheduledWorkerDecision {
-        val result = runtimeResult ?: when {
-            timedOut -> RuntimeResult.failure(RuntimeOutcome.TIMEOUT, "Scheduled run timed out")
+        val result = if (timedOut) RuntimeResult.failure(RuntimeOutcome.TIMEOUT, "Scheduled run timed out") else runtimeResult ?: when {
             agentBusy -> RuntimeResult.failure(RuntimeOutcome.AGENT_BUSY, "Agent is already running")
             !accessibilityConnected -> RuntimeResult.failure(RuntimeOutcome.ACCESSIBILITY_DISCONNECTED, "Accessibility service is disconnected")
             else -> RuntimeResult.failure(RuntimeOutcome.INTERNAL_ERROR, "Scheduled run returned no result")
@@ -134,7 +135,6 @@ object ScheduledWorkerResultMapper {
             RuntimeOutcome.TRANSIENT_NETWORK_ERROR,
             RuntimeOutcome.ACCESSIBILITY_DISCONNECTED,
             RuntimeOutcome.AGENT_BUSY,
-            RuntimeOutcome.TIMEOUT,
         )
         val type = when {
             result.outcome == RuntimeOutcome.SUCCESS -> WorkerDecisionType.SUCCESS
@@ -174,16 +174,42 @@ class ScheduledAgentWorker(context: Context, parameters: WorkerParameters) : Cor
         val wakeLock = (applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "Muse:ScheduledAgent")
         wakeLock.acquire(TimeUnit.MINUTES.toMillis(9))
+        var startedRunId: String? = null
         return try {
-            AgentController.start(applicationContext, settings, goalOverride = goal)
+            val start = AgentController.start(applicationContext, settings, goalOverride = goal)
+            val runId = when (start) {
+                is com.androidagent.app.accessibility.AgentStartResult.Started -> start.runId
+                is com.androidagent.app.accessibility.AgentStartResult.Busy -> {
+                    val decision = ScheduledWorkerResultMapper.map(
+                        runtimeResult = RuntimeResult.failure(RuntimeOutcome.AGENT_BUSY, "Agent is already running", start.activeRunId),
+                        accessibilityConnected = true,
+                        agentBusy = true,
+                        timedOut = false,
+                        runAttemptCount = runAttemptCount,
+                    )
+                    return if (decision.type == WorkerDecisionType.RETRY) Result.retry() else Result.failure()
+                }
+                com.androidagent.app.accessibility.AgentStartResult.InvalidGoal -> return Result.failure()
+                com.androidagent.app.accessibility.AgentStartResult.AccessibilityDisconnected -> {
+                    val decision = ScheduledWorkerResultMapper.map(
+                        runtimeResult = RuntimeResult.failure(RuntimeOutcome.ACCESSIBILITY_DISCONNECTED, "Accessibility service is disconnected"),
+                        accessibilityConnected = false,
+                        agentBusy = false,
+                        timedOut = false,
+                        runAttemptCount = runAttemptCount,
+                    )
+                    return if (decision.type == WorkerDecisionType.RETRY) Result.retry() else Result.failure()
+                }
+            }
+            startedRunId = runId
             delay(1_000)
             val finished = withTimeoutOrNull(TimeUnit.MINUTES.toMillis(8)) {
-                while (AgentController.state.value.running) delay(500)
+                while (AgentController.isRunning(runId)) delay(500)
                 true
             } ?: false
-            if (!finished) AgentController.stopWithReason("Scheduled run exceeded its worker deadline")
+            if (!finished) AgentController.stopWithReason("Scheduled run exceeded its worker deadline", runId)
             val decision = ScheduledWorkerResultMapper.map(
-                runtimeResult = AgentController.lastResult,
+                runtimeResult = AgentController.resultForRun(runId),
                 accessibilityConnected = AgentController.state.value.accessibilityConnected,
                 agentBusy = AgentController.state.value.running,
                 timedOut = !finished,
@@ -195,8 +221,10 @@ class ScheduledAgentWorker(context: Context, parameters: WorkerParameters) : Cor
                 WorkerDecisionType.FAILURE -> Result.failure()
             }
         } finally {
-            if (AgentController.state.value.running && AgentController.state.value.goal == goal) {
-                AgentController.stopWithReason("Scheduled worker finished before the agent stopped")
+            startedRunId?.let { runId ->
+                if (AgentController.isRunning(runId)) {
+                    AgentController.stopWithReason("Scheduled worker finished before the agent stopped", runId)
+                }
             }
             if (wakeLock.isHeld) wakeLock.release()
         }

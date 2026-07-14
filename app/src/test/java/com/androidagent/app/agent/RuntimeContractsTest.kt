@@ -182,4 +182,100 @@ class RuntimeContractsTest {
         bindings.retainCompleted(previous, revised, setOf("m1"))
         assertTrue(bindings.get("m2", 0) != null)
     }
+
+    @Test
+    fun predicateBindingPrepareIsTransactionalAndRollbackLeavesNoProof() {
+        val milestone = TaskMilestone(
+            "dismiss",
+            "dismiss target",
+            listOf(UiPredicate(UiPredicateKind.ELEMENT_DISAPPEARED, targetHint = "Dismiss", description = "target disappears")),
+        )
+        val before = Observation("primary.app", listOf(
+            UiNodeSnapshot(4, "Dismiss", "", "Button", true, false, "0,0,100,30", packageName = "primary.app"),
+        ))
+        val bindings = PredicateBindingStore()
+        val prepared = bindings.prepareActionBinding(milestone, AgentAction.ClickNode(4), before, runId = "run-1")
+        assertTrue(prepared.prepared)
+        assertTrue(prepared.provisional.isNotEmpty())
+        assertEquals(null, bindings.get("dismiss", 0))
+
+        bindings.rollbackAll(prepared.provisional)
+        assertEquals(null, bindings.get("dismiss", 0))
+
+        val committed = bindings.prepareActionBinding(milestone, AgentAction.ClickNode(4), before, runId = "run-1")
+        assertTrue(bindings.commitAll(committed.provisional))
+        assertTrue(MilestoneEvaluator.evaluate(milestone, plan, Observation("primary.app", emptyList()), "primary.app", bindings, runId = "run-1").proven)
+    }
+
+    @Test
+    fun changedTextOnStableElementIsNotDisappearance() {
+        val milestone = TaskMilestone(
+            "dismiss",
+            "dismiss target",
+            listOf(UiPredicate(UiPredicateKind.ELEMENT_DISAPPEARED, description = "target disappears")),
+        )
+        val before = Observation("primary.app", listOf(
+            UiNodeSnapshot(4, "Before", "", "Button", true, false, "0,0,100,30", viewId = "primary:id/action", packageName = "primary.app"),
+        ))
+        val after = Observation("primary.app", listOf(
+            UiNodeSnapshot(9, "After", "", "Button", true, false, "2,2,102,32", viewId = "primary:id/action", packageName = "primary.app"),
+        ))
+        val bindings = PredicateBindingStore()
+        assertTrue(bindings.bind(milestone, 0, before.nodes.single(), before, "run-1").bound)
+        assertFalse(MilestoneEvaluator.evaluate(milestone, plan, after, "primary.app", bindings, runId = "run-1").proven)
+    }
+
+    @Test
+    fun observationOnlyBindingCommitsAndEvaluatesWithoutAnExecutableSideEffect() {
+        val milestone = TaskMilestone(
+            "state",
+            "inspect target",
+            listOf(UiPredicate(UiPredicateKind.ELEMENT_PRESENT, predicateId = "state-p1", targetHint = "Target", description = "target present")),
+        )
+        val screen = Observation("primary.app", listOf(
+            UiNodeSnapshot(1, "Target", "", "Button", true, false, "0,0,100,30", packageName = "primary.app"),
+        ))
+        val bindings = PredicateBindingStore()
+        val prepared = bindings.prepareActionBinding(
+            milestone,
+            AgentAction.BindPredicate("state-p1", selector = ElementSelector(text = "Target", className = "Button")),
+            screen,
+            "run-1",
+        )
+        assertTrue(prepared.prepared)
+        assertTrue(bindings.commitAll(prepared.provisional))
+        assertTrue(MilestoneEvaluator.evaluate(milestone, plan, screen, "primary.app", bindings, runId = "run-1").proven)
+    }
+
+    @Test
+    fun multipleCompatiblePredicatesRequireExplicitPredicateId() {
+        val milestone = TaskMilestone(
+            "state",
+            "inspect target",
+            listOf(
+                UiPredicate(UiPredicateKind.ELEMENT_PRESENT, predicateId = "state-p1", description = "first"),
+                UiPredicate(UiPredicateKind.ELEMENT_PRESENT, predicateId = "state-p2", description = "second"),
+            ),
+        )
+        val screen = Observation("primary.app", listOf(
+            UiNodeSnapshot(1, "Target", "", "Button", true, false, "0,0,100,30", packageName = "primary.app"),
+        ))
+        val bindings = PredicateBindingStore()
+        assertFalse(bindings.prepareActionBinding(milestone, AgentAction.ClickNode(1), screen).prepared)
+        assertTrue(bindings.prepareActionBinding(milestone, AgentAction.ClickNode(1, predicateId = "state-p2"), screen).prepared)
+    }
+
+    @Test
+    fun alreadySatisfiedToggleIsAComposedShortCircuit() {
+        val milestone = TaskMilestone(
+            "toggle",
+            "toggle target",
+            listOf(UiPredicate(UiPredicateKind.TOGGLE_STATE, expectedChecked = true, targetHint = "Target", description = "target on")),
+        )
+        val toggle = UiNodeSnapshot(1, "Target", "", "Switch", true, false, "0,0,100,30", checked = true, packageName = "primary.app")
+        val guard = ToolGuard(plan.copy(milestones = listOf(milestone)), "primary.app")
+        val result = guard.normalizeAndValidate(AgentAction.EnsureToggle(1, true), Observation("primary.app", listOf(toggle)), milestone)
+        assertEquals("already_satisfied", result.shortCircuit?.status)
+        assertEquals(null, result.action)
+    }
 }

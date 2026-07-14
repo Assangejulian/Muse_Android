@@ -73,7 +73,16 @@ object TaskPlanValidator {
         }) {
             throw TaskPlanException("Task plan contains a semantic-only milestone without a local verification condition")
         }
-        plan.milestones.flatMap { it.successPredicates }.forEach { predicate ->
+        val normalized = plan.copy(
+            milestones = plan.milestones.map { milestone ->
+                milestone.copy(
+                    successPredicates = milestone.successPredicates.mapIndexed { index, predicate ->
+                        predicate.copy(predicateId = predicate.predicateId ?: predicateIdFor(milestone.id, index))
+                    },
+                )
+            },
+        )
+        normalized.milestones.flatMap { it.successPredicates }.forEach { predicate ->
             if (predicate.kind == UiPredicateKind.ELEMENT_STATE) {
                 throw TaskPlanException("ELEMENT_STATE is ambiguous; use a typed ELEMENT_* predicate")
             }
@@ -94,8 +103,11 @@ object TaskPlanValidator {
                 }
             }
         }
-        return plan
+        return normalized
     }
+
+    fun predicateIdFor(milestoneId: String, index: Int): String =
+        "${milestoneId.trim().ifBlank { "milestone" }}-p${index + 1}"
 }
 
 data class TaskPlan(
@@ -160,11 +172,12 @@ object TaskPlanParser {
                 val item = milestonesJson.getJSONObject(index)
                 val objective = item.getString("objective").trim()
                 require(objective.isNotBlank()) { "Milestone objective cannot be blank" }
+                val milestoneId = item.optString("id", "m${index + 1}").ifBlank { "m${index + 1}" }
                 add(
                     TaskMilestone(
-                        id = item.optString("id", "m${index + 1}").ifBlank { "m${index + 1}" },
+                        id = milestoneId,
                         objective = objective,
-                        successPredicates = parsePredicates(item),
+                        successPredicates = parsePredicates(item, milestoneId),
                         kind = runCatching { TaskMilestoneKind.valueOf(item.optString("kind", "GENERIC").uppercase()) }
                             .getOrDefault(TaskMilestoneKind.GENERIC),
                     ),
@@ -205,7 +218,7 @@ object TaskPlanParser {
         return raw.substring(start, end + 1)
     }
 
-    private fun parsePredicates(item: JSONObject): List<UiPredicate> {
+    private fun parsePredicates(item: JSONObject, milestoneId: String): List<UiPredicate> {
         val predicates = item.optJSONArray("successPredicates")
         if (predicates == null || predicates.length() == 0) {
             val evidence = item.optString("successEvidence", "Visible evidence confirms the milestone")
@@ -243,7 +256,9 @@ object TaskPlanParser {
                         targetPackage = targetPackage,
                         targetHint = targetHint,
                         expectedChecked = if (legacyToggle) true else if (predicate.has("expectedChecked")) predicate.optBoolean("expectedChecked") else null,
-                        predicateId = predicate.optString("predicateId").trim().ifBlank { null },
+                        predicateId = predicate.optString("predicateId").trim().ifBlank {
+                            TaskPlanValidator.predicateIdFor(milestoneId, index)
+                        },
                     ),
                 )
             }

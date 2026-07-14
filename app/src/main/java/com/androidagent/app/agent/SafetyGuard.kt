@@ -19,7 +19,11 @@ object SafetyGuard {
         when (action) {
             is AgentAction.LaunchApp -> {
                 require(action.packageName in launchablePackages) { "Package is not in the installed app catalog" }
-                require(packagePolicy.allows(action.packageName)) { "Package is not allowed by the current plan" }
+                val canEstablishPrimary = packagePolicy.primaryPackage.isNullOrBlank() &&
+                    (packagePolicy.allowedPackages.isEmpty() || action.packageName in packagePolicy.allowedPackages)
+                require(canEstablishPrimary || packagePolicy.allows(action.packageName)) {
+                    "Package is not allowed by the current plan"
+                }
             }
             is AgentAction.ClickText -> Unit
             is AgentAction.TapPoint -> require(action.x in 30..970 && action.y in 30..970) { "Visual point is outside the safe screen region" }

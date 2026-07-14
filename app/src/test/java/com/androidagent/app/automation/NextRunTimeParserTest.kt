@@ -57,5 +57,16 @@ class NextRunTimeParserTest {
             WorkerDecisionType.FAILURE,
             ScheduledWorkerResultMapper.map(RuntimeResult.failure(RuntimeOutcome.TRANSIENT_NETWORK_ERROR, "network"), true, false, false, 3).type,
         )
+        assertEquals(
+            WorkerDecisionType.FAILURE,
+            ScheduledWorkerResultMapper.map(RuntimeResult.failure(RuntimeOutcome.USER_CANCELLED, "cancelled"), true, false, true, 0).let {
+                assertEquals(RuntimeOutcome.TIMEOUT, it.outcome)
+                it.type
+            },
+        )
+        assertEquals(
+            WorkerDecisionType.FAILURE,
+            ScheduledWorkerResultMapper.map(null, false, false, false, 3).type,
+        )
     }
 }

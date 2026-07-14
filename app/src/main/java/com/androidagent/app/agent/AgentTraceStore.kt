@@ -10,8 +10,8 @@ import java.util.UUID
 class AgentTraceStore(context: Context) {
     private val database = TraceDatabase(context.applicationContext)
 
-    fun startRun(goal: String, model: String): String {
-        val runId = UUID.randomUUID().toString()
+    fun startRun(goal: String, model: String, requestedRunId: String? = null): String {
+        val runId = requestedRunId?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
         database.writableDatabase.insertOrThrow("runs", null, ContentValues().apply {
             put("id", runId)
             put("goal", TraceSanitizer.goal(goal))

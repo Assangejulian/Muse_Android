@@ -13,13 +13,14 @@ object ActionParser {
         val action = json.getString("action")
         val actionFields = when (action) {
             "launch_app" -> setOf("action", "packageName")
-            "click_text" -> setOf("action", "text")
-            "click_node" -> setOf("action", "nodeId", "selector")
+            "click_text" -> setOf("action", "text", "predicateId")
+            "click_node" -> setOf("action", "nodeId", "selector", "predicateId")
             "tap_point" -> setOf("action", "x", "y")
             "swipe" -> setOf("action", "direction")
-            "input_text" -> setOf("action", "text", "nodeId", "target", "mode", "submit")
-            "submit_input" -> setOf("action", "nodeId", "target")
-            "ensure_toggle" -> setOf("action", "nodeId", "desired", "selector")
+            "input_text" -> setOf("action", "text", "nodeId", "target", "mode", "submit", "predicateId")
+            "submit_input" -> setOf("action", "nodeId", "target", "predicateId")
+            "ensure_toggle" -> setOf("action", "nodeId", "desired", "selector", "predicateId")
+            "bind_predicate", "inspect_element" -> setOf("action", "predicateId", "nodeId", "selector")
             "wait" -> setOf("action", "milliseconds")
             "finish", "fail" -> setOf("action", "reason")
             "back", "home" -> setOf("action")
@@ -28,10 +29,14 @@ object ActionParser {
         require(json.keys().asSequence().all { it in actionFields }) { "Unexpected field for $action" }
         return when (action) {
             "launch_app" -> AgentAction.LaunchApp(json.getString("packageName").also { require(it.isNotBlank()) })
-            "click_text" -> AgentAction.ClickText(json.getString("text").also { require(it.isNotBlank()) })
+            "click_text" -> AgentAction.ClickText(
+                text = json.getString("text").also { require(it.isNotBlank()) },
+                predicateId = json.optString("predicateId").ifBlank { null },
+            )
             "click_node" -> AgentAction.ClickNode(
                 json.getInt("nodeId").also { require(it > 0) },
                 parseSelector(json.optJSONObject("selector")),
+                json.optString("predicateId").ifBlank { null },
             )
             "tap_point" -> AgentAction.TapPoint(
                 json.getInt("x").also { require(it in 0..1000) },
@@ -44,15 +49,23 @@ object ActionParser {
                 target = parseSelector(json.optJSONObject("target")),
                 mode = runCatching { InputMode.valueOf(json.optString("mode", "REPLACE").uppercase()) }.getOrElse { error("Invalid input mode") },
                 submit = json.optBoolean("submit", false),
+                predicateId = json.optString("predicateId").ifBlank { null },
             )
             "submit_input" -> AgentAction.SubmitInput(
                 json.optInt("nodeId").takeIf { json.has("nodeId") }?.also { require(it > 0) },
                 parseSelector(json.optJSONObject("target")),
+                json.optString("predicateId").ifBlank { null },
             )
             "ensure_toggle" -> AgentAction.EnsureToggle(
                 json.getInt("nodeId").also { require(it > 0) },
                 json.getBoolean("desired"),
                 parseSelector(json.optJSONObject("selector")),
+                json.optString("predicateId").ifBlank { null },
+            )
+            "bind_predicate", "inspect_element" -> AgentAction.BindPredicate(
+                predicateId = json.getString("predicateId").also { require(it.isNotBlank()) },
+                nodeId = json.optInt("nodeId").takeIf { json.has("nodeId") }?.also { require(it > 0) },
+                selector = parseSelector(json.optJSONObject("selector")),
             )
             "back" -> AgentAction.Back
             "home" -> AgentAction.Home

@@ -44,7 +44,10 @@ class RuntimeGuardsTest {
         )
         val selected = Observation("example.app", listOf(UiNodeSnapshot(1, "toggle", "", "Switch", true, false, "0,0,100,30", selected = true)))
         val unselected = selected.copy(nodes = selected.nodes.map { it.copy(selected = false) })
-        assertTrue(MilestoneEvaluator.evaluate(milestone, plan, selected, "example.app").proven)
+        assertFalse(MilestoneEvaluator.evaluate(milestone, plan, selected, "example.app").proven)
+        val bindings = PredicateBindingStore()
+        assertTrue(bindings.bind(milestone, 0, selected.nodes.single(), selected).bound)
+        assertTrue(MilestoneEvaluator.evaluate(milestone, plan, selected, "example.app", bindings).proven)
         assertFalse(MilestoneEvaluator.evaluate(milestone, plan, unselected, "example.app").proven)
     }
 

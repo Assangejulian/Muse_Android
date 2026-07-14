@@ -62,6 +62,28 @@ class ElementSelectorTest {
         assertEquals(1, NodeSelector.resolve(observation, null, ElementSelector(viewIdResourceName = "example:id/action", treePath = listOf(0)))?.id)
     }
 
+    @Test
+    fun sharedViewIdKeepsDifferentStableIdentitiesSeparate() {
+        val before = Observation("example.app", listOf(
+            node(1, "A", "0,0,100,30").copy(viewId = "example:id/action", treePath = listOf(0)),
+            node(2, "B", "0,40,100,70").copy(viewId = "example:id/action", treePath = listOf(1)),
+        ))
+        val after = Observation("example.app", listOf(
+            node(8, "A changed", "2,2,102,32").copy(viewId = "example:id/action", treePath = listOf(0)),
+            node(9, "B", "0,40,100,70").copy(viewId = "example:id/action", treePath = listOf(1)),
+        ))
+        val identity = BoundElementIdentity.from(before.nodes.first())
+        assertEquals(listOf(8), NodeSelector.matchingNodes(after, identity).map { it.id })
+    }
+
+    @Test
+    fun treePathAndBoundsFallbackSurviveSmallMovementWithoutViewId() {
+        val before = node(1, "", "0,0,100,30").copy(treePath = listOf(2), stableKey = "row-2")
+        val after = node(7, "changed", "3,3,103,33").copy(treePath = listOf(2), stableKey = "row-2")
+        val identity = BoundElementIdentity.from(before)
+        assertEquals(7, NodeSelector.matchingNodes(Observation("example.app", listOf(after)), identity).single().id)
+    }
+
     private fun node(id: Int, text: String, bounds: String) = node(id, text, "", "Button", bounds)
 
     private fun node(id: Int, text: String, description: String, className: String, bounds: String) =

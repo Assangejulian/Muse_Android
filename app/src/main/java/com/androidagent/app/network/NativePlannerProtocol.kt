@@ -62,6 +62,7 @@ internal object NativePlannerProtocol {
                                                     "input_text",
                                                     "submit_input",
                                                     "ensure_toggle",
+                                                    "bind_predicate",
                                                     "back",
                                                     "home",
                                                     "wait",
@@ -88,6 +89,12 @@ internal object NativePlannerProtocol {
                                     JSONObject()
                                         .put("type", "integer")
                                         .put("description", "Required for click_node and ensure_toggle; optional for input_text and submit_input."),
+                                )
+                                .put(
+                                    "predicateId",
+                                    JSONObject()
+                                        .put("type", "string")
+                                        .put("description", "Optional stable success-predicate ID; required when several predicates could match."),
                                 )
                                 .put(
                                     "x",

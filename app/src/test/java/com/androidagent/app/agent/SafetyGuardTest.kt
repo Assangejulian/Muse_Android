@@ -73,4 +73,16 @@ class SafetyGuardTest {
             ).isSuccess,
         )
     }
+
+    @Test
+    fun firstInstalledLaunchCanEstablishPrimaryPackage() {
+        assertTrue(
+            SafetyGuard.validate(
+                AgentAction.LaunchApp("new.app"),
+                Observation("launcher", emptyList()),
+                PackagePolicy(),
+                setOf("new.app"),
+            ).isSuccess,
+        )
+    }
 }

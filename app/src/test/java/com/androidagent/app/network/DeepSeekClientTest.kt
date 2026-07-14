@@ -35,11 +35,16 @@ class DeepSeekClientTest {
     @Test
     fun contextWindowPreservesSixMessageOrderAndPairs() {
         val history = listOf(
-            "user" to "u1", "assistant" to "a1",
-            "user" to "u2", "assistant" to "a2",
-            "user" to "u3", "assistant" to "a3",
+            "user" to "u1-${"x".repeat(2_000)}", "assistant" to "a1-${"x".repeat(2_000)}",
+            "user" to "u2-${"x".repeat(2_000)}", "assistant" to "a2-${"x".repeat(2_000)}",
+            "user" to "u3-${"x".repeat(2_000)}", "assistant" to "a3-${"x".repeat(2_000)}",
         )
-        assertEquals(history, ContextWindow.select(history))
+        val selected = ContextWindow.select(history)
+        assertEquals(listOf("user", "assistant", "user", "assistant", "user", "assistant"), selected.map { it.first })
+        assertEquals(listOf("u1", "a1", "u2", "a2", "u3", "a3"), selected.map { it.second.substringBefore('-') })
+        selected.forEachIndexed { index, message ->
+            assertEquals(if (index % 2 == 0) "user" else "assistant", message.first)
+        }
     }
 
     @Test
@@ -205,12 +210,11 @@ class DeepSeekClientTest {
     fun allowsLoopbackHttpAndRejectsPublicInsecureHttpAndUrlCredentials() {
         assertTrue(runCatching { BaseUrlPolicy.validate("http://api.example.com/v1") }.isFailure)
         assertEquals("https://api.example.com/v1", BaseUrlPolicy.validate("https://api.example.com/v1"))
-        assertEquals("http://localhost:8080/v1", BaseUrlPolicy.validate("http://localhost:8080/v1"))
-        assertEquals("http://127.0.0.1:8080/v1", BaseUrlPolicy.validate("http://127.0.0.1:8080/v1"))
-        assertEquals(
-            "http://dev.example.com/v1",
-            BaseUrlPolicy.validate("http://dev.example.com/v1", allowInsecureLocalDevelopment = true),
-        )
+        assertTrue(runCatching { BaseUrlPolicy.validate("http://localhost:8080/v1") }.isFailure)
+        assertEquals("http://localhost:8080/v1", BaseUrlPolicy.validate("http://localhost:8080/v1", allowInsecureLocalDevelopment = true))
+        assertEquals("http://127.0.0.1:8080/v1", BaseUrlPolicy.validate("http://127.0.0.1:8080/v1", allowInsecureLocalDevelopment = true))
+        assertEquals("http://[::1]:8080/v1", BaseUrlPolicy.validate("http://[::1]:8080/v1", allowInsecureLocalDevelopment = true))
+        assertTrue(runCatching { BaseUrlPolicy.validate("http://dev.example.com/v1", allowInsecureLocalDevelopment = true) }.isFailure)
         assertTrue(runCatching { BaseUrlPolicy.validate("https://user:pass@example.com/v1") }.isFailure)
         assertTrue(runCatching { BaseUrlPolicy.validate("https://api.example.com/v1?token=secret") }.isFailure)
         assertTrue(runCatching { BaseUrlPolicy.validate("https://api.example.com/v1#fragment") }.isFailure)

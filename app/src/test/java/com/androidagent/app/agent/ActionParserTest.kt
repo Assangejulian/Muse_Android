@@ -68,4 +68,16 @@ class ActionParserTest {
             action,
         )
     }
+
+    @Test
+    fun parsesObservationOnlyPredicateBindingAndExplicitActionPredicateId() {
+        assertEquals(
+            AgentAction.BindPredicate("m1-p1", selector = ElementSelector(text = "Target", className = "Button")),
+            ActionParser.parse("""{"action":"bind_predicate","predicateId":"m1-p1","selector":{"text":"Target","className":"Button"}}"""),
+        )
+        assertEquals(
+            AgentAction.ClickNode(3, predicateId = "m1-p1"),
+            ActionParser.parse("""{"action":"click_node","nodeId":3,"predicateId":"m1-p1"}"""),
+        )
+    }
 }

@@ -23,18 +23,18 @@ internal object ProviderRequestPolicy {
 }
 
 internal object BaseUrlPolicy {
-    /** Public model endpoints require TLS; loopback HTTP is safe for local development. */
+    /** Release endpoints are TLS-only; debug may opt into loopback HTTP only. */
     fun validate(baseUrl: String, allowInsecureLocalDevelopment: Boolean = false): String {
         val normalized = baseUrl.trim().trimEnd('/')
         val uri = runCatching { URI(normalized) }.getOrElse { error("Invalid model service Base URL") }
         val scheme = uri.scheme?.lowercase()
-        val host = uri.host?.lowercase().orEmpty()
+        val host = uri.host?.lowercase()?.removePrefix("[")?.removeSuffix("]").orEmpty()
         require(host.isNotBlank()) { "Base URL must include a host" }
         require(uri.userInfo == null) { "Base URL must not include user information" }
         require(uri.query == null) { "Base URL must not include a query" }
         require(uri.fragment == null) { "Base URL must not include a fragment" }
         val loopback = host == "localhost" || host == "127.0.0.1" || host == "::1"
-        require(scheme == "https" || (scheme == "http" && (loopback || allowInsecureLocalDevelopment))) {
+        require(scheme == "https" || (scheme == "http" && allowInsecureLocalDevelopment && loopback)) {
             "Public model service Base URL must use https://"
         }
         return normalized

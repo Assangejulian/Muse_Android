@@ -36,15 +36,23 @@ class RecoveryPolicy(
     private val maxScreenRepeats: Int = 3,
     private val maxRecoveries: Int = 6,
 ) {
-    private var recoveries = 0
-    private val failures = mutableMapOf<String, Int>()
+    private val consecutiveFailuresByKey = mutableMapOf<String, Int>()
+    var consecutiveRecoveries: Int = 0
+        private set
+    var totalRecoveries: Int = 0
+        private set
+
+    fun failureCounts(): Map<String, Int> = consecutiveFailuresByKey.toMap()
 
     fun decide(context: RecoveryContext): RecoveryDecision {
         val key = key(context)
-        val count = maxOf(context.failureCount, failures[key] ?: 0)
-        if (recoveries >= maxRecoveries) return RecoveryDecision(RecoveryAction.ABORT, context.reason, "recovery budget exhausted", count)
-        recoveries += 1
-        failures[key] = count + 1
+        val count = maxOf(context.failureCount, consecutiveFailuresByKey[key] ?: 0)
+        if (consecutiveRecoveries >= maxRecoveries) {
+            return RecoveryDecision(RecoveryAction.ABORT, context.reason, "consecutive recovery budget exhausted", count)
+        }
+        consecutiveFailuresByKey[key] = count + 1
+        consecutiveRecoveries += 1
+        totalRecoveries += 1
         val decision = when (context.reason) {
             RecoveryReason.SCREEN_UNCHANGED -> if (count < maxScreenRepeats) RecoveryAction.REOBSERVE else RecoveryAction.REPLAN
             RecoveryReason.REPEATED_ACTION, RecoveryReason.ABAB_LOOP -> RecoveryAction.REPLAN
@@ -69,8 +77,14 @@ class RecoveryPolicy(
     fun decide(reason: RecoveryReason, actionKey: String? = null): RecoveryDecision =
         decide(RecoveryContext(currentMilestoneId = actionKey, reason = reason))
 
-    fun resetFailures() {
-        failures.clear()
+    /** Call when the current milestone made progress or was proven. */
+    fun resetFailures(milestoneId: String? = null) {
+        if (milestoneId.isNullOrBlank()) {
+            consecutiveFailuresByKey.clear()
+        } else {
+            consecutiveFailuresByKey.keys.removeIf { it.split('|').getOrNull(1) == milestoneId }
+        }
+        consecutiveRecoveries = 0
     }
 
     fun networkBackoffMillis(failureCount: Int): Long =

@@ -555,9 +555,8 @@ private fun ChatWorkspace(
                                 "Scheduled task ${request.taskId} for ${request.triggerAtMillis}"
                             }
                             updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
-                        } else if (SensitiveOperationPolicy.matchGoal(
-                                if (text.startsWith("/run ", ignoreCase = true)) text.substringAfter(' ').trim() else text,
-                            ) != null
+                        } else if (text.startsWith("/run ", ignoreCase = true) &&
+                            SensitiveOperationPolicy.matchGoal(text.substringAfter(' ').trim()) != null
                         ) {
                             updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "安全策略已拦截敏感操作目标。请勿让 Muse 执行支付、验证码、密码或权限变更。")))
                         } else if (settings.apiKey.isBlank()) {
@@ -583,9 +582,18 @@ private fun ChatWorkspace(
                                                 } else {
                                                     text
                                                 }
-                                                ownsActiveRun = true
-                                                AgentController.start(context, settings)
-                                                decision.reply
+                                                when (val started = AgentController.start(context, settings)) {
+                                                    is com.androidagent.app.accessibility.AgentStartResult.Started -> {
+                                                        ownsActiveRun = true
+                                                        decision.reply
+                                                    }
+                                                    is com.androidagent.app.accessibility.AgentStartResult.Busy ->
+                                                        "已有任务正在运行（${started.activeRunId.take(8)}）"
+                                                    com.androidagent.app.accessibility.AgentStartResult.InvalidGoal ->
+                                                        "任务目标或模型配置无效，未启动执行"
+                                                    com.androidagent.app.accessibility.AgentStartResult.AccessibilityDisconnected ->
+                                                        "无障碍服务未连接，未启动执行"
+                                                }
                                             }
                                         }
                                     }

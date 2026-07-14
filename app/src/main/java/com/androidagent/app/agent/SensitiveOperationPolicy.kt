@@ -54,6 +54,7 @@ object SensitiveOperationPolicy {
         is AgentAction.ClickNode -> selectorMatch(action.selector, "click_node")
         is AgentAction.EnsureToggle -> selectorMatch(action.selector, "toggle")
         is AgentAction.SubmitInput -> selectorMatch(action.target, "submit")
+        is AgentAction.BindPredicate -> selectorMatch(action.selector, "bind_predicate")
         is AgentAction.Finish, is AgentAction.Fail -> null
         else -> null
     }
@@ -98,6 +99,7 @@ object SensitiveOperationPolicy {
             } else {
                 observation.nodes.singleOrNull { it.visible && it.focused && it.editable }
             }
+            is AgentAction.BindPredicate -> NodeSelector.resolve(observation, action.nodeId, action.selector)
             else -> null
         }
         val values = node?.let { listOf(it.text, it.description, it.viewIdResourceName, it.className) }.orEmpty()

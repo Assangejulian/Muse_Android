@@ -38,6 +38,38 @@ data class ElementSelector(
     val bounds: String? = null,
 )
 
+/** Stable identity captured from one live observation for a predicate binding. */
+data class BoundElementIdentity(
+    val packageName: String,
+    val windowId: Int?,
+    val viewIdResourceName: String?,
+    val stableKey: String?,
+    val treePath: List<Int>?,
+    val className: String,
+    val initialBounds: String?,
+    val initialTextHash: String,
+    val initialDescriptionHash: String,
+) {
+    companion object {
+        fun from(node: UiNodeSnapshot): BoundElementIdentity = BoundElementIdentity(
+            packageName = node.packageName,
+            windowId = node.windowId,
+            viewIdResourceName = node.viewId.takeIf(String::isNotBlank),
+            stableKey = node.stableKey.takeIf(String::isNotBlank),
+            treePath = node.treePath,
+            className = node.className,
+            initialBounds = node.bounds.takeIf(String::isNotBlank),
+            initialTextHash = digest(node.text),
+            initialDescriptionHash = digest(node.description),
+        )
+
+        private fun digest(value: String): String = MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray())
+            .take(8)
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }
+}
+
 object ElementSelectorValidation {
     private val boundsPattern = Regex("^-?\\d+,-?\\d+,-?\\d+,-?\\d+$")
 
@@ -81,30 +113,104 @@ object NodeSelector {
         val scoped = observation.nodes.filter { node ->
             selector.packageName.isNullOrBlank() || node.packageName == selector.packageName
         }
-        var candidates = scoped
+
+        // Selectors are re-located by stable evidence in priority order.  A
+        // captured bounds value is deliberately only a fallback: a node may
+        // move while retaining the same text/class or resource id.
+        fun refine(candidates: List<UiNodeSnapshot>): List<UiNodeSnapshot> {
+            var result = candidates
+            selector.treePath?.let { path ->
+                val byPath = result.filter { it.treePath == path }
+                if (byPath.isNotEmpty()) result = byPath
+            }
+            selector.bounds?.let { bounds ->
+                val byBounds = result.filter { it.bounds == bounds }
+                if (byBounds.isNotEmpty()) result = byBounds
+            }
+            return result
+        }
+
         selector.viewIdResourceName?.let { viewId ->
-            candidates = candidates.filter { it.viewId == viewId }
-            if (candidates.isEmpty()) return emptyList()
-            if (candidates.size == 1) return candidates
+            val byViewId = scoped.filter { it.viewId == viewId }
+            if (byViewId.size == 1) return byViewId
+            if (byViewId.size > 1) {
+                val narrowed = when {
+                    selector.text != null && selector.className != null ->
+                        byViewId.filter { it.text == selector.text && it.className == selector.className }
+                    selector.text != null -> byViewId.filter { it.text == selector.text }
+                    selector.description != null && selector.className != null ->
+                        byViewId.filter { it.description == selector.description && it.className == selector.className }
+                    selector.description != null -> byViewId.filter { it.description == selector.description }
+                    else -> refine(byViewId)
+                }
+                if (narrowed.isNotEmpty()) return narrowed
+            }
         }
-        selector.text?.let { text ->
-            candidates = candidates.filter { it.text == text }
-            if (candidates.size <= 1) return candidates
+
+        if (selector.text != null && selector.className != null) {
+            val byTextAndClass = scoped.filter { it.text == selector.text && it.className == selector.className }
+            if (byTextAndClass.isNotEmpty()) return refine(byTextAndClass)
         }
-        selector.description?.let { description ->
-            candidates = candidates.filter { it.description == description }
-            if (candidates.size <= 1) return candidates
-        }
-        selector.className?.let { className ->
-            candidates = candidates.filter { it.className == className }
-            if (candidates.size <= 1) return candidates
+        if (selector.description != null && selector.className != null) {
+            val byDescriptionAndClass = scoped.filter {
+                it.description == selector.description && it.className == selector.className
+            }
+            if (byDescriptionAndClass.isNotEmpty()) return refine(byDescriptionAndClass)
         }
         selector.treePath?.let { path ->
-            candidates = candidates.filter { it.treePath == path }
-            if (candidates.size <= 1) return candidates
+            val byPath = scoped.filter { it.treePath == path }
+            if (byPath.isNotEmpty()) return selector.bounds?.let { bounds ->
+                val byBounds = byPath.filter { it.bounds == bounds }
+                if (byBounds.isNotEmpty()) byBounds else byPath
+            } ?: byPath
         }
-        selector.bounds?.let { bounds -> candidates = candidates.filter { it.bounds == bounds } }
-        return candidates
+        selector.bounds?.let { bounds ->
+            val byBounds = scoped.filter { it.bounds == bounds }
+            if (byBounds.isNotEmpty()) return byBounds
+        }
+        if (selector.packageName != null && selector.className != null) {
+            val byPackageAndClass = scoped.filter { it.className == selector.className }
+            if (byPackageAndClass.isNotEmpty()) return byPackageAndClass
+        }
+        selector.text?.let { text ->
+            val byText = scoped.filter { it.text == text }
+            if (byText.isNotEmpty()) return byText
+        }
+        selector.description?.let { description ->
+            val byDescription = scoped.filter { it.description == description }
+            if (byDescription.isNotEmpty()) return byDescription
+        }
+        return emptyList()
+    }
+
+    fun matchingNodes(observation: Observation, identity: BoundElementIdentity): List<UiNodeSnapshot> {
+        val scoped = observation.nodes.filter { node ->
+            (identity.packageName.isBlank() || node.packageName == identity.packageName) &&
+                (identity.windowId == null || node.windowId == identity.windowId)
+        }
+        if (scoped.isEmpty()) return emptyList()
+
+        val byViewId = identity.viewIdResourceName?.let { viewId -> scoped.filter { it.viewId == viewId } }.orEmpty()
+        val viewIdCandidates = if (byViewId.isNotEmpty()) byViewId else scoped
+        val byStableKey = identity.stableKey?.let { key -> viewIdCandidates.filter { it.stableKey == key } }.orEmpty()
+        if (byStableKey.isNotEmpty()) return byStableKey.filter { it.className == identity.className }
+
+        val byPath = identity.treePath?.let { path ->
+            viewIdCandidates.filter { it.treePath == path && it.className == identity.className }
+        }.orEmpty()
+        if (byPath.isNotEmpty()) return byPath
+
+        val classCandidates = viewIdCandidates.filter { it.className == identity.className }
+        if (classCandidates.size <= 1) return classCandidates
+        val bounds = identity.initialBounds ?: return classCandidates
+        val parsed = parseBounds(bounds) ?: return classCandidates
+        return classCandidates.filter { node ->
+            val current = parseBounds(node.bounds) ?: return@filter false
+            kotlin.math.abs(current[0] - parsed[0]) <= BOUNDS_DRIFT_PX &&
+                kotlin.math.abs(current[1] - parsed[1]) <= BOUNDS_DRIFT_PX &&
+                kotlin.math.abs(current[2] - parsed[2]) <= BOUNDS_DRIFT_PX &&
+                kotlin.math.abs(current[3] - parsed[3]) <= BOUNDS_DRIFT_PX
+        }
     }
 
     fun resolve(observation: Observation, nodeId: Int?, selector: ElementSelector?): UiNodeSnapshot? {
@@ -115,6 +221,12 @@ object NodeSelector {
         }
         return nodeId?.let { id -> observation.nodes.firstOrNull { it.id == id } }
     }
+
+    private fun parseBounds(bounds: String): IntArray? = runCatching {
+        bounds.split(',').map(String::toInt).toIntArray()
+    }.getOrNull()?.takeIf { it.size == 4 }
+
+    private const val BOUNDS_DRIFT_PX = 24
 }
 
 /** Shared strict JSON decoding for selectors used by actions and plan predicates. */
@@ -231,8 +343,8 @@ data class Observation(
 
 sealed interface AgentAction {
     data class LaunchApp(val packageName: String) : AgentAction
-    data class ClickText(val text: String) : AgentAction
-    data class ClickNode(val nodeId: Int, val selector: ElementSelector? = null) : AgentAction
+    data class ClickText(val text: String, val predicateId: String? = null) : AgentAction
+    data class ClickNode(val nodeId: Int, val selector: ElementSelector? = null, val predicateId: String? = null) : AgentAction
     data class TapPoint(val x: Int, val y: Int) : AgentAction
     data class Swipe(val direction: String) : AgentAction
     data class InputText(
@@ -241,9 +353,11 @@ sealed interface AgentAction {
         val target: ElementSelector? = null,
         val mode: InputMode = InputMode.REPLACE,
         val submit: Boolean = false,
+        val predicateId: String? = null,
     ) : AgentAction
-    data class SubmitInput(val nodeId: Int? = null, val target: ElementSelector? = null) : AgentAction
-    data class EnsureToggle(val nodeId: Int, val desired: Boolean, val selector: ElementSelector? = null) : AgentAction
+    data class SubmitInput(val nodeId: Int? = null, val target: ElementSelector? = null, val predicateId: String? = null) : AgentAction
+    data class EnsureToggle(val nodeId: Int, val desired: Boolean, val selector: ElementSelector? = null, val predicateId: String? = null) : AgentAction
+    data class BindPredicate(val predicateId: String, val nodeId: Int? = null, val selector: ElementSelector? = null) : AgentAction
     data class Wait(val milliseconds: Long) : AgentAction
     data object Back : AgentAction
     data object Home : AgentAction
