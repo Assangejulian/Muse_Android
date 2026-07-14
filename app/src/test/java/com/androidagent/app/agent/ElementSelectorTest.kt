@@ -63,6 +63,21 @@ class ElementSelectorTest {
     }
 
     @Test
+    fun duplicateViewIdUsesTreePathAfterTextAndClassMatch() {
+        val observation = Observation("example.app", listOf(
+            node(1, "Same", "0,0,100,30").copy(viewId = "example:id/action", treePath = listOf(0)),
+            node(2, "Same", "0,40,100,70").copy(viewId = "example:id/action", treePath = listOf(1)),
+        ))
+        val selector = ElementSelector(
+            viewIdResourceName = "example:id/action",
+            text = "Same",
+            className = "Button",
+            treePath = listOf(1),
+        )
+        assertEquals(2, NodeSelector.resolve(observation, null, selector)?.id)
+    }
+
+    @Test
     fun sharedViewIdKeepsDifferentStableIdentitiesSeparate() {
         val before = Observation("example.app", listOf(
             node(1, "A", "0,0,100,30").copy(viewId = "example:id/action", treePath = listOf(0)),

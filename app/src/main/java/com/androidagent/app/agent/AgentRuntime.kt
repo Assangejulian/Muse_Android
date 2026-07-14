@@ -95,6 +95,7 @@ class AgentRuntime(
                 "RUN_FINISHED",
                 mapOf("outcome" to outcome.name, "reasonCode" to outcome.name),
             )
+            activeBindings?.rollbackRun(runId)
             traceStore.finish(runId, if (outcome == RuntimeOutcome.SUCCESS) "SUCCEEDED" else "FAILED", reason)
             return RuntimeResult(outcome, reason, runId)
         }
@@ -123,6 +124,7 @@ class AgentRuntime(
                 } catch (failure: TaskPlanException) {
                     return@withTimeout finish(RuntimeOutcome.PERMANENT_PLAN_ERROR, failure.message ?: "Manager plan failed after retries")
                 }
+                validatePlanPackages(plan, launchablePackages)
                 if (lockedPackage == null) {
                     lockedPackage = resolveTarget(plan.targetAppHint, immutableGoal, apps.map { it.label to it.packageName })
                     targetHint = apps.firstOrNull { it.packageName == lockedPackage }?.label ?: targetHint
@@ -133,7 +135,7 @@ class AgentRuntime(
                         )
                     }
                 }
-                packagePolicy = mergePlanPackages(packagePolicy, plan.allowedPackages, launchablePackages)
+                packagePolicy = mergePlanPackages(packagePolicy, plan, launchablePackages)
                 plan = ensureLaunchMilestone(plan, lockedPackage)
 
                 var ledger = RunLedger(plan)
@@ -146,7 +148,7 @@ class AgentRuntime(
                 val toolTurns = mutableListOf<PlannerTurn>()
                 var replans = 0
                 var modelFailures = 0
-                var successfulToolCalls = 0
+                val evidenceCounters = StopGateEvidenceCounters()
                 var finishRejections = 0
                 var pendingReplanReason: String? = null
 
@@ -190,7 +192,7 @@ class AgentRuntime(
                         if (launched.packageName != lockedPackage) {
                             return@withTimeout finish(RuntimeOutcome.TIMEOUT, "Target app did not become ready before the launch deadline")
                         }
-                        successfulToolCalls += 1
+                        evidenceCounters.successfulMutatingActions += 1
                         history += "LOCAL_TOOL_RESULT: launched locked package $lockedPackage without exposing the previous app"
                         continue
                     }
@@ -246,6 +248,7 @@ class AgentRuntime(
                         } catch (failure: TaskPlanException) {
                             return@withTimeout finish(RuntimeOutcome.PERMANENT_PLAN_ERROR, failure.message ?: "Manager replan failed after retries")
                         }
+                        validateRevisedPlan(plan, revised, launchablePackages)
                         val completed = ledger.currentMilestoneIndex
                         val prepared = prepareRevisedPlan(revised, plan, completed, lockedPackage)
                         predicateBindings.retainCompleted(
@@ -254,7 +257,7 @@ class AgentRuntime(
                             plan.milestones.take(completed).mapTo(mutableSetOf()) { it.id },
                         )
                         plan = prepared.first
-                        packagePolicy = mergePlanPackages(packagePolicy, plan.allowedPackages, launchablePackages)
+                        packagePolicy = mergePlanPackages(packagePolicy, plan, launchablePackages)
                         ledger.replacePlan(plan, prepared.second)
                         guard = ToolGuard(plan, packagePolicy)
                         replans += 1
@@ -274,7 +277,7 @@ class AgentRuntime(
                             actorKey,
                             actorBaseUrl,
                             actorModel,
-                            successfulToolCalls,
+                            evidenceCounters,
                             lockedPackage,
                             packagePolicy,
                             predicateBindings,
@@ -295,6 +298,7 @@ class AgentRuntime(
                             settings.modelName,
                             verified.reason,
                         )
+                        validateRevisedPlan(plan, revised, launchablePackages)
                         val completed = ledger.currentMilestoneIndex
                         val prepared = prepareRevisedPlan(revised, plan, completed, lockedPackage)
                         predicateBindings.retainCompleted(
@@ -303,7 +307,7 @@ class AgentRuntime(
                             plan.milestones.take(completed).mapTo(mutableSetOf()) { it.id },
                         )
                         plan = prepared.first
-                        packagePolicy = mergePlanPackages(packagePolicy, plan.allowedPackages, launchablePackages)
+                        packagePolicy = mergePlanPackages(packagePolicy, plan, launchablePackages)
                         ledger.replacePlan(plan, prepared.second)
                         guard = ToolGuard(plan, packagePolicy)
                         replans += 1
@@ -314,6 +318,9 @@ class AgentRuntime(
                     val deterministicBefore = MilestoneEvaluator.evaluate(milestone, plan, before, lockedPackage, predicateBindings, runId = runId)
                     if (deterministicBefore.proven) {
                         val proof = deterministicBefore.details.joinToString(" | ")
+                        evidenceCounters.deterministicEvidenceCount += 1
+                        evidenceCounters.verifiedMilestones += 1
+                        predicateBindings.markVerified(milestone.id)
                         history += "MILESTONE_PROVEN: ${ledger.advance(proof)}"
                         recoveryPolicy.resetFailures()
                         traceStore.event(runId, "MILESTONE_PROVEN", mapOf("id" to milestone.id, "evidence" to proof, "source" to "deterministic"))
@@ -373,7 +380,7 @@ class AgentRuntime(
                                 history = (history + executionHistory.promptLines()).takeLast(24),
                                 screenshotDataUrl = screenshot,
                                 harnessState = "CURRENT MILESTONE: ${milestone.id} ${milestone.objective}\n" +
-                                    "SUCCESS CONTRACT: ${milestone.successEvidence}\n${ledger.planText()}",
+                                    "SUCCESS CONTRACT: ${milestone.successEvidence}\n${ledger.planText(predicateBindings)}",
                                 toolTurns = toolTurns.takeLast(MAX_MODEL_TOOL_TURNS),
                                 provider = settings.currentProvider,
                                 primaryPackage = packagePolicy.primaryPackage,
@@ -451,7 +458,7 @@ class AgentRuntime(
                             actorKey,
                             actorBaseUrl,
                             actorModel,
-                            successfulToolCalls,
+                            evidenceCounters,
                             lockedPackage,
                             packagePolicy,
                             predicateBindings,
@@ -470,6 +477,7 @@ class AgentRuntime(
                         if (finishRejections >= 2 && replans < MAX_REPLANS) {
                             onPhase(step, "Replanning")
                             val revised = replan(plan, ledger, goalContext, appCatalog, targetHint, apiKey, settings.modelBaseUrl, settings.modelName, verification.reason)
+                            validateRevisedPlan(plan, revised, launchablePackages)
                             val completed = ledger.currentMilestoneIndex
                             val prepared = prepareRevisedPlan(revised, plan, completed, lockedPackage)
                             predicateBindings.retainCompleted(
@@ -478,7 +486,7 @@ class AgentRuntime(
                                 plan.milestones.take(completed).mapTo(mutableSetOf()) { it.id },
                             )
                             plan = prepared.first
-                            packagePolicy = mergePlanPackages(packagePolicy, plan.allowedPackages, launchablePackages)
+                            packagePolicy = mergePlanPackages(packagePolicy, plan, launchablePackages)
                             ledger.replacePlan(plan, prepared.second)
                             guard = ToolGuard(plan, packagePolicy)
                             replans += 1
@@ -494,6 +502,7 @@ class AgentRuntime(
                         if (replans >= MAX_REPLANS) return@withTimeout finish(RuntimeOutcome.PERMANENT_PLAN_ERROR, proposed.reason)
                         onPhase(step, "Replanning")
                         val revised = replan(plan, ledger, goalContext, appCatalog, targetHint, apiKey, settings.modelBaseUrl, settings.modelName, proposed.reason)
+                        validateRevisedPlan(plan, revised, launchablePackages)
                         val completed = ledger.currentMilestoneIndex
                         val prepared = prepareRevisedPlan(revised, plan, completed, lockedPackage)
                         predicateBindings.retainCompleted(
@@ -502,7 +511,7 @@ class AgentRuntime(
                             plan.milestones.take(completed).mapTo(mutableSetOf()) { it.id },
                         )
                         plan = prepared.first
-                        packagePolicy = mergePlanPackages(packagePolicy, plan.allowedPackages, launchablePackages)
+                        packagePolicy = mergePlanPackages(packagePolicy, plan, launchablePackages)
                         ledger.replacePlan(plan, prepared.second)
                         guard = ToolGuard(plan, packagePolicy)
                         replans += 1
@@ -671,6 +680,10 @@ class AgentRuntime(
                             runId = runId,
                         )
                         val execution = guarded.shortCircuit ?: ActionExecutionResult(true, "bound", "predicate target bound without side effect")
+                        evidenceCounters.successfulObservationActions += 1
+                        if (execution.status == "already_satisfied" || localEvidence.proven) {
+                            evidenceCounters.deterministicEvidenceCount += 1
+                        }
                         val resultText = if (localEvidence.proven) "evidence: ${localEvidence.details.joinToString(" | ")}" else execution.detail
                         val feedback = toolResultJson(true, action, before, before, execution.status, resultText)
                         recordTurn(toolTurns, planned, feedback)
@@ -680,6 +693,8 @@ class AgentRuntime(
                             if (localEvidence.proven) TransitionJudgement.MILESTONE_COMPLETE else TransitionJudgement.PROGRESS,
                             resultText))
                         if (localEvidence.proven) {
+                            evidenceCounters.verifiedMilestones += 1
+                            predicateBindings.markVerified(milestone.id)
                             history += "MILESTONE_PROVEN: ${ledger.advance(resultText)}"
                             recoveryPolicy.resetFailures()
                         }
@@ -718,13 +733,15 @@ class AgentRuntime(
                         continue
                     }
 
-                    if (!predicateBindings.commitAll(provisionalBindings)) {
+                    if (!predicateBindings.markDispatched(provisionalBindings) || !predicateBindings.commitDispatched(provisionalBindings)) {
                         predicateBindings.rollbackAll(provisionalBindings)
-                        continue
+                        return@withTimeout finish(RuntimeOutcome.INTERNAL_ERROR, "Predicate binding commit failed after successful action")
                     }
                     guard.recordDispatch(action)
                     ledger.recordDispatch(action, before)
-                    if (action !is AgentAction.Wait) successfulToolCalls += 1
+                    if (action !is AgentAction.Wait && action !is AgentAction.BindPredicate) {
+                        evidenceCounters.successfulMutatingActions += 1
+                    }
                     if (action is AgentAction.LaunchApp && lockedPackage == null) {
                         lockedPackage = action.packageName
                         packagePolicy = packagePolicy.copy(
@@ -737,7 +754,6 @@ class AgentRuntime(
 
                     val rawAfter = awaitStableObservation(rawBefore, action)
                     if (lastWaitTimedOut) {
-                        predicateBindings.rollbackAll(provisionalBindings)
                         val reason = "screen did not settle after ${TraceSanitizer.action(action)}"
                         val recovery = recoveryPolicy.decide(
                             RecoveryContext(
@@ -757,7 +773,6 @@ class AgentRuntime(
                     }
                     val postPackageFailure = packageBoundaryFailure(rawAfter, lockedPackage, packagePolicy)
                     if (postPackageFailure != null) {
-                        predicateBindings.rollbackAll(provisionalBindings)
                         traceStore.event(runId, "PACKAGE_BOUNDARY_BLOCKED", mapOf("reason" to postPackageFailure, "package" to rawAfter.packageName))
                         val recovery = recoveryPolicy.decide(
                             RecoveryContext(
@@ -777,7 +792,6 @@ class AgentRuntime(
                     }
                     val afterPrivacy = PrivacyGuard.prepare(rawAfter)
                     if (!afterPrivacy.allowed) {
-                        predicateBindings.rollbackAll(provisionalBindings)
                         val reason = "Stopped after tool: ${afterPrivacy.reason}"
                         traceStore.event(runId, "PRIVACY_BLOCKED", mapOf("reason" to afterPrivacy.reason, "package" to rawAfter.packageName))
                         return@withTimeout finish(RuntimeOutcome.SAFETY_BLOCKED, reason)
@@ -796,6 +810,11 @@ class AgentRuntime(
                     }
 
                     val deterministicAfter = MilestoneEvaluator.evaluate(milestone, plan, after, lockedPackage, predicateBindings, runId = runId)
+                    if (deterministicAfter.proven) {
+                        evidenceCounters.deterministicEvidenceCount += 1
+                        evidenceCounters.verifiedMilestones += 1
+                        predicateBindings.markVerified(milestone.id)
+                    }
                     val changed = before.observationId != after.observationId
                     var judgement = when {
                         deterministicAfter.proven -> TransitionJudgement.MILESTONE_COMPLETE
@@ -919,7 +938,7 @@ class AgentRuntime(
         apiKey: String,
         baseUrl: String,
         model: String,
-        successfulToolCalls: Int,
+        evidenceCounters: StopGateEvidenceCounters,
         lockedPackage: String?,
         packagePolicy: PackagePolicy,
         predicateBindings: PredicateBindingStore? = null,
@@ -929,7 +948,15 @@ class AgentRuntime(
         ledger.currentMilestone?.let {
             return VerificationResult(false, "Milestone ${it.id} is not proven yet: ${it.objective}")
         }
-        if (successfulToolCalls == 0) return VerificationResult(false, "No successful tool result exists")
+        if (!evidenceCounters.hasLocalEvidence()) {
+            return VerificationResult(false, "No deterministic local predicate evidence exists")
+        }
+        // Once every milestone is locally proven, a verifier claim is only
+        // auxiliary. This also allows an already-satisfied task to finish
+        // without inventing a mutating action.
+        if (evidenceCounters.deterministicEvidenceCount > 0) {
+            return VerificationResult(true, "All milestones proven with local evidence (${evidenceCounters.deterministicEvidenceCount} deterministic checks)")
+        }
         val screenshotCapture = if (useVision && lockedPackage != null) {
             captureBoundScreenshot(observation, lockedPackage, packagePolicy)
         } else {
@@ -1116,13 +1143,39 @@ class AgentRuntime(
         return boundPackage ?: primaryPackage
     }
 
+    private fun validatePlanPackages(plan: TaskPlan, launchablePackages: Set<String>) {
+        val explicitTargets = plan.milestones.flatMap { milestone ->
+            milestone.successPredicates
+                .filter { it.kind == UiPredicateKind.PACKAGE_FOREGROUND }
+                .mapNotNull { it.targetPackage ?: it.target?.packageName }
+        }.toSet()
+        val requested = plan.allowedPackages + explicitTargets
+        val invalid = requested.filter { it !in launchablePackages || PackagePolicy.isProtectedPackage(it) }
+        if (invalid.isNotEmpty()) {
+            throw TaskPlanException("Plan references unavailable or protected packages: ${invalid.joinToString(",")}")
+        }
+    }
+
+    private fun validateRevisedPlan(previous: TaskPlan, revised: TaskPlan, launchablePackages: Set<String>) {
+        TaskPlanValidator.requireCompatiblePredicateIds(previous, revised)
+        validatePlanPackages(revised, launchablePackages)
+    }
+
     private fun mergePlanPackages(
         current: PackagePolicy,
-        requested: Set<String>,
+        plan: TaskPlan,
         launchablePackages: Set<String>,
-    ): PackagePolicy = current.copy(
-        allowedPackages = PackagePolicy.mergeAllowedPackages(current.allowedPackages, requested, launchablePackages).toMutableSet(),
-    )
+    ): PackagePolicy {
+        val predicateTargets = plan.milestones.flatMap { milestone ->
+            milestone.successPredicates
+                .filter { it.kind == UiPredicateKind.PACKAGE_FOREGROUND }
+                .mapNotNull { it.targetPackage ?: it.target?.packageName }
+        }.toSet()
+        val requested = plan.allowedPackages + predicateTargets
+        return current.copy(
+            allowedPackages = PackagePolicy.mergeAllowedPackages(current.allowedPackages, requested, launchablePackages).toMutableSet(),
+        )
+    }
 
     private fun needsSemanticCritic(
         milestone: TaskMilestone,

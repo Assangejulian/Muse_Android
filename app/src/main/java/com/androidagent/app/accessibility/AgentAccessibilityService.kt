@@ -41,6 +41,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicInteger
+import java.security.MessageDigest
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
 
@@ -68,7 +69,7 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
-        if (AgentController.state.value.running) {
+        if (AgentController.currentRunId() != null) {
             AgentController.stopWithReason("Accessibility service disconnected")
         }
         if (::overlayController.isInitialized) overlayController.hide()
@@ -122,8 +123,13 @@ class AgentAccessibilityService : AccessibilityService() {
         val viewId = node.viewIdResourceName.orEmpty()
         val className = node.className?.toString().orEmpty()
         val bounds = "${rect.left},${rect.top},${rect.right},${rect.bottom}"
-        val stableKey = listOf(node.packageName?.toString().orEmpty(), viewId, text, description, className, path.joinToString("/"), bounds)
-            .joinToString("|").hashCode().toUInt().toString(16)
+        val stableKey = stableNodeKey(
+            packageName = node.packageName?.toString().orEmpty(),
+            windowId = windowId,
+            viewId = viewId,
+            className = className,
+            treePath = path,
+        )
         val meaningful = node.isVisibleToUser && (
             node.isClickable || node.isEditable || node.isScrollable || node.isCheckable || node.isSelected ||
                 text.isNotBlank() || description.isNotBlank() || viewId.isNotBlank()
@@ -347,11 +353,8 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private suspend fun clickNode(action: AgentAction.ClickNode, observation: Observation): Boolean {
         val current = observe()
-        val snapshot = if (action.selector != null) {
-            NodeSelector.resolve(current, action.nodeId, action.selector)
-        } else {
-            observation.nodes.firstOrNull { it.id == action.nodeId }
-        }
+        if (action.selector == null && current.observationId != observation.observationId) return false
+        val snapshot = NodeSelector.resolve(current, action.nodeId, action.selector)
         if (snapshot == null) return false
         val liveNode = findLiveNode(snapshot) ?: return false
         if (!liveNode.isVisibleToUser || !liveNode.isEnabled) return false
@@ -476,6 +479,9 @@ class AgentAccessibilityService : AccessibilityService() {
     private suspend fun inputTextDetailed(action: AgentAction.InputText, observation: Observation): ActionExecutionResult {
         val root = rootInActiveWindow ?: return ActionExecutionResult(false, "target_missing", "no active window")
         val current = observe()
+        if (action.nodeId != null && action.target == null && current.observationId != observation.observationId) {
+            return ActionExecutionResult(false, "target_missing", "stale numeric input target")
+        }
         val focused = if (action.nodeId != null || action.target != null) {
             val snapshot = NodeSelector.resolve(current, action.nodeId, action.target)
                 ?: return ActionExecutionResult(false, "target_missing", "input target is missing or ambiguous")
@@ -513,6 +519,9 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private suspend fun submitInputDetailed(action: AgentAction.SubmitInput, observation: Observation): ActionExecutionResult {
         val current = observe()
+        if (action.nodeId != null && action.target == null && current.observationId != observation.observationId) {
+            return ActionExecutionResult(false, "target_missing", "stale numeric submit target")
+        }
         val node = if (action.nodeId != null || action.target != null) {
             val snapshot = NodeSelector.resolve(current, action.nodeId, action.target)
                 ?: return ActionExecutionResult(false, "target_missing", "submit target is missing or ambiguous")
@@ -600,7 +609,9 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun ensureToggle(action: AgentAction.EnsureToggle, observation: Observation): Boolean {
-        val snapshot = NodeSelector.resolve(observation, action.nodeId, action.selector) ?: return false
+        val current = observe()
+        if (action.selector == null && current.observationId != observation.observationId) return false
+        val snapshot = NodeSelector.resolve(current, action.nodeId, action.selector) ?: return false
         return when (val state = ToggleStatePolicy.state(snapshot)) {
             ToggleState.ON -> if (action.desired) true else clickNode(AgentAction.ClickNode(action.nodeId, action.selector), observation)
             ToggleState.OFF -> if (action.desired) clickNode(AgentAction.ClickNode(action.nodeId, action.selector), observation) else true
@@ -650,6 +661,18 @@ class AgentAccessibilityService : AccessibilityService() {
         private const val MAX_DEPTH = 30
         @Volatile private var instance: AgentAccessibilityService? = null
         fun current(): AgentAccessibilityService? = instance
+
+        /** Stable structure-only key; mutable text, state, and bounds are intentionally excluded. */
+        internal fun stableNodeKey(
+            packageName: String,
+            windowId: Int,
+            viewId: String,
+            className: String,
+            treePath: List<Int>,
+        ): String = MessageDigest.getInstance("SHA-256")
+            .digest(listOf(packageName, windowId.toString(), viewId, className, treePath.joinToString("/")).joinToString("|").toByteArray())
+            .take(12)
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 }
 

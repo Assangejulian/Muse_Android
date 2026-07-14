@@ -218,13 +218,14 @@ class DeepSeekClient(
             Return exactly one JSON object and no prose.
             Available actions:
             {"action":"launch_app","packageName":"an exact package from INSTALLED APPS"}
-            {"action":"click_text","text":"visible text"}
-            {"action":"click_node","nodeId":1,"selector":{"className":"optional"}}
+            {"action":"click_text","text":"visible text","predicateId":"m2-p1"}
+            {"action":"click_node","nodeId":1,"selector":{"className":"optional"},"predicateId":"m2-p1"}
             {"action":"tap_point","x":0..1000,"y":0..1000}
             {"action":"swipe","direction":"up|down|left|right"}
-            {"action":"input_text","nodeId":1,"text":"exact text","mode":"REPLACE|APPEND|CLEAR","submit":false,"target":{"className":"optional"}}
-            {"action":"submit_input","nodeId":1,"target":{"className":"optional"}}
-            {"action":"ensure_toggle","nodeId":1,"desired":true}
+            {"action":"input_text","nodeId":1,"text":"exact text","mode":"REPLACE|APPEND|CLEAR","submit":false,"target":{"className":"optional"},"predicateId":"m2-p1"}
+            {"action":"submit_input","nodeId":1,"target":{"className":"optional"},"predicateId":"m2-p1"}
+            {"action":"ensure_toggle","nodeId":1,"desired":true,"predicateId":"m2-p1"}
+            {"action":"bind_predicate","predicateId":"m2-p1","nodeId":7,"selector":{"viewIdResourceName":"optional","className":"optional"}}
             {"action":"back"} {"action":"home"}
             {"action":"wait","milliseconds":1000}
             {"action":"finish","reason":"direct observable completion evidence"}
@@ -306,13 +307,14 @@ class DeepSeekClient(
             2-8 ordered, app-agnostic milestones. Return one JSON object:
             {"summary":"...","targetAppHint":"...","allowedPackages":["optional explicit package ids"],"milestones":[
               {"id":"m1","kind":"LAUNCH_APP|INPUT|INTERACTION|VERIFICATION|GENERIC","objective":"...","successPredicates":[
-                {"kind":"PACKAGE_FOREGROUND|TEXT_PRESENT|EDITABLE_EQUALS|IME_HIDDEN|ELEMENT_PRESENT|ELEMENT_DISAPPEARED|ELEMENT_ENABLED|ELEMENT_SELECTED|ELEMENT_CHECKED|ELEMENT_TEXT_EQUALS|TOGGLE_STATE|SEMANTIC_CLAIM",
+                {"predicateId":"m1-p1","kind":"PACKAGE_FOREGROUND|TEXT_PRESENT|EDITABLE_EQUALS|IME_HIDDEN|ELEMENT_PRESENT|ELEMENT_DISAPPEARED|ELEMENT_ENABLED|ELEMENT_SELECTED|ELEMENT_CHECKED|ELEMENT_TEXT_EQUALS|TOGGLE_STATE|SEMANTIC_CLAIM",
                  "valueRef":"goal_text","literal":"optional","expectedChecked":true,"targetPackage":"explicit.package.for-package-predicate",
                  "targetHint":"abstract description of the target control","target":{"packageName":"optional-after-binding","viewIdResourceName":"optional-after-binding","text":"optional-after-binding","className":"optional","bounds":"optional"},"description":"observable fact"}
               ]}
             ]}
             Use deterministic local predicates whenever possible. A dispatched action is never proof by itself.
             You do not see the current Accessibility observation. Do not guess view IDs, tree paths, bounds, or exact selectors.
+            predicateId is required, non-empty, and must match ^[A-Za-z0-9_-]+$; it is unique across the entire plan and must be preserved when revising a plan with unchanged predicate semantics.
             Predicate IDs are stable milestone-local contracts; the runtime may complete binding only from a fresh observation.
             For target predicates emit targetHint and leave target unbound unless a stable target is explicitly known from user input.
             PACKAGE_FOREGROUND must include targetPackage. TOGGLE_STATE must include expectedChecked. Every target predicate is bound by the runtime from a unique current node before its action; an unbound predicate can never be proven.

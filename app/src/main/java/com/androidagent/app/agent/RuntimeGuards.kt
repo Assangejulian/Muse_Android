@@ -2,6 +2,18 @@ package com.androidagent.app.agent
 
 data class PredicateEvidence(val proven: Boolean, val details: List<String>)
 
+enum class BindingLifecycle { PREPARED, DISPATCHED, COMMITTED, VERIFIED, INVALIDATED }
+
+/** Local evidence counters used by the Stop Gate; tool volume is not evidence. */
+data class StopGateEvidenceCounters(
+    var successfulMutatingActions: Int = 0,
+    var successfulObservationActions: Int = 0,
+    var verifiedMilestones: Int = 0,
+    var deterministicEvidenceCount: Int = 0,
+) {
+    fun hasLocalEvidence(): Boolean = deterministicEvidenceCount > 0 || verifiedMilestones > 0
+}
+
 data class PredicateBinding(
     val milestoneId: String,
     val predicateIndex: Int,
@@ -11,6 +23,7 @@ data class PredicateBinding(
     val boundObservationId: String,
     val boundPackage: String,
     val runId: String? = null,
+    val lifecycle: BindingLifecycle = BindingLifecycle.COMMITTED,
 )
 
 data class ProvisionalPredicateBinding(val binding: PredicateBinding)
@@ -51,7 +64,9 @@ class PredicateBindingStore {
         runId: String? = null,
     ): BindingResult {
         val result = prepareBinding(milestone, predicateIndex, node, observation, runId)
-        result.provisional?.let(::commit)
+        result.provisional?.let { provisional ->
+            if (!commit(provisional)) return BindingResult(false, reason = "predicate binding conflicts with an existing target")
+        }
         return result
     }
 
@@ -65,26 +80,57 @@ class PredicateBindingStore {
     ): BindingResult {
         val predicate = milestone.successPredicates.getOrNull(predicateIndex)
             ?: return BindingResult(false, reason = "predicate index is out of range")
+        predicate.targetHint?.takeIf(String::isNotBlank)?.let { hint ->
+            if (!targetMatchesHint(node, hint)) return BindingResult(false, reason = "target conflicts with predicate targetHint")
+        }
+        predicate.target?.let { selector ->
+            val selectorMatches = NodeSelector.matchingNodes(observation, selector)
+            if (selectorMatches.size != 1) {
+                return BindingResult(false, reason = if (selectorMatches.isEmpty()) "predicate target missing" else "predicate target is ambiguous")
+            }
+            if (!sameNode(node, selectorMatches.single())) {
+                return BindingResult(false, reason = "target conflicts with predicate selector")
+            }
+        }
         val identity = BoundElementIdentity.from(node)
         val matches = NodeSelector.matchingNodes(observation, identity)
         if (matches.size != 1) return BindingResult(false, reason = if (matches.isEmpty()) "target missing" else "target is ambiguous")
+        val predicateId = predicate.predicateId ?: TaskPlanValidator.predicateIdFor(milestone.id, predicateIndex)
         val binding = PredicateBinding(
             milestoneId = milestone.id,
             predicateIndex = predicateIndex,
-            predicateId = predicate.predicateId ?: TaskPlanValidator.predicateIdFor(milestone.id, predicateIndex),
+            predicateId = predicateId,
             boundSelector = NodeSelector.from(node),
             identity = identity,
             boundObservationId = observation.observationId,
             boundPackage = node.packageName.ifBlank { observation.packageName },
             runId = runId,
+            lifecycle = BindingLifecycle.PREPARED,
         )
+        bindings[key(milestone.id, predicateIndex)]?.let { existing ->
+            if (existing.lifecycle == BindingLifecycle.VERIFIED) {
+                return BindingResult(false, reason = "predicate is already verified")
+            }
+            if (existing.lifecycle == BindingLifecycle.INVALIDATED) {
+                return BindingResult(false, reason = "predicate binding was invalidated")
+            }
+            return if (sameBindingIdentity(existing, binding)) {
+                BindingResult(true, binding = existing, reason = "already_bound")
+            } else {
+                BindingResult(false, reason = "predicate binding conflicts with an existing target")
+            }
+        }
         return BindingResult(true, binding, ProvisionalPredicateBinding(binding))
     }
 
     fun commit(provisional: ProvisionalPredicateBinding): Boolean {
-        val binding = provisional.binding
+        val binding = provisional.binding.copy(lifecycle = BindingLifecycle.COMMITTED)
         val existing = bindings[key(binding.milestoneId, binding.predicateIndex)]
-        if (existing != null && existing != binding) return false
+        if (existing != null) {
+            if (existing.lifecycle == BindingLifecycle.VERIFIED || existing.lifecycle == BindingLifecycle.INVALIDATED) return false
+            if (!sameBindingIdentity(existing, binding)) return false
+            return true
+        }
         bindings[key(binding.milestoneId, binding.predicateIndex)] = binding
         return true
     }
@@ -98,7 +144,8 @@ class PredicateBindingStore {
     fun rollback(provisional: ProvisionalPredicateBinding?) {
         provisional ?: return
         val binding = provisional.binding
-        if (bindings[key(binding.milestoneId, binding.predicateIndex)] == binding) {
+        val existing = bindings[key(binding.milestoneId, binding.predicateIndex)]
+        if (existing != null && existing.identity == binding.identity && existing.runId == binding.runId) {
             bindings.remove(key(binding.milestoneId, binding.predicateIndex))
         }
     }
@@ -138,8 +185,9 @@ class PredicateBindingStore {
         }
         if (candidateKinds.isEmpty()) return BindingPreparation(true)
         val requestedPredicateId = actionPredicateId(action)
+        val alreadyBound = mutableSetOf<Int>()
         val candidates = milestone.successPredicates.mapIndexedNotNull { index, predicate ->
-            if (predicate.kind !in candidateKinds || get(milestone.id, index) != null) return@mapIndexedNotNull null
+            if (predicate.kind !in candidateKinds) return@mapIndexedNotNull null
             val effectiveId = predicate.predicateId ?: TaskPlanValidator.predicateIdFor(milestone.id, index)
             if (requestedPredicateId != null && requestedPredicateId != effectiveId) return@mapIndexedNotNull null
             val hint = predicate.targetHint?.trim().orEmpty()
@@ -160,6 +208,21 @@ class PredicateBindingStore {
                 if (requestedPredicateId != null) return BindingPreparation(false, reason = "action target conflicts with predicate target")
                 return@mapIndexedNotNull null
             }
+            val existing = get(milestone.id, index)
+            if (existing != null) {
+                if (existing.lifecycle == BindingLifecycle.VERIFIED) {
+                    return BindingPreparation(false, reason = "predicate is already verified")
+                }
+                if (existing.lifecycle == BindingLifecycle.INVALIDATED) {
+                    return BindingPreparation(false, reason = "predicate binding was invalidated")
+                }
+                if (requestedPredicateId != effectiveId) return@mapIndexedNotNull null
+                val resolution = NodeSelector.resolveIdentity(observation, existing.identity)
+                if (resolution !is IdentityResolution.Found || !sameNode(target, resolution.node)) {
+                    return BindingPreparation(false, reason = "action target conflicts with existing predicate binding")
+                }
+                alreadyBound += index
+            }
             index
         }
         if (candidates.isEmpty()) {
@@ -169,7 +232,7 @@ class PredicateBindingStore {
         if (requestedPredicateId == null && candidates.size > 1) {
             return BindingPreparation(false, reason = "multiple compatible predicates; predicateId is required")
         }
-        val prepared = candidates.map { index ->
+        val prepared = candidates.filterNot { it in alreadyBound }.map { index ->
             val result = prepareBinding(milestone, index, target, observation, runId)
             if (!result.bound || result.provisional == null) {
                 return BindingPreparation(false, reason = result.reason)
@@ -192,6 +255,20 @@ class PredicateBindingStore {
         val predicate = milestone.successPredicates[index]
         val target = NodeSelector.resolve(observation, action.nodeId, action.selector)
             ?: return BindingPreparation(false, reason = "bind_predicate target is missing or ambiguous")
+        get(milestone.id, index)?.let { existing ->
+            if (existing.lifecycle == BindingLifecycle.VERIFIED) {
+                return BindingPreparation(false, reason = "predicate is already verified")
+            }
+            if (existing.lifecycle == BindingLifecycle.INVALIDATED) {
+                return BindingPreparation(false, reason = "predicate binding was invalidated")
+            }
+            val resolution = NodeSelector.resolveIdentity(observation, existing.identity)
+            return if (resolution is IdentityResolution.Found && sameNode(target, resolution.node)) {
+                BindingPreparation(true, reason = "already_bound")
+            } else {
+                BindingPreparation(false, reason = "predicate binding conflicts with an existing target")
+            }
+        }
         if (predicate.targetHint?.isNotBlank() == true && !targetMatchesHint(target, predicate.targetHint)) {
             return BindingPreparation(false, reason = "bind_predicate target conflicts with predicate targetHint")
         }
@@ -206,25 +283,21 @@ class PredicateBindingStore {
     }
 
     fun retainCompleted(previous: TaskPlan, revised: TaskPlan, completedIds: Set<String>) {
-        val revisedKeys = revised.milestones.flatMap { milestone ->
-            milestone.successPredicates.indices.map { index -> key(milestone.id, index) }
-        }.toSet()
-        val retained = bindings.filter { (bindingKey, binding) ->
-            if (bindingKey !in revisedKeys) {
-                false
-            } else if (binding.milestoneId in completedIds) {
-                true
-            } else {
-                val previousPredicate = previous.milestones
-                    .firstOrNull { it.id == binding.milestoneId }
-                    ?.successPredicates
-                    ?.getOrNull(binding.predicateIndex)
-                val revisedPredicate = revised.milestones
-                    .firstOrNull { it.id == binding.milestoneId }
-                    ?.successPredicates
-                    ?.getOrNull(binding.predicateIndex)
-                previousPredicate != null && revisedPredicate != null && predicatesRemainBound(previousPredicate, revisedPredicate)
-            }
+        val retained = linkedMapOf<String, PredicateBinding>()
+        bindings.values.forEach { binding ->
+            val previousMilestone = previous.milestones.firstOrNull { it.id == binding.milestoneId } ?: return@forEach
+            val previousPredicate = previousMilestone.successPredicates.getOrNull(binding.predicateIndex) ?: return@forEach
+            val previousId = previousPredicate.predicateId ?: TaskPlanValidator.predicateIdFor(previousMilestone.id, binding.predicateIndex)
+            val revisedMilestone = revised.milestones.firstOrNull { it.id == binding.milestoneId } ?: return@forEach
+            val revisedMatch = revisedMilestone.successPredicates.mapIndexedNotNull { index, predicate ->
+                val revisedId = predicate.predicateId ?: TaskPlanValidator.predicateIdFor(revisedMilestone.id, index)
+                if (revisedId == previousId && predicatesRemainBound(previousPredicate, predicate, previousId, revisedId)) index else null
+            }.firstOrNull() ?: return@forEach
+            val remapped = binding.copy(
+                predicateIndex = revisedMatch,
+                predicateId = previousId,
+            )
+            retained[key(binding.milestoneId, revisedMatch)] = remapped
         }
         bindings.clear()
         bindings.putAll(retained)
@@ -234,15 +307,47 @@ class PredicateBindingStore {
         bindings.entries.removeIf { it.value.runId == runId }
     }
 
-    private fun predicatesRemainBound(previous: UiPredicate, revised: UiPredicate): Boolean {
-        if (previous.predicateId != null || revised.predicateId != null) return previous.predicateId == revised.predicateId
+    /** Marks a successfully dispatched action before the commit transition. */
+    fun markDispatched(provisional: List<ProvisionalPredicateBinding>): Boolean {
+        if (provisional.any { existingConflict(it) }) return false
+        provisional.forEach { candidate ->
+            val binding = candidate.binding.copy(lifecycle = BindingLifecycle.DISPATCHED)
+            bindings[key(binding.milestoneId, binding.predicateIndex)] = binding
+        }
+        return true
+    }
+
+    /** Commits only bindings that were marked as dispatched. */
+    fun commitDispatched(provisional: List<ProvisionalPredicateBinding>): Boolean {
+        val keys = provisional.map { key(it.binding.milestoneId, it.binding.predicateIndex) }
+        if (keys.any { bindings[it]?.lifecycle != BindingLifecycle.DISPATCHED }) return false
+        keys.forEach { bindingKey ->
+            bindings[bindingKey] = bindings.getValue(bindingKey).copy(lifecycle = BindingLifecycle.COMMITTED)
+        }
+        return true
+    }
+
+    fun markVerified(milestoneId: String) {
+        bindings.entries
+            .filter { it.value.milestoneId == milestoneId && it.value.lifecycle == BindingLifecycle.COMMITTED }
+            .forEach { (bindingKey, binding) -> bindings[bindingKey] = binding.copy(lifecycle = BindingLifecycle.VERIFIED) }
+    }
+
+    fun invalidateRun(runId: String) {
+        bindings.entries
+            .filter { it.value.runId == runId }
+            .forEach { (bindingKey, binding) -> bindings[bindingKey] = binding.copy(lifecycle = BindingLifecycle.INVALIDATED) }
+    }
+
+    private fun predicatesRemainBound(previous: UiPredicate, revised: UiPredicate, previousId: String, revisedId: String): Boolean {
         return previous.kind == revised.kind &&
+            previousId == revisedId &&
             previous.valueRef == revised.valueRef &&
             previous.literal == revised.literal &&
-            previous.target == revised.target &&
+            previous.expectedChecked == revised.expectedChecked &&
             previous.targetPackage == revised.targetPackage &&
-            previous.targetHint == revised.targetHint &&
-            previous.expectedChecked == revised.expectedChecked
+            previous.target == revised.target &&
+            TargetHintMatcher.semanticallyEquivalent(previous.targetHint, revised.targetHint)
     }
 
     private fun actionTarget(action: AgentAction, observation: Observation): UiNodeSnapshot? = when (action) {
@@ -276,9 +381,7 @@ class PredicateBindingStore {
     }
 
     private fun targetMatchesHint(node: UiNodeSnapshot, hint: String): Boolean {
-        val lower = hint.lowercase()
-        return node.text.lowercase().contains(lower) || node.description.lowercase().contains(lower) ||
-            node.className.lowercase().contains(lower) || node.viewId.lowercase().contains(lower)
+        return TargetHintMatcher.match(hint, node) == TargetHintResult.MATCH
     }
 
     private fun sameNode(first: UiNodeSnapshot, second: UiNodeSnapshot): Boolean {
@@ -306,8 +409,19 @@ class PredicateBindingStore {
     private fun existingConflict(provisional: ProvisionalPredicateBinding): Boolean {
         val binding = provisional.binding
         val existing = bindings[key(binding.milestoneId, binding.predicateIndex)]
-        return existing != null && existing != binding
+        return existing != null && (
+            existing.lifecycle == BindingLifecycle.VERIFIED ||
+                existing.lifecycle == BindingLifecycle.INVALIDATED ||
+                !sameBindingIdentity(existing, binding)
+            )
     }
+
+    private fun sameBindingIdentity(first: PredicateBinding, second: PredicateBinding): Boolean =
+        first.milestoneId == second.milestoneId &&
+            first.predicateIndex == second.predicateIndex &&
+            first.predicateId == second.predicateId &&
+            first.identity == second.identity &&
+            first.runId == second.runId
 
     private fun key(milestoneId: String, predicateIndex: Int): String = "$milestoneId#$predicateIndex"
 }
@@ -336,10 +450,18 @@ object MilestoneEvaluator {
             val rawBound = bindings?.get(milestone.id, predicateIndex)
             val bound = rawBound?.takeIf { runId == null || it.runId == null || it.runId == runId }
             val targetSelector = bound?.boundSelector ?: predicate.target
+            val identityResolution = bound?.let { binding ->
+                NodeSelector.resolveIdentity(observation, binding.identity)
+            }
             val targetMatches = bound?.let { binding ->
-                NodeSelector.matchingNodes(observation, binding.identity)
+                when (val resolution = identityResolution) {
+                    is IdentityResolution.Found -> listOf(resolution.node)
+                    is IdentityResolution.Ambiguous -> NodeSelector.matchingNodes(observation, binding.identity)
+                    else -> emptyList()
+                }
             } ?: targetSelector?.let { selector -> NodeSelector.matchingNodes(observation, selector) }.orEmpty()
             val target = targetMatches.singleOrNull()
+            val concreteTarget = bound != null || (predicate.target != null && targetMatches.size == 1)
             val bindingRequired = predicate.kind in setOf(
                 UiPredicateKind.EDITABLE_EQUALS,
                 UiPredicateKind.ELEMENT_PRESENT,
@@ -371,20 +493,20 @@ object MilestoneEvaluator {
                     }
                 }
 
-                UiPredicateKind.EDITABLE_EQUALS -> bindingRequired && bound != null && value != null && target?.let { node ->
+                UiPredicateKind.EDITABLE_EQUALS -> bindingRequired && concreteTarget && value != null && target?.let { node ->
                     node.visible && node.enabled && node.editable && !node.password && node.text == value
                 } == true
 
                 UiPredicateKind.IME_HIDDEN -> !observation.imeVisible
-                UiPredicateKind.ELEMENT_PRESENT -> bindingRequired && bound != null && targetMatches.size == 1 && targetMatches.single().visible
-                UiPredicateKind.ELEMENT_DISAPPEARED -> bindingRequired && bound != null && targetMatches.isEmpty()
-                UiPredicateKind.ELEMENT_ENABLED -> bindingRequired && bound != null && target?.let { it.visible && it.enabled } == true
-                UiPredicateKind.ELEMENT_SELECTED -> bindingRequired && bound != null && target?.let { it.visible && it.selected } == true
-                UiPredicateKind.ELEMENT_CHECKED -> bindingRequired && bound != null && target?.let { it.visible && it.checked == true } == true
-                UiPredicateKind.ELEMENT_TEXT_EQUALS -> bindingRequired && bound != null && value != null && target?.let { node ->
+                UiPredicateKind.ELEMENT_PRESENT -> bindingRequired && concreteTarget && targetMatches.size == 1 && targetMatches.single().visible
+                UiPredicateKind.ELEMENT_DISAPPEARED -> bindingRequired && bound != null && identityResolution == IdentityResolution.MissingInSameContext
+                UiPredicateKind.ELEMENT_ENABLED -> bindingRequired && concreteTarget && target?.let { it.visible && it.enabled } == true
+                UiPredicateKind.ELEMENT_SELECTED -> bindingRequired && concreteTarget && target?.let { it.visible && it.selected } == true
+                UiPredicateKind.ELEMENT_CHECKED -> bindingRequired && concreteTarget && target?.let { it.visible && it.checked == true } == true
+                UiPredicateKind.ELEMENT_TEXT_EQUALS -> bindingRequired && concreteTarget && value != null && target?.let { node ->
                     node.visible && (node.text == value || node.description == value)
                 } == true
-                UiPredicateKind.TOGGLE_STATE -> bindingRequired && bound != null && target?.let { node ->
+                UiPredicateKind.TOGGLE_STATE -> bindingRequired && concreteTarget && target?.let { node ->
                     node.visible && node.checked != null && node.checked == predicate.expectedChecked
                 } == true
                 UiPredicateKind.TOGGLE_ON -> bindingRequired && bound != null && target?.let { node ->
@@ -462,6 +584,8 @@ data class PackagePolicy(
             "com.google.android.packageinstaller",
             "com.android.settings",
             "com.google.android.settings",
+            "com.samsung.android.packageinstaller",
+            "com.samsung.android.settings",
         )
 
         fun isSystemUiPackage(packageName: String): Boolean {
@@ -469,14 +593,22 @@ data class PackagePolicy(
             return normalized == "com.android.systemui" || normalized.startsWith("com.android.systemui.")
         }
 
-        fun isPermissionOrInstallerPackage(packageName: String): Boolean =
-            permissionAndInstallerPrefixes.any(packageName::startsWith)
+        fun isPermissionOrInstallerPackage(packageName: String): Boolean {
+            val normalized = packageName.trim().lowercase()
+            return permissionAndInstallerPrefixes.any(normalized::startsWith) ||
+                normalized.contains(".permissioncontroller") ||
+                normalized.contains(".packageinstaller")
+        }
+
+        fun isProtectedPackage(packageName: String): Boolean {
+            val normalized = packageName.trim().lowercase()
+            return normalized == "android" || isSystemUiPackage(normalized) || isPermissionOrInstallerPackage(normalized)
+        }
 
         fun filterPlannerPackages(requested: Set<String>, installedPackages: Set<String>): Set<String> =
             requested.filterTo(linkedSetOf()) { packageName ->
                 packageName in installedPackages &&
-                    !isSystemUiPackage(packageName) &&
-                    !isPermissionOrInstallerPackage(packageName)
+                    !isProtectedPackage(packageName)
             }
 
         fun mergeAllowedPackages(current: Set<String>, requested: Set<String>, installedPackages: Set<String>): Set<String> =
@@ -697,7 +829,7 @@ class RunLedger(private var plan: TaskPlan) {
         "${it.milestoneId}: ${it.action} -> ${it.judgement} (${it.evidence})"
     }
 
-    fun planText(): String = plan.compactText(currentMilestoneIndex)
+    fun planText(bindings: PredicateBindingStore? = null): String = plan.compactText(currentMilestoneIndex, bindings)
 
     fun evidenceSummary(): String = if (evidence.isEmpty()) "No milestone evidence recorded" else evidence.entries.joinToString("\n") { (id, proof) -> "$id: $proof" }
 

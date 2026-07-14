@@ -589,6 +589,8 @@ private fun ChatWorkspace(
                                                     }
                                                     is com.androidagent.app.accessibility.AgentStartResult.Busy ->
                                                         "已有任务正在运行（${started.activeRunId.take(8)}）"
+                                                    is com.androidagent.app.accessibility.AgentStartResult.SafetyBlocked ->
+                                                        "任务被本地安全策略拦截，未启动执行"
                                                     com.androidagent.app.accessibility.AgentStartResult.InvalidGoal ->
                                                         "任务目标或模型配置无效，未启动执行"
                                                     com.androidagent.app.accessibility.AgentStartResult.AccessibilityDisconnected ->

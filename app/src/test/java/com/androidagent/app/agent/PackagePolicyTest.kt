@@ -36,6 +36,16 @@ class PackagePolicyTest {
     }
 
     @Test
+    fun vendorInstallerAndPermissionControllerNamesRemainProtected() {
+        val policy = PackagePolicy(allowedPackages = mutableSetOf(
+            "com.samsung.android.packageinstaller",
+            "com.vendor.permissioncontroller",
+        ), allowSystemUi = true)
+        assertFalse(policy.allows("com.samsung.android.packageinstaller"))
+        assertFalse(policy.allows("com.vendor.permissioncontroller"))
+    }
+
+    @Test
     fun plannerPackagesAreRestrictedToInstalledNonSystemApps() {
         assertEquals(
             setOf("secondary.app"),

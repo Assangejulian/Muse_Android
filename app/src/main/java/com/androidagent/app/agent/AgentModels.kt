@@ -70,6 +70,16 @@ data class BoundElementIdentity(
     }
 }
 
+/** Result of resolving a binding against a fresh accessibility observation. */
+sealed interface IdentityResolution {
+    data class Found(val node: UiNodeSnapshot) : IdentityResolution
+    data object MissingInSameContext : IdentityResolution
+    data class Ambiguous(val count: Int) : IdentityResolution
+    data object PackageChanged : IdentityResolution
+    data object WindowChanged : IdentityResolution
+    data object IdentityInvalidated : IdentityResolution
+}
+
 object ElementSelectorValidation {
     private val boundsPattern = Regex("^-?\\d+,-?\\d+,-?\\d+,-?\\d+$")
 
@@ -132,6 +142,7 @@ object NodeSelector {
 
         selector.viewIdResourceName?.let { viewId ->
             val byViewId = scoped.filter { it.viewId == viewId }
+            if (byViewId.isEmpty()) return emptyList()
             if (byViewId.size == 1) return byViewId
             if (byViewId.size > 1) {
                 val narrowed = when {
@@ -143,7 +154,7 @@ object NodeSelector {
                     selector.description != null -> byViewId.filter { it.description == selector.description }
                     else -> refine(byViewId)
                 }
-                if (narrowed.isNotEmpty()) return narrowed
+                return refine(if (narrowed.isNotEmpty()) narrowed else byViewId)
             }
         }
 
@@ -183,35 +194,114 @@ object NodeSelector {
         return emptyList()
     }
 
-    fun matchingNodes(observation: Observation, identity: BoundElementIdentity): List<UiNodeSnapshot> {
-        val scoped = observation.nodes.filter { node ->
-            (identity.packageName.isBlank() || node.packageName == identity.packageName) &&
-                (identity.windowId == null || node.windowId == identity.windowId)
+    /** Compatibility list view. Use [resolveIdentity] when the reason matters. */
+    fun matchingNodes(observation: Observation, identity: BoundElementIdentity): List<UiNodeSnapshot> =
+        when (val resolution = resolveIdentity(observation, identity)) {
+            is IdentityResolution.Found -> listOf(resolution.node)
+            is IdentityResolution.Ambiguous -> candidatesForIdentity(observation, identity).take(resolution.count)
+            else -> emptyList()
         }
-        if (scoped.isEmpty()) return emptyList()
 
-        val byViewId = identity.viewIdResourceName?.let { viewId -> scoped.filter { it.viewId == viewId } }.orEmpty()
-        val viewIdCandidates = if (byViewId.isNotEmpty()) byViewId else scoped
-        val byStableKey = identity.stableKey?.let { key -> viewIdCandidates.filter { it.stableKey == key } }.orEmpty()
-        if (byStableKey.isNotEmpty()) return byStableKey.filter { it.className == identity.className }
+    /**
+     * Resolve a bound identity without silently replacing a lost resource id
+     * with an unrelated node of the same class.
+     */
+    fun resolveIdentity(observation: Observation, identity: BoundElementIdentity): IdentityResolution {
+        if (identity.packageName.isNotBlank() && observation.packageName.isBlank()) {
+            return IdentityResolution.IdentityInvalidated
+        }
+        if (identity.packageName.isNotBlank() && observation.packageName.isNotBlank() && observation.packageName != identity.packageName) {
+            return IdentityResolution.PackageChanged
+        }
+        val packageNodes = observation.nodes.filter { node ->
+            identity.packageName.isBlank() || node.packageName == identity.packageName
+        }
+        if (packageNodes.isEmpty()) {
+            return if (identity.windowId == null && observation.packageName == identity.packageName) {
+                IdentityResolution.MissingInSameContext
+            } else {
+                IdentityResolution.IdentityInvalidated
+            }
+        }
 
-        val byPath = identity.treePath?.let { path ->
-            viewIdCandidates.filter { it.treePath == path && it.className == identity.className }
-        }.orEmpty()
-        if (byPath.isNotEmpty()) return byPath
+        if (identity.windowId != null) {
+            val sameWindow = packageNodes.filter { it.windowId == identity.windowId }
+            if (sameWindow.isEmpty()) return IdentityResolution.WindowChanged
+            return resolveWithinContext(sameWindow, identity)
+        }
+        return resolveWithinContext(packageNodes, identity)
+    }
 
-        val classCandidates = viewIdCandidates.filter { it.className == identity.className }
-        if (classCandidates.size <= 1) return classCandidates
-        val bounds = identity.initialBounds ?: return classCandidates
-        val parsed = parseBounds(bounds) ?: return classCandidates
-        return classCandidates.filter { node ->
-            val current = parseBounds(node.bounds) ?: return@filter false
-            kotlin.math.abs(current[0] - parsed[0]) <= BOUNDS_DRIFT_PX &&
-                kotlin.math.abs(current[1] - parsed[1]) <= BOUNDS_DRIFT_PX &&
-                kotlin.math.abs(current[2] - parsed[2]) <= BOUNDS_DRIFT_PX &&
-                kotlin.math.abs(current[3] - parsed[3]) <= BOUNDS_DRIFT_PX
+    private fun resolveWithinContext(candidates: List<UiNodeSnapshot>, identity: BoundElementIdentity): IdentityResolution {
+        val scoped = if (identity.viewIdResourceName != null) {
+            val byViewId = candidates.filter { it.viewId == identity.viewIdResourceName }
+            // A captured view id is a hard identity. Its disappearance must
+            // not fall back to an arbitrary same-class node.
+            if (byViewId.isEmpty()) return IdentityResolution.MissingInSameContext
+            byViewId
+        } else {
+            candidates
+        }
+        val narrowed = narrowIdentityCandidates(scoped, identity)
+        return when {
+            narrowed.size == 1 -> IdentityResolution.Found(narrowed.single())
+            narrowed.size > 1 -> IdentityResolution.Ambiguous(narrowed.size)
+            else -> if (identity.viewIdResourceName == null) {
+                IdentityResolution.MissingInSameContext
+            } else {
+                IdentityResolution.IdentityInvalidated
+            }
         }
     }
+
+    private fun candidatesForIdentity(observation: Observation, identity: BoundElementIdentity): List<UiNodeSnapshot> {
+        val packageNodes = observation.nodes.filter { identity.packageName.isBlank() || it.packageName == identity.packageName }
+        val windowNodes = identity.windowId?.let { window -> packageNodes.filter { it.windowId == window } } ?: packageNodes
+        val viewNodes = identity.viewIdResourceName?.let { id -> windowNodes.filter { it.viewId == id } } ?: windowNodes
+        return narrowIdentityCandidates(viewNodes, identity)
+    }
+
+    private fun narrowIdentityCandidates(candidates: List<UiNodeSnapshot>, identity: BoundElementIdentity): List<UiNodeSnapshot> {
+        var narrowed = candidates
+        identity.stableKey?.let { key ->
+            val byStableKey = narrowed.filter { it.stableKey == key }
+            if (byStableKey.isNotEmpty()) narrowed = byStableKey
+        }
+        identity.treePath?.let { path ->
+            val byPath = narrowed.filter { it.treePath == path }
+            if (byPath.isNotEmpty()) narrowed = byPath
+        }
+        if (identity.className.isNotBlank()) {
+            val byClass = narrowed.filter { it.className == identity.className }
+            if (byClass.isNotEmpty()) narrowed = byClass
+        }
+        val hasStrongIdentity = identity.viewIdResourceName != null || identity.stableKey != null || identity.treePath != null
+        if (narrowed.size > 1 || !hasStrongIdentity) {
+            identity.initialBounds?.let { bounds ->
+                val parsed = parseBounds(bounds)
+                if (parsed != null) {
+                    val byBounds = narrowed.filter { node ->
+                        val current = parseBounds(node.bounds) ?: return@filter false
+                        kotlin.math.abs(current[0] - parsed[0]) <= BOUNDS_DRIFT_PX &&
+                            kotlin.math.abs(current[1] - parsed[1]) <= BOUNDS_DRIFT_PX &&
+                            kotlin.math.abs(current[2] - parsed[2]) <= BOUNDS_DRIFT_PX &&
+                            kotlin.math.abs(current[3] - parsed[3]) <= BOUNDS_DRIFT_PX
+                    }
+                    if (byBounds.isNotEmpty()) narrowed = byBounds
+                    else if (!hasStrongIdentity) narrowed = emptyList()
+                }
+            }
+        }
+        return narrowed
+    }
+
+    /** True absence is only established when the identity's package/window context is retained. */
+    fun disappearanceResolution(observation: Observation, identity: BoundElementIdentity): IdentityResolution =
+        when (val resolution = resolveIdentity(observation, identity)) {
+            IdentityResolution.IdentityInvalidated -> IdentityResolution.IdentityInvalidated
+            IdentityResolution.MissingInSameContext -> IdentityResolution.MissingInSameContext
+            else -> resolution
+        }
 
     fun resolve(observation: Observation, nodeId: Int?, selector: ElementSelector?): UiNodeSnapshot? {
         if (selector != null) {

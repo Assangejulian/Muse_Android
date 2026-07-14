@@ -26,6 +26,7 @@ sealed interface AgentStartResult {
     data class Started(val runId: String) : AgentStartResult
     data class Busy(val activeRunId: String) : AgentStartResult
     data object InvalidGoal : AgentStartResult
+    data class SafetyBlocked(val reason: String) : AgentStartResult
     data object AccessibilityDisconnected : AgentStartResult
 }
 
@@ -34,6 +35,7 @@ object AgentController {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val mutableState = MutableStateFlow(AgentUiState())
     private val results = ConcurrentHashMap<String, RuntimeResult>()
+    private val resultOrder = ArrayDeque<String>()
 
     val state: StateFlow<AgentUiState> = mutableState.asStateFlow()
 
@@ -58,6 +60,16 @@ object AgentController {
 
     fun resultForRun(runId: String): RuntimeResult? = results[runId]
 
+    /** Atomically consumes a completed run result for one caller (for example WorkManager). */
+    @Synchronized
+    fun consumeResult(runId: String): RuntimeResult? = results.remove(runId).also { resultOrder.remove(runId) }
+
+    @Synchronized
+    fun removeResult(runId: String) {
+        results.remove(runId)
+        resultOrder.remove(runId)
+    }
+
     fun currentRunId(): String? = activeRunId
 
     @Synchronized
@@ -69,12 +81,20 @@ object AgentController {
         if (!busyId.isNullOrBlank()) return AgentStartResult.Busy(busyId)
 
         val effectiveGoal = goalOverride?.trim().takeUnless { it.isNullOrBlank() } ?: settings.taskGoal
-        if (settings.apiKey.isBlank() || effectiveGoal.isBlank() || SensitiveOperationPolicy.validateGoal(effectiveGoal).isFailure) {
+        if (settings.apiKey.isBlank() || effectiveGoal.isBlank()) {
             val result = RuntimeResult.failure(RuntimeOutcome.PERMANENT_PLAN_ERROR, "API key and a permitted task goal are required")
             lastResult = result
             update { copy(status = "Failed", outcome = result.reason, goal = effectiveGoal) }
             log("Invalid task goal or missing API key")
             return AgentStartResult.InvalidGoal
+        }
+        val safetyFailure = SensitiveOperationPolicy.validateGoal(effectiveGoal).exceptionOrNull()
+        if (safetyFailure != null) {
+            val result = RuntimeResult.failure(RuntimeOutcome.SAFETY_BLOCKED, "SAFETY_BLOCKED: ${safetyFailure.message.orEmpty()}")
+            lastResult = result
+            update { copy(status = "Blocked", outcome = result.reason, goal = effectiveGoal) }
+            log("Safety policy blocked the task goal")
+            return AgentStartResult.SafetyBlocked(result.reason)
         }
 
         val service = AgentAccessibilityService.current()
@@ -182,6 +202,13 @@ object AgentController {
     private fun storeResult(generation: Long, runId: String, result: RuntimeResult) {
         val normalized = if (result.runId == runId) result else result.copy(runId = runId)
         results[runId] = normalized
+        synchronized(this) {
+            resultOrder.remove(runId)
+            resultOrder.addLast(runId)
+            while (resultOrder.size > MAX_RETAINED_RESULTS) {
+                results.remove(resultOrder.removeFirst())
+            }
+        }
         if (generation == runGeneration) lastResult = normalized
     }
 
@@ -202,4 +229,6 @@ object AgentController {
     private inline fun updateFor(generation: Long, block: AgentUiState.() -> AgentUiState) {
         mutableState.update { state -> if (generation == runGeneration) state.block() else state }
     }
+
+    private const val MAX_RETAINED_RESULTS = 20
 }

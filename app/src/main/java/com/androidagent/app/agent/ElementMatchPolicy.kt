@@ -1,5 +1,7 @@
 package com.androidagent.app.agent
 
+import java.util.Locale
+
 /** Stable, ordered matching rules for re-locating a node after a tree refresh. */
 object ElementMatchPolicy {
     fun score(
@@ -69,5 +71,59 @@ object ElementMatchPolicy {
         editable = snapshot.editable,
         clickable = snapshot.clickable,
         treePath = selector.treePath,
+    )
+}
+
+enum class TargetHintResult { MATCH, NO_MATCH, AMBIGUOUS }
+
+/** Conservative hint matching used only for conflict checks and candidate scoring. */
+object TargetHintMatcher {
+    fun semanticallyEquivalent(first: String?, second: String?): Boolean {
+        val left = first.orEmpty()
+        val right = second.orEmpty()
+        if (left.isBlank() || right.isBlank()) return left.isBlank() && right.isBlank()
+        return normalize(left) == normalize(right)
+    }
+
+    fun match(hint: String, node: UiNodeSnapshot): TargetHintResult =
+        if (hint.isBlank()) TargetHintResult.NO_MATCH else {
+            val fields = listOf(node.text, node.description, node.viewId, node.className)
+            if (score(hint, fields) > 0) TargetHintResult.MATCH else TargetHintResult.NO_MATCH
+        }
+
+    fun match(hint: String, nodes: List<UiNodeSnapshot>): TargetHintResult {
+        val matches = nodes.count { match(hint, it) == TargetHintResult.MATCH }
+        return when {
+            matches == 1 -> TargetHintResult.MATCH
+            matches > 1 -> TargetHintResult.AMBIGUOUS
+            else -> TargetHintResult.NO_MATCH
+        }
+    }
+
+    private fun score(hint: String, fields: List<String>): Int {
+        val normalizedFields = fields.map(::normalize).filter(String::isNotBlank)
+        val combined = normalizedFields.joinToString(" ")
+        val englishTokens = Regex("[a-z0-9]+").findAll(hint.lowercase(Locale.ROOT)).map { it.value }.toList()
+        val chineseSegments = Regex("[\\p{IsHan}]{2,}").findAll(hint).map { it.value }.toList()
+        var score = 0
+        englishTokens.forEach { token ->
+            val aliases = genericAliases[token].orEmpty() + token
+            if (aliases.any { alias -> combined.contains(alias) || normalizedFields.any { field -> alias.contains(field) && field.length >= 2 } }) score++
+        }
+        chineseSegments.forEach { segment ->
+            if (combined.contains(normalize(segment)) || normalizedFields.any { field -> field.contains(normalize(segment)) }) score += 2
+        }
+        if (englishTokens.isNotEmpty() && score * 2 >= englishTokens.size) return score
+        return if (chineseSegments.isNotEmpty() && score > 0) score else 0
+    }
+
+    private fun normalize(value: String): String = value.trim().lowercase(Locale.ROOT)
+        .replace(Regex("[\\p{Punct}\\p{Z}\\s]+"), "")
+
+    private val genericAliases = mapOf(
+        "toggle" to setOf("switch", "checkbox", "radiobutton"),
+        "switch" to setOf("toggle", "checkbox", "radiobutton"),
+        "button" to setOf("action", "control"),
+        "field" to setOf("input", "edittext", "textfield"),
     )
 }

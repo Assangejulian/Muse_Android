@@ -65,6 +65,10 @@ object TaskPlanValidator {
     )
 
     fun requireValid(plan: TaskPlan): TaskPlan {
+        val milestoneIds = plan.milestones.map { it.id }
+        if (milestoneIds.any(String::isBlank) || milestoneIds.distinct().size != milestoneIds.size) {
+            throw TaskPlanException("Milestone IDs must be unique and non-blank")
+        }
         if (!plan.milestones.all { it.successPredicates.isNotEmpty() }) {
             throw TaskPlanException("Task plan contains a milestone without a verifiable predicate")
         }
@@ -82,7 +86,17 @@ object TaskPlanValidator {
                 )
             },
         )
-        normalized.milestones.flatMap { it.successPredicates }.forEach { predicate ->
+        val predicates = normalized.milestones.flatMap { it.successPredicates }
+        val predicateIds = predicates.map { it.predicateId.orEmpty() }
+        if (predicateIds.any(String::isBlank)) throw TaskPlanException("Every predicate must have a non-blank predicateId")
+        if (predicateIds.distinct().size != predicateIds.size) {
+            throw TaskPlanException("Predicate IDs must be unique across the task plan")
+        }
+        val safePredicateId = Regex("^[A-Za-z0-9_-]+$")
+        predicates.forEach { predicate ->
+            if (!safePredicateId.matches(predicate.predicateId.orEmpty())) {
+                throw TaskPlanException("Predicate ID contains unsafe characters")
+            }
             if (predicate.kind == UiPredicateKind.ELEMENT_STATE) {
                 throw TaskPlanException("ELEMENT_STATE is ambiguous; use a typed ELEMENT_* predicate")
             }
@@ -98,16 +112,43 @@ object TaskPlanValidator {
                 if (predicate.expectedChecked == null) throw TaskPlanException("TOGGLE_STATE requires expectedChecked")
             }
             if (predicate.kind == UiPredicateKind.PACKAGE_FOREGROUND) {
-                if (predicate.targetPackage.isNullOrBlank() && predicate.target?.packageName.isNullOrBlank()) {
+                val targetPackage = predicate.targetPackage ?: predicate.target?.packageName
+                if (targetPackage.isNullOrBlank()) {
                     throw TaskPlanException("PACKAGE_FOREGROUND requires an explicit target package")
+                }
+                if (PackagePolicy.isProtectedPackage(targetPackage)) {
+                    throw TaskPlanException("PACKAGE_FOREGROUND cannot target a protected system package")
                 }
             }
         }
         return normalized
     }
 
+    /** Replans must allocate a new ID when a predicate's meaning changes. */
+    fun requireCompatiblePredicateIds(previous: TaskPlan, revised: TaskPlan) {
+        val previousById = previous.milestones.flatMap { milestone ->
+            milestone.successPredicates.mapIndexed { index, predicate ->
+                (predicate.predicateId ?: predicateIdFor(milestone.id, index)) to predicate
+            }
+        }.toMap()
+        revised.milestones.forEach { milestone ->
+            milestone.successPredicates.forEachIndexed { index, predicate ->
+                val id = predicate.predicateId ?: predicateIdFor(milestone.id, index)
+                val old = previousById[id] ?: return@forEachIndexed
+                val compatible = old.kind == predicate.kind &&
+                    old.valueRef == predicate.valueRef &&
+                    old.literal == predicate.literal &&
+                    old.expectedChecked == predicate.expectedChecked &&
+                    old.targetPackage == predicate.targetPackage &&
+                    old.target == predicate.target &&
+                    TargetHintMatcher.semanticallyEquivalent(old.targetHint, predicate.targetHint)
+                if (!compatible) throw TaskPlanException("Predicate ID $id was reused for a different semantic contract")
+            }
+        }
+    }
+
     fun predicateIdFor(milestoneId: String, index: Int): String =
-        "${milestoneId.trim().ifBlank { "milestone" }}-p${index + 1}"
+        "${milestoneId.trim().ifBlank { "milestone" }.replace(Regex("[^A-Za-z0-9_-]"), "_")}-p${index + 1}"
 }
 
 data class TaskPlan(
@@ -123,25 +164,40 @@ data class TaskPlan(
 
     val originalGoal: String get() = goal.originalGoal
 
-    fun compactText(currentIndex: Int): String = buildString {
+    fun compactText(currentIndex: Int, bindings: PredicateBindingStore? = null): String = buildString {
         appendLine("summary=$summary")
         appendLine("targetApp=$targetAppHint")
         appendLine("allowedPackages=${allowedPackages.joinToString(",").ifBlank { "none" }}")
         appendLine("goal=${goal.originalGoal.take(4_000)}")
-            milestones.forEachIndexed { index, milestone ->
+        milestones.forEachIndexed { index, milestone ->
             val status = when {
                 index < currentIndex -> "completed"
                 index == currentIndex -> "current"
                 else -> "pending"
             }
-                appendLine("${milestone.id} [$status/${milestone.kind}] ${milestone.objective}; evidence=${milestone.successEvidence}")
-                milestone.successPredicates.forEach { predicate ->
-                    val target = predicate.target?.let { selector ->
-                    "target=${selector.viewIdResourceName ?: selector.text ?: selector.description ?: selector.bounds ?: "selector"}"
+            appendLine("${milestone.id} [$status/${milestone.kind}] ${milestone.objective}; evidence=${milestone.successEvidence}")
+            milestone.successPredicates.forEachIndexed { predicateIndex, predicate ->
+                // Keep the harness useful without echoing raw selector text or a
+                // complete selector object into the model context.
+                val target = predicate.target?.let { selector ->
+                    "target=${TraceSanitizer.selectorMetadata(selector)}"
                 }.orEmpty()
-                val targetPackage = predicate.targetPackage?.let { "targetPackage=$it" }.orEmpty()
+                val targetPackage = (predicate.targetPackage ?: predicate.target?.packageName)?.let { "targetPackage=$it" }.orEmpty()
                 val targetHint = predicate.targetHint?.let { "targetHint=$it" }.orEmpty()
-                if (target.isNotBlank() || targetPackage.isNotBlank() || targetHint.isNotBlank()) appendLine("  ${predicate.kind} $target $targetPackage $targetHint")
+                val literal = predicate.literal?.let { "literal=${it.take(120)}" }.orEmpty()
+                val valueRef = predicate.valueRef?.let { "valueRef=$it" }.orEmpty()
+                val expectedChecked = predicate.expectedChecked?.let { "expectedChecked=$it" }.orEmpty()
+                val binding = bindings?.get(milestone.id, predicateIndex)?.let { bound ->
+                    val identityType = when {
+                        bound.identity.viewIdResourceName != null -> "VIEW_ID"
+                        bound.identity.treePath != null -> "TREE_PATH"
+                        bound.identity.initialBounds != null -> "BOUNDS"
+                        else -> "STABLE_KEY"
+                    }
+                    "binding=BOUND boundPackage=${bound.boundPackage} identityType=$identityType lifecycle=${bound.lifecycle}"
+                } ?: "binding=UNBOUND"
+                val predicateId = predicate.predicateId ?: TaskPlanValidator.predicateIdFor(milestone.id, predicateIndex)
+                appendLine("  predicateId=$predicateId kind=${predicate.kind} description=${predicate.description.take(180)} $literal $valueRef $expectedChecked $targetPackage $targetHint $target $binding")
             }
         }
     }

@@ -189,6 +189,7 @@ class ScheduledAgentWorker(context: Context, parameters: WorkerParameters) : Cor
                     )
                     return if (decision.type == WorkerDecisionType.RETRY) Result.retry() else Result.failure()
                 }
+                is com.androidagent.app.accessibility.AgentStartResult.SafetyBlocked -> return Result.failure()
                 com.androidagent.app.accessibility.AgentStartResult.InvalidGoal -> return Result.failure()
                 com.androidagent.app.accessibility.AgentStartResult.AccessibilityDisconnected -> {
                     val decision = ScheduledWorkerResultMapper.map(
@@ -208,8 +209,9 @@ class ScheduledAgentWorker(context: Context, parameters: WorkerParameters) : Cor
                 true
             } ?: false
             if (!finished) AgentController.stopWithReason("Scheduled run exceeded its worker deadline", runId)
+            val completedResult = AgentController.resultForRun(runId)
             val decision = ScheduledWorkerResultMapper.map(
-                runtimeResult = AgentController.resultForRun(runId),
+                runtimeResult = completedResult,
                 accessibilityConnected = AgentController.state.value.accessibilityConnected,
                 agentBusy = AgentController.state.value.running,
                 timedOut = !finished,
@@ -219,7 +221,7 @@ class ScheduledAgentWorker(context: Context, parameters: WorkerParameters) : Cor
                 WorkerDecisionType.SUCCESS -> Result.success()
                 WorkerDecisionType.RETRY -> Result.retry()
                 WorkerDecisionType.FAILURE -> Result.failure()
-            }
+            }.also { AgentController.removeResult(runId) }
         } finally {
             startedRunId?.let { runId ->
                 if (AgentController.isRunning(runId)) {
