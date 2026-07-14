@@ -28,7 +28,43 @@ data class UiPredicate(
     val valueRef: String? = null,
     val literal: String? = null,
     val description: String,
+    /** Unique node contract for state predicates. */
+    val target: ElementSelector? = null,
+    /** Explicit package contract for PACKAGE_FOREGROUND. */
+    val targetPackage: String? = null,
 )
+
+class TaskPlanException(message: String, cause: Throwable? = null) : IllegalStateException(message, cause)
+
+object TaskPlanValidator {
+    private val targetRequired = setOf(
+        UiPredicateKind.TOGGLE_ON,
+        UiPredicateKind.EDITABLE_EQUALS,
+        UiPredicateKind.ELEMENT_STATE,
+    )
+
+    fun requireValid(plan: TaskPlan): TaskPlan {
+        if (!plan.milestones.all { it.successPredicates.isNotEmpty() }) {
+            throw TaskPlanException("Task plan contains a milestone without a verifiable predicate")
+        }
+        if (plan.milestones.any { milestone ->
+            milestone.successPredicates.all { it.kind == UiPredicateKind.SEMANTIC_CLAIM }
+        }) {
+            throw TaskPlanException("Task plan contains a semantic-only milestone without a local verification condition")
+        }
+        plan.milestones.flatMap { it.successPredicates }.forEach { predicate ->
+            if (predicate.kind in targetRequired) {
+                if (predicate.target == null) throw TaskPlanException("${predicate.kind} requires a unique target selector")
+            }
+            if (predicate.kind == UiPredicateKind.PACKAGE_FOREGROUND) {
+                if (predicate.targetPackage.isNullOrBlank() && predicate.target?.packageName.isNullOrBlank()) {
+                    throw TaskPlanException("PACKAGE_FOREGROUND requires an explicit target package")
+                }
+            }
+        }
+        return plan
+    }
+}
 
 data class TaskPlan(
     val summary: String,
@@ -55,6 +91,13 @@ data class TaskPlan(
                 else -> "pending"
             }
             appendLine("${milestone.id} [$status/${milestone.kind}] ${milestone.objective}; evidence=${milestone.successEvidence}")
+            milestone.successPredicates.forEach { predicate ->
+                val target = predicate.target?.let { selector ->
+                    "target=${selector.viewIdResourceName ?: selector.text ?: selector.description ?: selector.bounds ?: "selector"}"
+                }.orEmpty()
+                val targetPackage = predicate.targetPackage?.let { "targetPackage=$it" }.orEmpty()
+                if (target.isNotBlank() || targetPackage.isNotBlank()) appendLine("  ${predicate.kind} $target $targetPackage")
+            }
         }
     }
 
@@ -96,7 +139,7 @@ object TaskPlanParser {
             }
         }
         require(milestones.map { it.id }.distinct().size == milestones.size) { "Milestone IDs must be unique" }
-        return TaskPlan(
+        val plan = TaskPlan(
             summary = json.optString("summary", goal.originalGoal).ifBlank { goal.originalGoal },
             targetAppHint = json.optString("targetAppHint", "").trim(),
             goal = goal,
@@ -105,6 +148,7 @@ object TaskPlanParser {
                 buildSet { for (index in 0 until array.length()) add(array.getString(index).trim()) }
             } ?: emptySet(),
         )
+        return TaskPlanValidator.requireValid(plan)
     }
 
     fun parse(raw: String, goal: String): TaskPlan = parse(raw, ConservativeGoalInterpreter.interpret(goal))
@@ -112,28 +156,8 @@ object TaskPlanParser {
     @Suppress("UNUSED_PARAMETER")
     fun parse(raw: String, goal: String, ignoredLegacyValue: String?): TaskPlan = parse(raw, goal)
 
-    fun fallback(goal: GoalContext, targetAppHint: String): TaskPlan = TaskPlan(
-        summary = goal.originalGoal,
-        targetAppHint = targetAppHint,
-        goal = goal,
-        milestones = buildList {
-            if (targetAppHint.isNotBlank()) add(
-                TaskMilestone(
-                    id = "launch",
-                    objective = "Bring the explicitly selected application to the foreground",
-                    successPredicates = listOf(UiPredicate(UiPredicateKind.PACKAGE_FOREGROUND, description = "The selected package is foreground")),
-                    kind = TaskMilestoneKind.LAUNCH_APP,
-                ),
-            )
-            add(
-                TaskMilestone(
-                    id = "verify",
-                    objective = "Perform the requested interaction and establish direct observable evidence",
-                    successPredicates = listOf(UiPredicate(UiPredicateKind.SEMANTIC_CLAIM, description = "The current screen directly proves the requested outcome")),
-                    kind = TaskMilestoneKind.VERIFICATION,
-                ),
-            )
-        },
+    fun fallback(goal: GoalContext, targetAppHint: String): TaskPlan = throw TaskPlanException(
+        "Manager plan unavailable after retries; refusing an unverifiable fallback plan",
     )
 
     fun fallback(goal: String, targetAppHint: String): TaskPlan = fallback(ConservativeGoalInterpreter.interpret(goal), targetAppHint)
@@ -164,7 +188,20 @@ object TaskPlanParser {
                 if (kind in setOf(UiPredicateKind.TEXT_PRESENT, UiPredicateKind.EDITABLE_EQUALS, UiPredicateKind.ELEMENT_STATE)) {
                     require(valueRef != null || literal != null) { "$kind requires a value" }
                 }
-                add(UiPredicate(kind, valueRef, literal, predicate.optString("description", kind.name).trim().ifBlank { kind.name }))
+                val target = ElementSelectorJson.parse(predicate.optJSONObject("target"))
+                val targetPackage = predicate.optString("targetPackage").trim().ifBlank {
+                    predicate.optString("packageName").trim().ifBlank { target?.packageName }
+                }
+                add(
+                    UiPredicate(
+                        kind = kind,
+                        valueRef = valueRef,
+                        literal = literal,
+                        description = predicate.optString("description", kind.name).trim().ifBlank { kind.name },
+                        target = target,
+                        targetPackage = targetPackage,
+                    ),
+                )
             }
         }
     }

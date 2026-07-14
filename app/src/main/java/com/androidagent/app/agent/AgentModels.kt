@@ -1,6 +1,7 @@
 package com.androidagent.app.agent
 
 import java.security.MessageDigest
+import org.json.JSONObject
 
 data class UiNodeSnapshot(
     val id: Int,
@@ -65,6 +66,10 @@ object NodeSelector {
             val matches = scoped.filter { it.description == selector.description && it.className == selector.className }
             if (matches.isNotEmpty()) return matches
         }
+        if (selector.className != null && selector.text == null && selector.description == null) {
+            val matches = scoped.filter { it.className == selector.className }
+            if (matches.isNotEmpty()) return matches
+        }
         selector.treePath?.let { path ->
             val matches = scoped.filter { it.treePath == path }
             if (matches.isNotEmpty()) return matches
@@ -73,14 +78,56 @@ object NodeSelector {
             val matches = scoped.filter { it.bounds == bounds }
             if (matches.isNotEmpty()) return matches
         }
-        return scoped
+        // A selector is an assertion, not a broad package filter.  Returning the
+        // whole scope here would turn a failed selector into an arbitrary click.
+        return emptyList()
     }
 
     fun resolve(observation: Observation, nodeId: Int?, selector: ElementSelector?): UiNodeSnapshot? {
-        val selected = selector?.let { matchingNodes(observation, it) }.orEmpty()
-        if (selected.size == 1) return selected.single()
-        if (selected.size > 1) return null
+        if (selector != null) {
+            // Once a selector is supplied, the stale numeric id is never a
+            // fallback.  Zero or multiple matches are both unsafe.
+            return matchingNodes(observation, selector).singleOrNull()
+        }
         return nodeId?.let { id -> observation.nodes.firstOrNull { it.id == id } }
+    }
+}
+
+/** Shared strict JSON decoding for selectors used by actions and plan predicates. */
+object ElementSelectorJson {
+    private val allowedFields = setOf("packageName", "viewIdResourceName", "text", "description", "className", "treePath", "bounds")
+
+    fun parse(json: JSONObject?): ElementSelector? {
+        if (json == null) return null
+        require(json.keys().asSequence().all { it in allowedFields }) { "Unexpected selector field" }
+        val path = json.optJSONArray("treePath")?.let { array ->
+            buildList { for (index in 0 until array.length()) add(array.getInt(index)) }
+        }
+        return ElementSelector(
+            packageName = json.optString("packageName").ifBlank { null },
+            viewIdResourceName = json.optString("viewIdResourceName").ifBlank { null },
+            text = json.optString("text").ifBlank { null },
+            description = json.optString("description").ifBlank { null },
+            className = json.optString("className").ifBlank { null },
+            treePath = path,
+            bounds = json.optString("bounds").ifBlank { null },
+        )
+    }
+}
+
+data class ActionExecutionResult(
+    val success: Boolean,
+    val status: String,
+    val detail: String = "",
+)
+
+object InputActionResultPolicy {
+    fun resolve(textSet: Boolean, textVerified: Boolean, submitRequested: Boolean, submitSucceeded: Boolean): ActionExecutionResult = when {
+        !textSet -> ActionExecutionResult(false, "text_set_failed", "text_set failed")
+        !textVerified -> ActionExecutionResult(false, "text_verification_failed", "text verification failed")
+        submitRequested && !submitSucceeded -> ActionExecutionResult(false, "submit_failed", "submit failed")
+        submitRequested -> ActionExecutionResult(true, "text_set_and_submitted", "text_set, text_verified, and submit succeeded")
+        else -> ActionExecutionResult(true, "text_verified", "text_set and verified")
     }
 }
 

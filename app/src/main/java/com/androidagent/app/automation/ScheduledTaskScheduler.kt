@@ -28,6 +28,28 @@ data class ScheduleRequest(
     val triggerAtMillis: Long,
 )
 
+object ScheduleCommandParser {
+    fun isCommand(input: String): Boolean = input.trim().startsWith("/schedule", ignoreCase = true)
+
+    /** Explicit UI syntax: /schedule <triggerAtMillis>|<goal>. */
+    fun parse(input: String): ScheduleRequest? {
+        if (!isCommand(input)) return null
+        val payload = input.trim().substringAfter(' ', "").trim()
+        val parts = payload.split('|', limit = 2)
+        if (parts.size != 2) return null
+        val triggerAtMillis = parts[0].trim().toLongOrNull() ?: return null
+        val goal = parts[1].trim()
+        if (triggerAtMillis <= System.currentTimeMillis() || goal.isBlank()) return null
+        val taskId = "manual-${stableId(triggerAtMillis.toString() + "|" + goal)}"
+        return ScheduleRequest(taskId, goal, triggerAtMillis)
+    }
+
+    private fun stableId(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray())
+        .take(8)
+        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+}
+
 object ScheduledTaskScheduler {
     fun schedule(
         context: Context,

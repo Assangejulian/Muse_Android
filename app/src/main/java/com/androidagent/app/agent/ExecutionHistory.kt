@@ -10,8 +10,18 @@ data class ActionRecord(
     val timestamp: Long = System.currentTimeMillis(),
 )
 
+data class RecoveryRecord(
+    val step: Int,
+    val reason: RecoveryReason,
+    val action: RecoveryAction,
+    val success: Boolean,
+    val result: String,
+    val timestamp: Long = System.currentTimeMillis(),
+)
+
 class ExecutionHistory {
     private val records = mutableListOf<ActionRecord>()
+    private val recoveryRecords = mutableListOf<RecoveryRecord>()
 
     fun record(record: ActionRecord) {
         records += record
@@ -27,5 +37,15 @@ class ExecutionHistory {
 
     fun all(): List<ActionRecord> = records.toList()
 
-    private companion object { const val MAX_RECORDS = 64 }
+    fun recordRecovery(record: RecoveryRecord) {
+        recoveryRecords += record
+        while (recoveryRecords.size > MAX_RECOVERY_RECORDS) recoveryRecords.removeAt(0)
+    }
+
+    fun recoveries(): List<RecoveryRecord> = recoveryRecords.toList()
+
+    private companion object {
+        const val MAX_RECORDS = 64
+        const val MAX_RECOVERY_RECORDS = 32
+    }
 }

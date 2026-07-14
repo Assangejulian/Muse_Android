@@ -23,4 +23,17 @@ class NextRunTimeParserTest {
         val second = ScheduledTaskScheduler.uniqueName("task-b")
         assertEquals(false, first == second)
     }
+
+    @Test
+    fun explicitScheduleCommandProducesRequestWithoutBusinessKeywords() {
+        val request = ScheduleCommandParser.parse("/schedule ${System.currentTimeMillis() + 60_000}|open the calendar")
+        assertEquals("open the calendar", request?.goal)
+        assertEquals(true, request?.taskId?.startsWith("manual-") == true)
+    }
+
+    @Test
+    fun malformedScheduleCommandDoesNotSilentlySchedule() {
+        assertEquals(null, ScheduleCommandParser.parse("/schedule tomorrow|open app"))
+        assertEquals(null, ScheduleCommandParser.parse("/schedule 12345"))
+    }
 }

@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import com.androidagent.app.accessibility.AgentController
 import com.androidagent.app.agent.AgentTraceStore
 import com.androidagent.app.agent.AgentUiState
+import com.androidagent.app.automation.ScheduleCommandParser
 import com.androidagent.app.automation.ScheduledTaskScheduler
 import com.androidagent.app.apps.AppCatalog
 import com.androidagent.app.chat.ChatMessage
@@ -540,6 +541,15 @@ private fun ChatWorkspace(
                             updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
                         } else if (text.equals("/trace", true)) {
                             val response = AgentTraceStore(context).latestRunSummary()
+                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
+                        } else if (ScheduleCommandParser.isCommand(text)) {
+                            val request = ScheduleCommandParser.parse(text)
+                            val response = if (request == null) {
+                                "Usage: /schedule <triggerAtMillis>|<goal>"
+                            } else {
+                                ScheduledTaskScheduler.schedule(context, request)
+                                "Scheduled task ${request.taskId} for ${request.triggerAtMillis}"
+                            }
                             updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
                         } else if (settings.apiKey.isBlank()) {
                             updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先在侧栏配置当前模型的 API Key。")))

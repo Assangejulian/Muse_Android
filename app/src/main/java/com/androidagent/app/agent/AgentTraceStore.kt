@@ -14,7 +14,7 @@ class AgentTraceStore(context: Context) {
         val runId = UUID.randomUUID().toString()
         database.writableDatabase.insertOrThrow("runs", null, ContentValues().apply {
             put("id", runId)
-            put("goal", goal)
+            put("goal", TraceSanitizer.goal(goal))
             put("model", model)
             put("status", "RUNNING")
             put("started_at", System.currentTimeMillis())
@@ -26,7 +26,7 @@ class AgentTraceStore(context: Context) {
         database.writableDatabase.insertOrThrow("events", null, ContentValues().apply {
             put("run_id", runId)
             put("event_type", type)
-            put("payload", JSONObject(payload).toString())
+            put("payload", JSONObject(TraceSanitizer.payload(payload)).toString())
             put("created_at", System.currentTimeMillis())
         })
     }
@@ -34,9 +34,21 @@ class AgentTraceStore(context: Context) {
     fun finish(runId: String, status: String, reason: String) {
         database.writableDatabase.update("runs", ContentValues().apply {
             put("status", status)
-            put("reason", reason)
+            put("reason", TraceSanitizer.reason(reason))
             put("finished_at", System.currentTimeMillis())
         }, "id=?", arrayOf(runId))
+    }
+
+    fun purgeOlderThan(retentionMillis: Long, nowMillis: Long = System.currentTimeMillis()) {
+        require(retentionMillis >= 0) { "retentionMillis must not be negative" }
+        val cutoff = nowMillis - retentionMillis
+        database.writableDatabase.delete("events", "created_at < ?", arrayOf(cutoff.toString()))
+        database.writableDatabase.delete("runs", "started_at < ?", arrayOf(cutoff.toString()))
+    }
+
+    fun clearAll() {
+        database.writableDatabase.delete("events", null, null)
+        database.writableDatabase.delete("runs", null, null)
     }
 
     fun latestRunSummary(): String {

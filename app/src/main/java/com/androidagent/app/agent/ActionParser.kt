@@ -64,18 +64,6 @@ object ActionParser {
     }
 
     private fun parseSelector(json: JSONObject?): ElementSelector? {
-        if (json == null) return null
-        val allowed = setOf("packageName", "viewIdResourceName", "text", "description", "className", "treePath", "bounds")
-        require(json.keys().asSequence().all { it in allowed }) { "Unexpected selector field" }
-        val path = json.optJSONArray("treePath")?.let { array -> buildList { for (i in 0 until array.length()) add(array.getInt(i)) } }
-        return ElementSelector(
-            packageName = json.optString("packageName").ifBlank { null },
-            viewIdResourceName = json.optString("viewIdResourceName").ifBlank { null },
-            text = json.optString("text").ifBlank { null },
-            description = json.optString("description").ifBlank { null },
-            className = json.optString("className").ifBlank { null },
-            treePath = path,
-            bounds = json.optString("bounds").ifBlank { null },
-        )
+        return ElementSelectorJson.parse(json)
     }
 }

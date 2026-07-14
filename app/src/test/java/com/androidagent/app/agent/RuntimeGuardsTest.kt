@@ -7,7 +7,14 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class RuntimeGuardsTest {
-    private val plan = TaskPlanParser.fallback("complete a task", "example.app")
+    private val plan = TaskPlan(
+        summary = "complete a task",
+        targetAppHint = "example.app",
+        goal = GoalContext("complete a task"),
+        milestones = listOf(
+            TaskMilestone("verify", "verify", listOf(UiPredicate(UiPredicateKind.TEXT_PRESENT, literal = "done", description = "done"))),
+        ),
+    )
 
     @Test
     fun inputPayloadIsPreservedExactly() {
@@ -30,7 +37,11 @@ class RuntimeGuardsTest {
 
     @Test
     fun selectedStateIsTheOnlyGenericToggleProof() {
-        val milestone = TaskMilestone("verify", "verify", listOf(UiPredicate(UiPredicateKind.TOGGLE_ON, description = "state")))
+        val milestone = TaskMilestone(
+            "verify",
+            "verify",
+            listOf(UiPredicate(UiPredicateKind.TOGGLE_ON, target = ElementSelector(className = "Switch"), description = "state")),
+        )
         val selected = Observation("example.app", listOf(UiNodeSnapshot(1, "", "", "Switch", true, false, "0,0,100,30", selected = true)))
         val unselected = selected.copy(nodes = selected.nodes.map { it.copy(selected = false) })
         assertTrue(MilestoneEvaluator.evaluate(milestone, plan, selected, "example.app").proven)

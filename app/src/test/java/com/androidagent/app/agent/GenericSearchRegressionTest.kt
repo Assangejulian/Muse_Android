@@ -9,14 +9,12 @@ import org.junit.Test
 class GenericSearchRegressionTest {
     @Test
     fun fallbackDoesNotInventInputOrContentMilestones() {
-        val plan = TaskPlanParser.fallback("Complete a multi-step task", "example.app")
-        assertEquals(listOf(TaskMilestoneKind.LAUNCH_APP, TaskMilestoneKind.VERIFICATION), plan.milestones.map { it.kind })
-        assertFalse(plan.milestones.any { it.kind == TaskMilestoneKind.INPUT })
+        assertTrue(runCatching { TaskPlanParser.fallback("Complete a multi-step task", "example.app") }.isFailure)
     }
 
     @Test
     fun twoDifferentInputActionsAreNotRewritten() {
-        val plan = TaskPlanParser.fallback("enter two values", "example.app")
+        val plan = validPlan("enter two values")
         val screen = Observation("example.app", listOf(
             node(1, "", "Field A", "EditText", editable = true, focused = true),
         ))
@@ -29,7 +27,7 @@ class GenericSearchRegressionTest {
 
     @Test
     fun multipleEditableNodesAreAmbiguous() {
-        val plan = TaskPlanParser.fallback("enter values", "example.app")
+        val plan = validPlan("enter values")
         val screen = Observation("example.app", listOf(
             node(1, "", "A", "EditText", editable = true),
             node(2, "", "B", "EditText", editable = true),
@@ -80,4 +78,11 @@ class GenericSearchRegressionTest {
 
     private fun node(id: Int, text: String, description: String, className: String, editable: Boolean = false, focused: Boolean = false, clickable: Boolean = false, bounds: String = "0,0,100,30") =
         UiNodeSnapshot(id, text, description, className, clickable, editable, bounds, focused = focused)
+
+    private fun validPlan(goal: String) = TaskPlan(
+        summary = goal,
+        targetAppHint = "example.app",
+        goal = GoalContext(goal),
+        milestones = listOf(TaskMilestone("m1", "verify", listOf(UiPredicate(UiPredicateKind.TEXT_PRESENT, literal = "done", description = "done")))),
+    )
 }

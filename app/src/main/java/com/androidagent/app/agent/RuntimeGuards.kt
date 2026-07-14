@@ -15,26 +15,42 @@ object MilestoneEvaluator {
                 "goal_text" -> plan.goal.originalGoal
                 else -> predicate.literal
             }
+            val target = predicate.target?.let { selector ->
+                NodeSelector.matchingNodes(observation, selector).singleOrNull()
+            }
             val proven = when (predicate.kind) {
                 UiPredicateKind.PACKAGE_FOREGROUND ->
-                    targetPackage != null && observation.packageName == targetPackage
+                    observation.packageName == (
+                        predicate.targetPackage
+                            ?: predicate.target?.packageName
+                            ?: targetPackage
+                        )
 
-                UiPredicateKind.TEXT_PRESENT -> value != null && observation.nodes.any { node ->
-                    node.visible && node.enabled && !node.password && !node.isInputMethod &&
-                        (node.text.equals(value, true) || node.description.equals(value, true))
+                UiPredicateKind.TEXT_PRESENT -> value != null && if (predicate.target != null) {
+                    target?.let { node ->
+                        node.visible && node.enabled && !node.password && !node.isInputMethod &&
+                            (node.text.equals(value, true) || node.description.equals(value, true))
+                    } == true
+                } else {
+                    observation.nodes.any { node ->
+                        node.visible && node.enabled && !node.password && !node.isInputMethod &&
+                            (node.text.equals(value, true) || node.description.equals(value, true))
+                    }
                 }
 
-                UiPredicateKind.EDITABLE_EQUALS -> value != null && observation.nodes.any { node ->
+                UiPredicateKind.EDITABLE_EQUALS -> value != null && target?.let { node ->
                     node.visible && node.enabled && node.editable && !node.password && node.text == value
-                }
+                } == true
 
                 UiPredicateKind.IME_HIDDEN -> !observation.imeVisible
-                UiPredicateKind.TOGGLE_ON -> observation.nodes.any { it.visible && it.enabled && (it.checked == true || it.selected) }
-                UiPredicateKind.ELEMENT_STATE -> value != null && observation.nodes.any { node ->
+                UiPredicateKind.TOGGLE_ON -> target?.let { node ->
+                    node.visible && node.enabled && (node.checked == true || node.selected)
+                } == true
+                UiPredicateKind.ELEMENT_STATE -> value != null && target?.let { node ->
                     node.visible && node.enabled && (
                         node.text.equals(value, true) || node.description.equals(value, true) || node.viewId == value
                         )
-                }
+                } == true
                 UiPredicateKind.SEMANTIC_CLAIM -> false
             }
             details += "${predicate.kind}=${if (proven) "PROVEN" else "UNKNOWN"}: ${predicate.description}"
@@ -70,11 +86,44 @@ data class PackagePolicy(
     val allowSystemUi: Boolean = false,
     val allowTemporaryExternalPackages: Boolean = false,
 ) {
-    fun allows(packageName: String, isSystemUi: Boolean = packageName.startsWith("com.android.systemui")): Boolean {
+    fun allows(packageName: String, isSystemUi: Boolean = isSystemUiPackage(packageName)): Boolean {
         if (packageName.isBlank()) return false
-        if (packageName in allowedPackages) return true
-        if (isSystemUi) return allowSystemUi
+        val normalized = packageName.lowercase()
+        // Protected system surfaces are checked before the model-provided
+        // allowlist.  An LLM cannot grant itself installer/permission access.
+        if (isPermissionOrInstallerPackage(normalized)) return false
+        if (isSystemUiPackage(normalized) || isSystemUi || normalized == "android") return allowSystemUi
+        if (normalized in allowedPackages.map(String::lowercase).toSet()) return true
         return allowTemporaryExternalPackages && packageName != primaryPackage
+    }
+
+    companion object {
+        private val permissionAndInstallerPrefixes = setOf(
+            "com.android.permissioncontroller",
+            "com.google.android.permissioncontroller",
+            "com.android.packageinstaller",
+            "com.google.android.packageinstaller",
+            "com.android.settings",
+            "com.google.android.settings",
+        )
+
+        fun isSystemUiPackage(packageName: String): Boolean {
+            val normalized = packageName.lowercase()
+            return normalized == "com.android.systemui" || normalized.startsWith("com.android.systemui.")
+        }
+
+        fun isPermissionOrInstallerPackage(packageName: String): Boolean =
+            permissionAndInstallerPrefixes.any(packageName::startsWith)
+
+        fun filterPlannerPackages(requested: Set<String>, installedPackages: Set<String>): Set<String> =
+            requested.filterTo(linkedSetOf()) { packageName ->
+                packageName in installedPackages &&
+                    !isSystemUiPackage(packageName) &&
+                    !isPermissionOrInstallerPackage(packageName)
+            }
+
+        fun mergeAllowedPackages(current: Set<String>, requested: Set<String>, installedPackages: Set<String>): Set<String> =
+            (current + filterPlannerPackages(requested, installedPackages)).toSet()
     }
 }
 

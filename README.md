@@ -34,7 +34,7 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 - DeepSeek, Qwen, and MiMo configuration presets
 - Conservative conversation context budgeting with space reserved for the current request
 - App-private SQLite conversation storage with automatic legacy migration
-- OCR-derived next-day scheduling through Android WorkManager
+- Explicit `/schedule <triggerAtMillis>|<goal>` scheduling through Android WorkManager (OCR time parsing remains available to callers)
 - Strict completion verification and repeated-action recovery
 - Optional screenshot planning with a separate OpenAI-compatible vision model
 - In-app APK download progress and cancellation
@@ -44,11 +44,11 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 - Set-of-Mark screenshots and guarded normalized visual point taps for inaccessible controls
 - Stale-observation rejection before state-dependent actions
 - Visual before/after Critic checks with hard deterministic predicate gates
-- Typed locked-search stages with one-shot semantic IME submission and exact query repair
+- Typed milestone contracts with deterministic local predicates and IME submission verification
 - Input-method windows excluded from Actor observations and Set-of-Mark screenshots
 - Generic task plans without app-specific creator, profile, or latest-video routing in the core runtime
 - A reserved extension seam for optional task recipes; the core runtime contains no platform-specific workflow
-- Pre-tool target proof plus idempotent one-shot final toggles for likes, follows, and favorites
+- Pre-tool target proof plus idempotent state-transition controls
 - App-private SQLite run traces available through `/trace`
 - A run console showing the current phase, action, progress, outcome, and full trace
 - Model-visible node prioritization, SHA-256 screen fingerprints, adaptive settle polling, and cycle recovery
@@ -80,6 +80,7 @@ Muse intentionally does not expose an arbitrary shell. A normal Android app term
 5. Optionally set a default target package. Leave it blank for automatic app selection.
 6. Enter a narrow, low-risk task in the chat input and tap **发送**.
 7. Enter `/list` to inspect the launchable app catalog.
+8. To schedule an explicit task, enter `/schedule <future epoch millis>|<goal>`; scheduling is never inferred from business keywords.
 
 Do not use this MVP for payments, purchases, account security, verification codes, permission granting, or system settings.
 

@@ -27,9 +27,19 @@ class DeepSeekClientTest {
         val oversized = "a".repeat(ContextWindow.MAX_CONTEXT_TOKENS + 100)
         val selected = ContextWindow.select(listOf("user" to "old", "assistant" to oversized))
 
-        assertEquals(1, selected.size)
-        assertEquals(ContextWindow.MAX_CONTEXT_TOKENS / 2, selected.single().second.length)
-        assertTrue(selected.single().second.all { it == 'a' })
+        assertEquals(listOf("user", "assistant"), selected.map { it.first })
+        assertEquals(ContextWindow.MAX_CONTEXT_TOKENS / 2 - "old".length, selected[1].second.length)
+        assertTrue(selected[1].second.all { it == 'a' })
+    }
+
+    @Test
+    fun contextWindowPreservesSixMessageOrderAndPairs() {
+        val history = listOf(
+            "user" to "u1", "assistant" to "a1",
+            "user" to "u2", "assistant" to "a2",
+            "user" to "u3", "assistant" to "a3",
+        )
+        assertEquals(history, ContextWindow.select(history))
     }
 
     @Test
@@ -189,5 +199,16 @@ class DeepSeekClientTest {
         )
 
         assertTrue(runCatching { NativePlannerProtocol.parseActionResponse(response.toString()) }.isFailure)
+    }
+
+    @Test
+    fun rejectsRemoteInsecureHttpButAllowsLoopbackDevelopment() {
+        assertTrue(runCatching { BaseUrlPolicy.validate("http://api.example.com/v1") }.isFailure)
+        assertEquals("http://127.0.0.1:8080/v1", BaseUrlPolicy.validate("http://127.0.0.1:8080/v1"))
+        assertEquals("https://api.example.com/v1", BaseUrlPolicy.validate("https://api.example.com/v1"))
+        assertEquals(
+            "http://dev.example.com/v1",
+            BaseUrlPolicy.validate("http://dev.example.com/v1", allowInsecureLocalDevelopment = true),
+        )
     }
 }
