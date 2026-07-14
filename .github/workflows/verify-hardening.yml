@@ -1,0 +1,29 @@
+name: Verify Muse Runtime Hardening
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: Make Gradle executable
+        run: chmod +x gradlew
+      - name: Unit tests
+        run: ./gradlew --no-daemon test
+      - name: Assemble debug APK
+        run: ./gradlew --no-daemon assembleDebug
+      - name: Android lint
+        run: ./gradlew --no-daemon lint
