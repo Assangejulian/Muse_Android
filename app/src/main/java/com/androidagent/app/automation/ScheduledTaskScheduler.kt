@@ -1,0 +1,138 @@
+package com.androidagent.app.automation
+
+import android.content.Context
+import android.os.PowerManager
+import androidx.work.Constraints
+import androidx.work.CoroutineWorker
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
+import androidx.work.workDataOf
+import com.androidagent.app.accessibility.AgentController
+import com.androidagent.app.data.SecureSettings
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
+import java.security.MessageDigest
+import java.time.Duration
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.concurrent.TimeUnit
+
+data class ScheduleRequest(
+    val taskId: String,
+    val goal: String,
+    val triggerAtMillis: Long,
+)
+
+object ScheduledTaskScheduler {
+    fun schedule(
+        context: Context,
+        request: ScheduleRequest,
+        policy: ExistingWorkPolicy = ExistingWorkPolicy.REPLACE,
+    ) {
+        require(request.taskId.isNotBlank()) { "taskId must not be blank" }
+        require(request.goal.isNotBlank()) { "goal must not be blank" }
+        val delayMillis = (request.triggerAtMillis - System.currentTimeMillis()).coerceAtLeast(1_000L)
+        SecureSettings(context).apply {
+            scheduledTaskId = request.taskId
+            scheduledTaskGoal = request.goal
+            nextRunAt = request.triggerAtMillis
+        }
+        val work = OneTimeWorkRequestBuilder<ScheduledAgentWorker>()
+            .setInputData(workDataOf("task_id" to request.taskId, "task_goal" to request.goal))
+            .setInitialDelay(delayMillis, TimeUnit.MILLISECONDS)
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .build()
+        WorkManager.getInstance(context).enqueueUniqueWork(uniqueName(request.taskId), policy, work)
+    }
+
+    fun scheduleFromOcr(
+        context: Context,
+        taskId: String,
+        goal: String,
+        ocrText: String,
+        now: LocalDateTime = LocalDateTime.now(),
+    ): Long? {
+        val next = NextRunTimeParser.parse(ocrText, now) ?: return null
+        schedule(context, ScheduleRequest(taskId, goal, next.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()))
+        return next.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    }
+
+    fun cancel(context: Context, taskId: String? = null) {
+        val settings = SecureSettings(context)
+        val id = taskId ?: settings.scheduledTaskId
+        if (id.isNotBlank()) WorkManager.getInstance(context).cancelUniqueWork(uniqueName(id))
+        settings.apply {
+            scheduledTaskId = ""
+            scheduledTaskGoal = ""
+            nextRunAt = 0L
+        }
+    }
+
+    fun uniqueName(taskId: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(taskId.toByteArray())
+            .take(12)
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return "scheduled_agent_task_$digest"
+    }
+}
+
+class ScheduledAgentWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
+    override suspend fun doWork(): Result {
+        val settings = SecureSettings(applicationContext)
+        val goal = inputData.getString("task_goal").orEmpty().ifBlank { settings.scheduledTaskGoal }
+        if (goal.isBlank() || settings.apiKey.isBlank()) return Result.failure()
+        if (!AgentController.state.value.accessibilityConnected || AgentController.state.value.running) return Result.retry()
+        val wakeLock = (applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "Muse:ScheduledAgent")
+        wakeLock.acquire(TimeUnit.MINUTES.toMillis(9))
+        return try {
+            settings.taskGoal = goal
+            AgentController.start(applicationContext, settings)
+            delay(1_000)
+            val finished = withTimeoutOrNull(TimeUnit.MINUTES.toMillis(8)) {
+                while (AgentController.state.value.running) delay(500)
+                true
+            } ?: false
+            if (!finished) AgentController.stopWithReason("Scheduled run exceeded its worker deadline")
+            if (finished && AgentController.state.value.status.startsWith("Succeeded")) Result.success() else Result.retry()
+        } finally {
+            if (AgentController.state.value.running && AgentController.state.value.goal == goal) {
+                AgentController.stopWithReason("Scheduled worker finished before the agent stopped")
+            }
+            if (wakeLock.isHeld) wakeLock.release()
+        }
+    }
+}
+
+internal object NextRunTimeParser {
+    private val fullDate = Regex("(20\\d{2})[-/.年](\\d{1,2})[-/.月](\\d{1,2})日?\\s*(\\d{1,2})[:：](\\d{2})")
+    private val tomorrow = Regex("(?:明天|tomorrow|next day)[^0-9]{0,12}(\\d{1,2})[:：](\\d{2})", RegexOption.IGNORE_CASE)
+    private val clock = Regex("(\\d{1,2})[:：](\\d{2})")
+
+    fun parse(text: String, now: LocalDateTime): LocalDateTime? {
+        fullDate.find(text)?.let { match ->
+            val (year, month, day, hour, minute) = match.destructured
+            return runCatching { LocalDateTime.of(year.toInt(), month.toInt(), day.toInt(), hour.toInt(), minute.toInt()) }
+                .getOrNull()?.takeIf { it.isAfter(now) }
+        }
+        tomorrow.find(text)?.let { match ->
+            return validTime(match.groupValues[1], match.groupValues[2])?.let { now.toLocalDate().plusDays(1).atTime(it) }
+        }
+        clock.findAll(text).lastOrNull()?.let { match ->
+            val time = validTime(match.groupValues[1], match.groupValues[2]) ?: return null
+            var candidate = now.toLocalDate().atTime(time)
+            if (!candidate.isAfter(now.plusMinutes(1))) candidate = candidate.plusDays(1)
+            return candidate
+        }
+        return null
+    }
+
+    private fun validTime(hour: String, minute: String): LocalTime? =
+        runCatching { LocalTime.parse("${hour.padStart(2, '0')}:${minute.padStart(2, '0')}", DateTimeFormatter.ofPattern("HH:mm")) }.getOrNull()
+}

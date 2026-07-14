@@ -1,11 +1,16 @@
 package com.androidagent.app.agent
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class GoalContractTest {
     @Test
-    fun extractsStableCreatorQueryFromImmutableGoal() {
-        assertEquals("老番茄", GoalContract.extractSearchQuery("打开B站给老番茄的最新视频点赞"))
+    fun preservesTheCompleteGoalWithoutGuessingFields() {
+        val original = "Open an app, enter alpha, then enter beta in a different field"
+        val context = ConservativeGoalInterpreter.interpret(original)
+        assertEquals(original, context.originalGoal)
+        assertNull(context.explicitAppHint)
+        assertEquals(emptyList<String>(), context.constraints)
     }
 }

@@ -6,45 +6,20 @@ import org.junit.Test
 
 class ToggleStatePolicyTest {
     @Test
-    fun recognizesLikeWithCountAsOff() {
-        assertEquals(
-            ToggleState.OFF,
-            ToggleStatePolicy.state(node(description = "点赞 1.8万", viewId = "tv.danmaku.bili:id/like")),
-        )
+    fun recognizesExplicitCheckableState() {
+        assertEquals(ToggleState.OFF, ToggleStatePolicy.state(node(checked = false)))
+        assertEquals(ToggleState.ON, ToggleStatePolicy.state(node(checked = true)))
     }
 
     @Test
-    fun recognizesExplicitLikedLabelsAsOn() {
-        assertEquals(ToggleState.ON, ToggleStatePolicy.state(node(description = "取消点赞 1.8万")))
-        assertEquals(ToggleState.ON, ToggleStatePolicy.state(node(text = "已点赞")))
-    }
-
-    @Test
-    fun rejectsAmbiguousLikeRelatedContent() {
-        assertEquals(ToggleState.UNKNOWN, ToggleStatePolicy.state(node(text = "点赞列表")))
-        assertEquals(ToggleState.UNKNOWN, ToggleStatePolicy.state(node(text = "猜你喜欢")))
-    }
-
-    @Test
-    fun preservesExplicitCheckableState() {
-        assertEquals(ToggleState.OFF, ToggleStatePolicy.state(node(text = "Switch", checked = false)))
-        assertEquals(ToggleState.ON, ToggleStatePolicy.state(node(text = "Switch", checked = true)))
+    fun recognizesGenericToggleClassWithoutText() {
+        assertEquals(ToggleState.OFF, ToggleStatePolicy.state(node(className = "android.widget.Switch")))
+        assertEquals(ToggleState.UNKNOWN, ToggleStatePolicy.state(node(className = "android.widget.Button", text = "ambiguous")))
     }
 
     private fun node(
+        className: String = "Button",
         text: String = "",
-        description: String = "",
-        viewId: String = "",
         checked: Boolean? = null,
-    ) = UiNodeSnapshot(
-        id = 1,
-        text = text,
-        description = description,
-        className = "Button",
-        clickable = true,
-        editable = false,
-        bounds = "0,0,100,100",
-        viewId = viewId,
-        checked = checked,
-    )
+    ) = UiNodeSnapshot(1, text, "", className, true, false, "0,0,100,100", checked = checked)
 }

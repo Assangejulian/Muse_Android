@@ -6,6 +6,7 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -55,7 +57,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.androidagent.app.accessibility.AgentController
 import com.androidagent.app.agent.AgentTraceStore
-import com.androidagent.app.automation.DailyTaskScheduler
+import com.androidagent.app.agent.AgentUiState
+import com.androidagent.app.automation.ScheduledTaskScheduler
 import com.androidagent.app.apps.AppCatalog
 import com.androidagent.app.chat.ChatMessage
 import com.androidagent.app.chat.ChatStore
@@ -180,7 +183,7 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                     onVisionModelName = { visionModelName = it; settings.visionModelName = it },
                     onModelPreset = { preset ->
                         val values = when (preset) {
-                            "qwen" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "qwen3.5-omni-plus"
+                            "qwen" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "qwen3.6-flash"
                             "mimo" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "mimo-v2.5-pro"
                             else -> "https://api.deepseek.com" to "deepseek-v4-flash"
                         }
@@ -193,7 +196,7 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                         apiKey = settings.apiKey
                     },
                     onCancelSchedule = {
-                        DailyTaskScheduler.cancel(context)
+                        ScheduledTaskScheduler.cancel(context)
                         nextRunAt = 0L
                     },
                     openAccessibilitySettings = openAccessibilitySettings,
@@ -293,6 +296,7 @@ private fun DrawerContent(
     onCancelSchedule: () -> Unit,
     openAccessibilitySettings: () -> Unit,
 ) {
+    var pendingDelete by remember { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxHeight().padding(18.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column {
@@ -304,7 +308,7 @@ private fun DrawerContent(
         Spacer(Modifier.height(20.dp))
         Text("历史对话", color = Color(0xFF98A59D), style = MaterialTheme.typography.labelMedium)
         Column(
-            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(top = 8.dp),
+            Modifier.weight(0.35f).verticalScroll(rememberScrollState()).padding(top = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             conversations.sortedWith(compareByDescending<Conversation> { it.pinned }.thenByDescending { it.updatedAt }).forEach { chat ->
@@ -317,13 +321,20 @@ private fun DrawerContent(
                 ) {
                     Text(if (chat.pinned) "●" else "○", color = if (chat.pinned) Color(0xFF80DDA8) else Color(0xFF66746B))
                     Text(chat.title, color = Color.White, modifier = Modifier.weight(1f).padding(horizontal = 8.dp), maxLines = 1)
-                    Text("置顶", color = Color(0xFF9BA79F), modifier = Modifier.clickable { onPin(chat.id) }.padding(4.dp), style = MaterialTheme.typography.labelSmall)
-                    Text("删", color = Color(0xFFDFA39F), modifier = Modifier.clickable { onDelete(chat.id) }.padding(4.dp), style = MaterialTheme.typography.labelSmall)
+                    TextButton(onClick = { onPin(chat.id) }) {
+                        Text(if (chat.pinned) "取消置顶" else "置顶", color = Color(0xFF9BA79F), style = MaterialTheme.typography.labelSmall)
+                    }
+                    TextButton(onClick = { pendingDelete = chat.id }) {
+                        Text("删除", color = Color(0xFFDFA39F), style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
         }
         HorizontalDivider(color = Color(0xFF354139))
-        Column(Modifier.padding(top = 14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(
+            Modifier.weight(0.65f).verticalScroll(rememberScrollState()).padding(top = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
             Text("Agent 配置", color = Color.White, fontWeight = FontWeight.Bold)
             Text(if (connected) "● 无障碍已连接" else "○ 无障碍未连接", color = if (connected) Color(0xFF80DDA8) else Color(0xFFFFC36A))
             Text("已发现 $appCount 个可启动应用", color = Color(0xFFB9C2BC), style = MaterialTheme.typography.bodySmall)
@@ -383,7 +394,7 @@ private fun DrawerContent(
                     value = visionModelName,
                     onValueChange = onVisionModelName,
                     label = { Text("视觉模型名称") },
-                    placeholder = { Text("qwen3.5-omni-plus") },
+                    placeholder = { Text("qwen3-vl-flash") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -416,6 +427,17 @@ private fun DrawerContent(
             }
         }
     }
+    pendingDelete?.let { id ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除这段对话？") },
+            text = { Text("此操作会删除本机保存的对话记录。") },
+            confirmButton = {
+                TextButton(onClick = { onDelete(id); pendingDelete = null }) { Text("删除", color = Color(0xFF9B2C2C)) }
+            },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
+        )
+    }
 }
 
 @Composable
@@ -430,11 +452,29 @@ private fun ChatWorkspace(
     val state by AgentController.state.collectAsState()
     var input by remember(conversation.id) { mutableStateOf("") }
     var sending by remember(conversation.id) { mutableStateOf(false) }
+    var showTrace by remember(conversation.id) { mutableStateOf(false) }
+    var ownsActiveRun by remember(conversation.id) { mutableStateOf(false) }
     val interactionScope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
 
-    LaunchedEffect(conversation.messages.size, state.logs.size) {
+    LaunchedEffect(conversation.messages.size) {
         scrollState.animateScrollTo(scrollState.maxValue)
+    }
+    LaunchedEffect(state.running, state.outcome, conversation.id) {
+        if (ownsActiveRun && !state.running && state.outcome.isNotBlank()) {
+            val prefix = when {
+                state.status.startsWith("Succeeded") -> "执行完成"
+                state.status == "Stopped" || state.status == "Cancelled" -> "执行已停止"
+                else -> "执行未完成"
+            }
+            updateConversation(
+                conversation.copy(
+                    updatedAt = System.currentTimeMillis(),
+                    messages = conversation.messages + ChatMessage("assistant", "$prefix：${state.outcome}"),
+                ),
+            )
+            ownsActiveRun = false
+        }
     }
 
     Column(Modifier.fillMaxSize().background(Canvas)) {
@@ -455,6 +495,10 @@ private fun ChatWorkspace(
             }
         }
         HorizontalDivider(color = Line)
+        RunStatusPanel(
+            state = state,
+            onShowTrace = { showTrace = true },
+        )
 
         Column(
             Modifier.weight(1f).fillMaxWidth().verticalScroll(scrollState).padding(horizontal = 22.dp, vertical = 18.dp),
@@ -466,12 +510,6 @@ private fun ChatWorkspace(
                 Text("直接说出应用名称和任务。输入 /list 查看已发现的应用。", color = Muted)
             }
             conversation.messages.forEach { message -> MessageBubble(message) }
-            if (state.running || state.logs.isNotEmpty()) {
-                Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Agent · 第 ${state.step} 步 · ${translateStatus(state.status)}", color = Accent, fontWeight = FontWeight.Bold)
-                    state.logs.take(4).reversed().forEach { Text(it, color = Muted, style = MaterialTheme.typography.bodySmall) }
-                }
-            }
         }
 
         Column(Modifier.fillMaxWidth().background(Color.White).padding(14.dp)) {
@@ -509,15 +547,24 @@ private fun ChatWorkspace(
                             sending = true
                             interactionScope.launch {
                                 val history = conversation.messages.map { it.role to it.content }
-                                val result = runCatching { DeepSeekClient().route(settings.apiKey, settings.modelBaseUrl, settings.modelName, text, appCatalog.compactList(), history) }
+                                val result = runCatching { DeepSeekClient().route(settings.apiKey, settings.modelBaseUrl, settings.modelName, text, appCatalog.compactList(), history, settings.currentProvider) }
                                 result.onSuccess { decision ->
                                     val response = when (decision) {
                                         is InteractionDecision.Chat -> decision.reply
                                         is InteractionDecision.Action -> {
-                                            // Preserve the immutable user wording; the router may summarize but must not mutate locked entities.
-                                            settings.taskGoal = text.removePrefix("/run ").trim()
-                                            AgentController.start(context, settings)
-                                            decision.reply
+                                            if (!state.accessibilityConnected) {
+                                                "这个请求需要操作设备，请先在侧栏开启并连接 Muse 无障碍服务。"
+                                            } else {
+                                                // Preserve the immutable user wording; the router may summarize but must not mutate locked entities.
+                                                settings.taskGoal = if (text.startsWith("/run ", ignoreCase = true)) {
+                                                    text.substringAfter(' ').trim()
+                                                } else {
+                                                    text
+                                                }
+                                                ownsActiveRun = true
+                                                AgentController.start(context, settings)
+                                                decision.reply
+                                            }
                                         }
                                     }
                                     updateConversation(withUser.copy(
@@ -534,6 +581,62 @@ private fun ChatWorkspace(
                     colors = ButtonDefaults.buttonColors(containerColor = Accent),
                 ) { Text("发送") }
             }
+        }
+    }
+
+    if (showTrace) {
+        AlertDialog(
+            onDismissRequest = { showTrace = false },
+            title = { Text("最近一次运行轨迹") },
+            text = {
+                Text(
+                    AgentTraceStore(context).latestRunSummary(),
+                    modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                )
+            },
+            confirmButton = { TextButton(onClick = { showTrace = false }) { Text("关闭") } },
+        )
+    }
+}
+
+@Composable
+private fun RunStatusPanel(state: AgentUiState, onShowTrace: () -> Unit) {
+    AnimatedVisibility(state.running || state.outcome.isNotBlank()) {
+        Column(Modifier.fillMaxWidth()) {
+            Column(
+                Modifier.fillMaxWidth().background(Color(0xFFEEF3EE)).padding(horizontal = 22.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        if (state.running) "运行中 · ${translateStatus(state.status)}" else translateStatus(state.status),
+                        color = if (state.status == "Failed") Color(0xFF9B2C2C) else Accent,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text("第 ${state.step.coerceAtLeast(0)} / ${state.maxSteps} 步", color = Muted, style = MaterialTheme.typography.labelMedium)
+                }
+                if (state.running) {
+                    val progress by animateFloatAsState(
+                        targetValue = (state.step.toFloat() / state.maxSteps.coerceAtLeast(1)).coerceIn(0f, 1f),
+                        label = "run-progress",
+                    )
+                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(), color = Accent)
+                }
+                if (state.goal.isNotBlank()) Text(state.goal, color = Ink, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                if (state.currentAction.isNotBlank()) Text("→ ${state.currentAction}", color = Accent)
+                state.logs.take(3).reversed().forEach { log ->
+                    Text(log, color = Muted, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                }
+                if (!state.running && state.outcome.isNotBlank()) {
+                    Text(state.outcome, color = if (state.status.startsWith("Succeeded")) Accent else Color(0xFF9B2C2C), maxLines = 3)
+                }
+                TextButton(onClick = onShowTrace, modifier = Modifier.align(Alignment.End)) { Text("查看完整轨迹") }
+            }
+            HorizontalDivider(color = Line)
         }
     }
 }

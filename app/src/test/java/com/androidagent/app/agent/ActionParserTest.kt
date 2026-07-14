@@ -26,8 +26,14 @@ class ActionParserTest {
     }
 
     @Test
-    fun clampsWaitDuration() {
-        assertEquals(AgentAction.Wait(5000), ActionParser.parse("""{"action":"wait","milliseconds":99999}"""))
+    fun rejectsOutOfRangeWaitDuration() {
+        assertTrue(runCatching { ActionParser.parse("""{"action":"wait","milliseconds":99999}""") }.isFailure)
+    }
+
+    @Test
+    fun rejectsFieldsThatDoNotBelongToTheAction() {
+        assertTrue(runCatching { ActionParser.parse("""{"action":"back","text":"hidden"}""") }.isFailure)
+        assertTrue(runCatching { ActionParser.parse("""{"action":"ensure_toggle","nodeId":1}""") }.isFailure)
     }
 
     @Test
@@ -43,6 +49,23 @@ class ActionParserTest {
         assertEquals(
             AgentAction.Finish("done"),
             ActionParser.parse("{\"action\":\"finish\",\"reason\":\"done\"}\n```json\n```"),
+        )
+    }
+
+    @Test
+    fun parsesInputModeTargetAndSubmitWhileKeepingLegacyShape() {
+        val action = ActionParser.parse(
+            """{"action":"input_text","text":"beta","nodeId":2,"mode":"APPEND","submit":true,"target":{"packageName":"example.app","className":"EditText"}}""",
+        )
+        assertEquals(
+            AgentAction.InputText(
+                text = "beta",
+                nodeId = 2,
+                target = ElementSelector(packageName = "example.app", className = "EditText"),
+                mode = InputMode.APPEND,
+                submit = true,
+            ),
+            action,
         )
     }
 }

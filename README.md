@@ -1,4 +1,4 @@
-# Muse Android Agent 0.6.1
+# Muse Android Agent 0.7.0
 
 A private, sideloaded Android 13 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, executes it, and independently checks the result.
 
@@ -6,7 +6,8 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 
 - Accessibility node observation
 - DeepSeek, Qwen, or MiMo planning through OpenAI-compatible APIs
-- One action per model response
+- Native `tools` / `tool_calls` planning for DeepSeek and Qwen, with a cached compatibility fallback
+- One strictly validated action per model response
 - Target package allowlist
 - Sensitive-page blocking
 - Text and node clicks
@@ -14,7 +15,7 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 - Focused text input
 - Back, app launch, exact text replacement, submit, wait, scroll, and idempotent toggle tools
 - Encrypted local API key storage
-- Manual stop and a bounded 36-tool run budget
+- Manual stop, cancellable HTTP calls, a five-minute deadline, and a bounded 24-tool run budget
 - Chinese chat workspace with a configuration drawer
 - Persistent conversations with create, pin, and delete actions
 - Launchable app catalog exposed through `/list`
@@ -31,8 +32,7 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 - Bundled on-device Chinese OCR fallback for inaccessible visible text
 - Configurable OpenAI-compatible base URL and model name
 - DeepSeek, Qwen, and MiMo configuration presets
-- Conversation context selected from a one-million-token memory budget
-- Larger model output budgets for chat and action planning
+- Conservative conversation context budgeting with space reserved for the current request
 - App-private SQLite conversation storage with automatic legacy migration
 - OCR-derived next-day scheduling through Android WorkManager
 - Strict completion verification and repeated-action recovery
@@ -46,11 +46,22 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 - Visual before/after Critic checks with hard deterministic predicate gates
 - Typed locked-search stages with one-shot semantic IME submission and exact query repair
 - Input-method windows excluded from Actor observations and Set-of-Mark screenshots
-- Locked creator/profile/content gates that reject hot searches, wrong users, wrong videos, and home/search loops
-- Pre-tool target proof plus idempotent one-shot final toggles for state-changing actions
+- Generic task plans without app-specific creator, profile, or latest-video routing in the core runtime
+- A reserved extension seam for optional task recipes; the core runtime contains no platform-specific workflow
+- Pre-tool target proof plus idempotent one-shot final toggles for likes, follows, and favorites
 - App-private SQLite run traces available through `/trace`
+- A run console showing the current phase, action, progress, outcome, and full trace
+- Model-visible node prioritization, SHA-256 screen fingerprints, adaptive settle polling, and cycle recovery
+- Privacy preflight before every model call, PII redaction, strict package locking, and screenshot binding checks
+- Neutral app selection that exposes only the goal and installed app catalog until a target package is locked
+- Explicit opt-in for screenshot sharing; vision is never enabled merely because a Qwen key exists
+- Race-safe run state updates across UI, WorkManager, and accessibility callbacks
 
 Foreground service and exact-alarm special access are intentionally deferred. Scheduled work uses WorkManager and may run later than the parsed time under Android battery optimization.
+
+## Why there is no terminal
+
+Muse intentionally does not expose an arbitrary shell. A normal Android app terminal still runs under the Muse app UID and cannot reliably control other apps; granting Shizuku or root access would materially expand the trust boundary. The current typed accessibility tools are observable, locally validated, package-bound, and auditable. A future terminal bridge should therefore be an explicit optional backend, not part of the default agent loop.
 
 ## Build
 
@@ -65,7 +76,7 @@ Foreground service and exact-alarm special access are intentionally deferred. Sc
 1. Install the debug APK.
 2. Open Muse.
 3. Tap **Accessibility** and enable **Muse Control**.
-4. Enter the DeepSeek API key.
+4. Select DeepSeek or Qwen and enter that provider's API key. The Qwen text preset uses `qwen3.6-flash`; optional vision uses `qwen3-vl-flash`.
 5. Optionally set a default target package. Leave it blank for automatic app selection.
 6. Enter a narrow, low-risk task in the chat input and tap **发送**.
 7. Enter `/list` to inspect the launchable app catalog.

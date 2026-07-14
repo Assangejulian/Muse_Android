@@ -1,6 +1,5 @@
 package com.androidagent.app.agent
 
-import org.json.JSONArray
 import org.json.JSONObject
 
 data class TaskMilestone(
@@ -12,9 +11,17 @@ data class TaskMilestone(
     val successEvidence: String get() = successPredicates.joinToString("; ") { it.description }
 }
 
-enum class TaskMilestoneKind { LAUNCH_APP, ENTER_QUERY, SELECT_ENTITY, OPEN_CONTENT, FINAL_ACTION, GENERIC }
+enum class TaskMilestoneKind { LAUNCH_APP, INPUT, INTERACTION, VERIFICATION, GENERIC }
 
-enum class UiPredicateKind { PACKAGE_FOREGROUND, TEXT_PRESENT, EDITABLE_EQUALS, IME_HIDDEN, PROFILE_IDENTITY, CONTENT_CREATOR, TOGGLE_ON, SEMANTIC_CLAIM }
+enum class UiPredicateKind {
+    PACKAGE_FOREGROUND,
+    TEXT_PRESENT,
+    EDITABLE_EQUALS,
+    IME_HIDDEN,
+    ELEMENT_STATE,
+    TOGGLE_ON,
+    SEMANTIC_CLAIM,
+}
 
 data class UiPredicate(
     val kind: UiPredicateKind,
@@ -26,17 +33,21 @@ data class UiPredicate(
 data class TaskPlan(
     val summary: String,
     val targetAppHint: String,
-    val canonicalQuery: String?,
+    val goal: GoalContext,
     val milestones: List<TaskMilestone>,
+    val allowedPackages: Set<String> = emptySet(),
 ) {
     init {
         require(milestones.isNotEmpty()) { "Task plan must contain milestones" }
     }
 
+    val originalGoal: String get() = goal.originalGoal
+
     fun compactText(currentIndex: Int): String = buildString {
         appendLine("summary=$summary")
         appendLine("targetApp=$targetAppHint")
-        appendLine("canonicalQuery=${canonicalQuery ?: "none"}")
+        appendLine("allowedPackages=${allowedPackages.joinToString(",").ifBlank { "none" }}")
+        appendLine("goal=${goal.originalGoal.take(4_000)}")
         milestones.forEachIndexed { index, milestone ->
             val status = when {
                 index < currentIndex -> "completed"
@@ -54,24 +65,18 @@ data class TaskPlan(
         return copy(milestones = completed + revisedPending)
     }
 
-    fun repairStartIndex(): Int {
-        val semanticIndex = milestones.indexOfFirst { milestone ->
-            milestone.successPredicates.any { it.kind == UiPredicateKind.SEMANTIC_CLAIM || it.kind == UiPredicateKind.TOGGLE_ON }
-        }
-        return if (semanticIndex >= 0) semanticIndex else milestones.lastIndex.coerceAtLeast(0)
-    }
-
-    fun indexOfKind(kind: TaskMilestoneKind): Int = milestones.indexOfFirst { it.kind == kind }
+    fun repairStartIndex(): Int = milestones.indexOfFirst {
+        it.successPredicates.any { predicate -> predicate.kind in setOf(UiPredicateKind.SEMANTIC_CLAIM, UiPredicateKind.TOGGLE_ON) }
+    }.let { if (it >= 0) it else milestones.lastIndex.coerceAtLeast(0) }
 }
 
 enum class TransitionJudgement { NO_PROGRESS, PROGRESS, MILESTONE_COMPLETE }
 
 data class CriticResult(val judgement: TransitionJudgement, val evidence: String)
-
 data class VerificationResult(val done: Boolean, val reason: String)
 
 object TaskPlanParser {
-    fun parse(raw: String, goal: String, canonicalQuery: String?): TaskPlan {
+    fun parse(raw: String, goal: GoalContext): TaskPlan {
         val json = JSONObject(extractObject(raw))
         val milestonesJson = json.getJSONArray("milestones")
         val milestones = buildList {
@@ -83,7 +88,7 @@ object TaskPlanParser {
                     TaskMilestone(
                         id = item.optString("id", "m${index + 1}").ifBlank { "m${index + 1}" },
                         objective = objective,
-                        successPredicates = parsePredicates(item, canonicalQuery),
+                        successPredicates = parsePredicates(item),
                         kind = runCatching { TaskMilestoneKind.valueOf(item.optString("kind", "GENERIC").uppercase()) }
                             .getOrDefault(TaskMilestoneKind.GENERIC),
                     ),
@@ -92,63 +97,49 @@ object TaskPlanParser {
         }
         require(milestones.map { it.id }.distinct().size == milestones.size) { "Milestone IDs must be unique" }
         return TaskPlan(
-            summary = json.optString("summary", goal).ifBlank { goal },
+            summary = json.optString("summary", goal.originalGoal).ifBlank { goal.originalGoal },
             targetAppHint = json.optString("targetAppHint", "").trim(),
-            canonicalQuery = canonicalQuery,
+            goal = goal,
             milestones = milestones,
+            allowedPackages = json.optJSONArray("allowedPackages")?.let { array ->
+                buildSet { for (index in 0 until array.length()) add(array.getString(index).trim()) }
+            } ?: emptySet(),
         )
     }
 
-    fun fallback(goal: String, targetAppHint: String, canonicalQuery: String?): TaskPlan {
-        val milestones = buildList {
-            add(TaskMilestone("m1", "Launch the requested target app", listOf(UiPredicate(UiPredicateKind.PACKAGE_FOREGROUND, description = "The foreground package is the target app")), TaskMilestoneKind.LAUNCH_APP))
-            if (canonicalQuery != null) {
-                add(TaskMilestone("m2", "Open the app search interface and enter the canonical query exactly", listOf(UiPredicate(UiPredicateKind.EDITABLE_EQUALS, valueRef = "canonical_query", description = "The search field exactly equals the canonical query")), TaskMilestoneKind.ENTER_QUERY))
-                add(
-                    TaskMilestone(
-                        "m3",
-                        "Open the creator profile that exactly matches '$canonicalQuery'",
-                        listOf(
-                            UiPredicate(UiPredicateKind.PROFILE_IDENTITY, valueRef = "canonical_query", description = "The profile header is structurally identified as '$canonicalQuery'"),
-                            UiPredicate(UiPredicateKind.IME_HIDDEN, description = "The input method is no longer covering search results"),
-                            UiPredicate(UiPredicateKind.SEMANTIC_CLAIM, valueRef = "canonical_query", description = "The '$canonicalQuery' creator profile is visibly open with profile characteristics such as avatar, followers, or a content list"),
-                        ),
-                        TaskMilestoneKind.SELECT_ENTITY,
-                    ),
-                )
-            }
-            if (goal.contains("最新")) {
-                add(
-                    TaskMilestone(
-                        "m4",
-                        "Open the newest requested content${canonicalQuery?.let { " from '$it'" }.orEmpty()}",
-                        listOfNotNull(
-                            canonicalQuery?.let { UiPredicate(UiPredicateKind.CONTENT_CREATOR, valueRef = "canonical_query", description = "The opened content's creator region is structurally identified as '$canonicalQuery'") },
-                            UiPredicate(UiPredicateKind.SEMANTIC_CLAIM, description = "The newest requested content is visibly open rather than the profile or search page"),
-                        ),
-                        TaskMilestoneKind.OPEN_CONTENT,
-                    ),
-                )
-            }
-            val finalPredicate = if (goal.contains("点赞")) {
-                UiPredicate(UiPredicateKind.TOGGLE_ON, literal = "like", description = "The like control is visibly in the ON state")
-            } else {
-                UiPredicate(UiPredicateKind.SEMANTIC_CLAIM, description = "The screen visibly proves the requested result")
-            }
-            add(
+    fun parse(raw: String, goal: String): TaskPlan = parse(raw, ConservativeGoalInterpreter.interpret(goal))
+
+    @Suppress("UNUSED_PARAMETER")
+    fun parse(raw: String, goal: String, ignoredLegacyValue: String?): TaskPlan = parse(raw, goal)
+
+    fun fallback(goal: GoalContext, targetAppHint: String): TaskPlan = TaskPlan(
+        summary = goal.originalGoal,
+        targetAppHint = targetAppHint,
+        goal = goal,
+        milestones = buildList {
+            if (targetAppHint.isNotBlank()) add(
                 TaskMilestone(
-                    "m${size + 1}",
-                    "Perform the final requested interaction${canonicalQuery?.let { " on '$it' content" }.orEmpty()}",
-                    listOfNotNull(
-                        canonicalQuery?.let { UiPredicate(UiPredicateKind.CONTENT_CREATOR, valueRef = "canonical_query", description = "The current content's creator region remains structurally identified as '$canonicalQuery'") },
-                        finalPredicate,
-                    ),
-                    TaskMilestoneKind.FINAL_ACTION,
+                    id = "launch",
+                    objective = "Bring the explicitly selected application to the foreground",
+                    successPredicates = listOf(UiPredicate(UiPredicateKind.PACKAGE_FOREGROUND, description = "The selected package is foreground")),
+                    kind = TaskMilestoneKind.LAUNCH_APP,
                 ),
             )
-        }
-        return TaskPlan(goal, targetAppHint, canonicalQuery, milestones)
-    }
+            add(
+                TaskMilestone(
+                    id = "verify",
+                    objective = "Perform the requested interaction and establish direct observable evidence",
+                    successPredicates = listOf(UiPredicate(UiPredicateKind.SEMANTIC_CLAIM, description = "The current screen directly proves the requested outcome")),
+                    kind = TaskMilestoneKind.VERIFICATION,
+                ),
+            )
+        },
+    )
+
+    fun fallback(goal: String, targetAppHint: String): TaskPlan = fallback(ConservativeGoalInterpreter.interpret(goal), targetAppHint)
+
+    @Suppress("UNUSED_PARAMETER")
+    fun fallback(goal: String, targetAppHint: String, ignoredLegacyValue: String?): TaskPlan = fallback(goal, targetAppHint)
 
     private fun extractObject(raw: String): String {
         val start = raw.indexOf('{')
@@ -157,7 +148,7 @@ object TaskPlanParser {
         return raw.substring(start, end + 1)
     }
 
-    private fun parsePredicates(item: JSONObject, canonicalQuery: String?): List<UiPredicate> {
+    private fun parsePredicates(item: JSONObject): List<UiPredicate> {
         val predicates = item.optJSONArray("successPredicates")
         if (predicates == null || predicates.length() == 0) {
             val evidence = item.optString("successEvidence", "Visible evidence confirms the milestone")
@@ -169,12 +160,10 @@ object TaskPlanParser {
                 val kind = UiPredicateKind.valueOf(predicate.getString("kind").uppercase())
                 val valueRef = predicate.optString("valueRef").trim().ifBlank { null }
                 val literal = predicate.optString("literal").trim().ifBlank { null }
-                require(valueRef == null || valueRef == "canonical_query") { "Unknown predicate valueRef" }
-                if (valueRef == "canonical_query") require(canonicalQuery != null) { "canonical_query is unavailable" }
-                if (kind == UiPredicateKind.TEXT_PRESENT || kind == UiPredicateKind.EDITABLE_EQUALS || kind == UiPredicateKind.PROFILE_IDENTITY || kind == UiPredicateKind.CONTENT_CREATOR) {
+                require(valueRef == null || valueRef == "goal_text") { "Unknown predicate valueRef" }
+                if (kind in setOf(UiPredicateKind.TEXT_PRESENT, UiPredicateKind.EDITABLE_EQUALS, UiPredicateKind.ELEMENT_STATE)) {
                     require(valueRef != null || literal != null) { "$kind requires a value" }
                 }
-                if (kind == UiPredicateKind.TOGGLE_ON) require(literal != null) { "TOGGLE_ON requires a semantic target" }
                 add(UiPredicate(kind, valueRef, literal, predicate.optString("description", kind.name).trim().ifBlank { kind.name }))
             }
         }

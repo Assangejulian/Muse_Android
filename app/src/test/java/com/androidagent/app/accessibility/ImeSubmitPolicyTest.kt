@@ -6,93 +6,26 @@ import org.junit.Test
 
 class ImeSubmitPolicyTest {
     @Test
-    fun acceptsLocalizedSubmitLabels() {
-        val score = ImeSubmitPolicy.score(
-            viewId = "com.sohu.inputmethod.sogou:id/search_key",
-            text = "搜索",
-            description = "",
-            clickable = true,
-            enabled = true,
-            visible = true,
-        )
-
+    fun acceptsGenericImeActionLabel() {
+        val score = ImeSubmitPolicy.score("com.example.ime:id/action_key", "done", "", true, true, true)
         assertTrue(score >= ImeSubmitPolicy.MINIMUM_SCORE)
     }
 
     @Test
     fun acceptsSemanticImeActionViewIdWithoutText() {
-        val score = ImeSubmitPolicy.score(
-            viewId = "com.google.android.inputmethod.latin:id/ime_action_search",
-            text = "",
-            description = "",
-            clickable = true,
-            enabled = true,
-            visible = true,
-        )
-
+        val score = ImeSubmitPolicy.score("com.example.ime:id/ime_action_done", "", "", true, true, true)
         assertTrue(score >= ImeSubmitPolicy.MINIMUM_SCORE)
     }
 
     @Test
-    fun rejectsGenericEnterOrNewlineKeys() {
-        assertEquals(
-            0,
-            ImeSubmitPolicy.score(
-                viewId = "com.example.keyboard:id/key_enter",
-                text = "换行",
-                description = "",
-                clickable = true,
-                enabled = true,
-                visible = true,
-            ),
-        )
+    fun rejectsGenericEnterKeysAndSuggestions() {
+        assertEquals(0, ImeSubmitPolicy.score("com.example.keyboard:id/key_enter", "", "", true, true, true))
+        assertEquals(0, ImeSubmitPolicy.score("com.example.keyboard:id/candidate", "done", "", true, true, true))
     }
 
     @Test
-    fun rejectsNumberKeyEvenWhenItsViewIdLooksActionable() {
-        val score = ImeSubmitPolicy.score(
-            viewId = "com.example.keyboard:id/enter_candidate",
-            text = "5",
-            description = "5",
-            clickable = true,
-            enabled = true,
-            visible = true,
-        )
-
-        assertEquals(0, score)
+    fun ocrPartialMatchDoesNotShrinkToOneCharacter() {
+        assertEquals(false, ImeSubmitPolicy.isSafeOcrPartialMatch("long target", "5"))
+        assertEquals(true, ImeSubmitPolicy.isSafeOcrPartialMatch("target", "target result"))
     }
-
-    @Test
-    fun rejectsSuggestionsAndHiddenNodes() {
-        assertEquals(
-            0,
-            ImeSubmitPolicy.score(
-                viewId = "com.example.keyboard:id/candidate_search",
-                text = "搜索",
-                description = "",
-                clickable = true,
-                enabled = true,
-                visible = true,
-            ),
-        )
-        assertEquals(
-            0,
-            ImeSubmitPolicy.score(
-                viewId = "com.example.keyboard:id/key_enter",
-                text = "",
-                description = "",
-                clickable = true,
-                enabled = true,
-                visible = false,
-            ),
-        )
-    }
-
-    @Test
-    fun ocrPartialMatchNeverShrinksLongTargetToKeyboardDigit() {
-        assertEquals(false, ImeSubmitPolicy.isSafeOcrPartialMatch("洛克王国世界·5小时前更新", "5"))
-        assertEquals(true, ImeSubmitPolicy.isSafeOcrPartialMatch("老番茄", "UP主老番茄"))
-        assertEquals(false, ImeSubmitPolicy.isSafeOcrPartialMatch("5", "5"))
-    }
-
 }

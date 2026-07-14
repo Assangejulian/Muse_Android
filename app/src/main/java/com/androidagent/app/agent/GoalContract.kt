@@ -1,12 +1,27 @@
 package com.androidagent.app.agent
 
-internal object GoalContract {
-    private val latestCreator = Regex("(?:给|搜索|查找)(.+?)(?:的)?最新")
-    private val explicitSearch = Regex("(?:搜索|查找)([^，。,.]+)")
+/**
+ * A lossless, deliberately conservative representation of a user goal.
+ * The core runtime must not guess a workflow from natural-language keywords.
+ */
+data class GoalContext(
+    val originalGoal: String,
+    val explicitAppHint: String? = null,
+    val constraints: List<String> = emptyList(),
+    val requestedOutcome: String? = null,
+)
 
-    fun extractSearchQuery(goal: String): String? {
-        val candidate = latestCreator.find(goal)?.groupValues?.get(1)
-            ?: explicitSearch.find(goal)?.groupValues?.get(1)
-        return candidate?.trim()?.removePrefix("一下")?.takeIf { it.isNotBlank() }
-    }
+typealias ExecutionGoal = GoalContext
+
+interface GoalInterpreter {
+    fun interpret(goal: String): GoalContext
+}
+
+object ConservativeGoalInterpreter : GoalInterpreter {
+    override fun interpret(goal: String): GoalContext = GoalContext(originalGoal = goal)
+}
+
+/** Compatibility facade for callers that used the old contract object. */
+internal object GoalContract {
+    fun interpret(goal: String): GoalContext = ConservativeGoalInterpreter.interpret(goal)
 }

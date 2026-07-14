@@ -54,7 +54,9 @@ class SecureSettings(context: Context) {
         set(value) = prefs.edit().putString("model_base_url", value.trim().trimEnd('/')).apply()
 
     var modelName: String
-        get() = prefs.getString("model_name", "deepseek-v4-flash").orEmpty()
+        get() = prefs.getString("model_name", "deepseek-v4-flash").orEmpty().let {
+            if (it == "qwen3.5-omni-plus") "qwen3.6-flash" else it
+        }
         set(value) = prefs.edit().putString("model_name", value.trim()).apply()
 
     var visionEnabled: Boolean
@@ -62,8 +64,8 @@ class SecureSettings(context: Context) {
         set(value) = prefs.edit().putBoolean("vision_enabled", value).apply()
 
     var visionModelName: String
-        get() = prefs.getString("vision_model_name", "qwen3.5-omni-plus").orEmpty().let {
-            if (it == "qwen3-vl-flash") "qwen3.5-omni-plus" else it
+        get() = prefs.getString("vision_model_name", "qwen3-vl-flash").orEmpty().let {
+            if (it == "qwen3.5-omni-plus") "qwen3-vl-flash" else it
         }
         set(value) = prefs.edit().putString("vision_model_name", value.trim()).apply()
 
@@ -75,9 +77,13 @@ class SecureSettings(context: Context) {
         get() = prefs.getString("vision_api_key", "").orEmpty()
         set(value) = prefs.edit().putString("vision_api_key", value.trim()).apply()
 
-    var scheduledGoal: String
-        get() = prefs.getString("scheduled_goal", "").orEmpty()
-        set(value) = prefs.edit().putString("scheduled_goal", value.trim()).apply()
+    var scheduledTaskId: String
+        get() = prefs.getString("scheduled_task_id", "").orEmpty()
+        set(value) = prefs.edit().putString("scheduled_task_id", value.trim()).apply()
+
+    var scheduledTaskGoal: String
+        get() = prefs.getString("scheduled_task_goal", prefs.getString("scheduled_goal", "")).orEmpty()
+        set(value) = prefs.edit().putString("scheduled_task_goal", value.trim()).apply()
 
     var nextRunAt: Long
         get() = prefs.getLong("next_run_at", 0L)
