@@ -202,10 +202,15 @@ class DeepSeekClientTest {
     }
 
     @Test
-    fun rejectsAllInsecureHttpAndUrlCredentials() {
+    fun allowsLoopbackHttpAndRejectsPublicInsecureHttpAndUrlCredentials() {
         assertTrue(runCatching { BaseUrlPolicy.validate("http://api.example.com/v1") }.isFailure)
         assertEquals("https://api.example.com/v1", BaseUrlPolicy.validate("https://api.example.com/v1"))
-        assertTrue(runCatching { BaseUrlPolicy.validate("http://127.0.0.1:8080/v1") }.isFailure)
+        assertEquals("http://localhost:8080/v1", BaseUrlPolicy.validate("http://localhost:8080/v1"))
+        assertEquals("http://127.0.0.1:8080/v1", BaseUrlPolicy.validate("http://127.0.0.1:8080/v1"))
+        assertEquals(
+            "http://dev.example.com/v1",
+            BaseUrlPolicy.validate("http://dev.example.com/v1", allowInsecureLocalDevelopment = true),
+        )
         assertTrue(runCatching { BaseUrlPolicy.validate("https://user:pass@example.com/v1") }.isFailure)
         assertTrue(runCatching { BaseUrlPolicy.validate("https://api.example.com/v1?token=secret") }.isFailure)
         assertTrue(runCatching { BaseUrlPolicy.validate("https://api.example.com/v1#fragment") }.isFailure)
