@@ -126,6 +126,14 @@ object TaskPlanValidator {
 
     /** Replans must allocate a new ID when a predicate's meaning changes. */
     fun requireCompatiblePredicateIds(previous: TaskPlan, revised: TaskPlan) {
+        val revisedIds = revised.milestones.flatMap { milestone ->
+            milestone.successPredicates.mapIndexed { index, predicate ->
+                predicate.predicateId ?: predicateIdFor(milestone.id, index)
+            }
+        }
+        if (revisedIds.any(String::isBlank) || revisedIds.distinct().size != revisedIds.size) {
+            throw TaskPlanException("Predicate IDs must be unique across the revised task plan")
+        }
         val previousById = previous.milestones.flatMap { milestone ->
             milestone.successPredicates.mapIndexed { index, predicate ->
                 (predicate.predicateId ?: predicateIdFor(milestone.id, index)) to predicate

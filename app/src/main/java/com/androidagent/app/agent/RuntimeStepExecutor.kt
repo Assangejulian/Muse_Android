@@ -282,7 +282,7 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         }
 
         val actionKey = request.ledger.actionKey(action, request.executionObservation)
-        val baseline = MilestoneEvaluator.strongPostconditionBaseline(
+        val baselineTruth = MilestoneEvaluator.strongPostconditionTruthBaseline(
             milestone = request.milestone,
             plan = request.plan,
             observation = request.executionObservation,
@@ -329,8 +329,9 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
                 preparation,
                 actionKey,
                 request.executionObservation.observationId,
-                baseline,
+                baselineTruth.mapValues { (_, truth) -> truth == PredicateTruth.PROVEN },
                 preDispatchSnapshotId = preDispatchSnapshot?.snapshotId,
+                strongPostconditionTruthBefore = baselineTruth,
             )) {
             return aborted(request, action, "predicate binding commit failed after successful dispatch", events, recoveryDecisions)
         }

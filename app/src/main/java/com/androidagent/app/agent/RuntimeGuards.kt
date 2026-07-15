@@ -1,10 +1,15 @@
 package com.androidagent.app.agent
 
+enum class PredicateTruth { PROVEN, REFUTED, UNKNOWN }
+
 data class PredicateEvidence(
     val proven: Boolean,
     val details: List<String>,
     val replanRequired: Boolean = false,
-)
+    val truths: Map<String, PredicateTruth> = emptyMap(),
+) {
+    fun truthFor(predicateId: String): PredicateTruth = truths[predicateId] ?: PredicateTruth.UNKNOWN
+}
 
 enum class BindingLifecycle { PREPARED, DISPATCHED, COMMITTED, VERIFIED, INVALIDATED, REBIND_REQUIRED }
 
@@ -41,6 +46,8 @@ data class PredicateBinding(
     val resultState: BindingResultState = BindingResultState.BOUND_ONLY,
     val strongPostconditionsBefore: Map<String, Boolean> = emptyMap(),
     val preDispatchSnapshotId: String? = null,
+    /** Tri-state baseline; the legacy Boolean map remains for source compatibility. */
+    val strongPostconditionTruthBefore: Map<String, PredicateTruth> = emptyMap(),
 )
 
 data class BindingTransitionProposal(
@@ -405,6 +412,7 @@ class PredicateBindingStore {
                 dispatchedObservationId = null,
                 dispatchSequence = null,
                 strongPostconditionsBefore = emptyMap(),
+                strongPostconditionTruthBefore = emptyMap(),
                 preDispatchSnapshotId = null,
             )
         }
@@ -420,6 +428,7 @@ class PredicateBindingStore {
         observationId: String,
         strongPostconditionsBefore: Map<String, Boolean>,
         preDispatchSnapshotId: String? = null,
+        strongPostconditionTruthBefore: Map<String, PredicateTruth> = emptyMap(),
     ): Boolean {
         if (!preparation.prepared || !canCommit(preparation.transitions)) return false
         val sequence = ++dispatchSequence
@@ -433,6 +442,7 @@ class PredicateBindingStore {
                 dispatchSequence = sequence,
                 resultState = BindingResultState.DISPATCHED,
                 strongPostconditionsBefore = strongPostconditionsBefore,
+                strongPostconditionTruthBefore = strongPostconditionTruthBefore,
                 preDispatchSnapshotId = preDispatchSnapshotId,
             )
         }
@@ -448,22 +458,34 @@ class PredicateBindingStore {
     fun markResultObserved(preparation: BindingPreparation, actionKey: String) =
         updateDispatchState(preparation, actionKey, BindingResultState.RESULT_OBSERVED)
 
-    fun retainCompleted(previous: TaskPlan, revised: TaskPlan, completedIds: Set<String>) {
+    fun retainCompleted(
+        previous: TaskPlan,
+        revised: TaskPlan,
+        @Suppress("UNUSED_PARAMETER") completedIds: Set<String>,
+    ) {
         val retained = linkedMapOf<String, PredicateBinding>()
         bindings.values.forEach { binding ->
             val previousMilestone = previous.milestones.firstOrNull { it.id == binding.milestoneId } ?: return@forEach
             val previousPredicate = previousMilestone.successPredicates.getOrNull(binding.predicateIndex) ?: return@forEach
             val previousId = previousPredicate.predicateId ?: TaskPlanValidator.predicateIdFor(previousMilestone.id, binding.predicateIndex)
-            val revisedMilestone = revised.milestones.firstOrNull { it.id == binding.milestoneId } ?: return@forEach
-            val revisedMatch = revisedMilestone.successPredicates.mapIndexedNotNull { index, predicate ->
-                val revisedId = predicate.predicateId ?: TaskPlanValidator.predicateIdFor(revisedMilestone.id, index)
-                if (revisedId == previousId && predicatesRemainBound(previousPredicate, predicate, previousId, revisedId)) index else null
-            }.firstOrNull() ?: return@forEach
+            val revisedMatches = revised.milestones.flatMap { revisedMilestone ->
+                revisedMilestone.successPredicates.mapIndexedNotNull { index, predicate ->
+                    val revisedId = predicate.predicateId ?: TaskPlanValidator.predicateIdFor(revisedMilestone.id, index)
+                    if (revisedId == previousId && predicatesRemainBound(previousPredicate, predicate, previousId, revisedId)) {
+                        revisedMilestone to index
+                    } else {
+                        null
+                    }
+                }
+            }
+            if (revisedMatches.size != 1) return@forEach
+            val (revisedMilestone, revisedMatch) = revisedMatches.single()
             val remapped = binding.copy(
+                milestoneId = revisedMilestone.id,
                 predicateIndex = revisedMatch,
                 predicateId = previousId,
             )
-            retained[key(binding.milestoneId, revisedMatch)] = remapped
+            retained[key(revisedMilestone.id, revisedMatch)] = remapped
         }
         bindings.clear()
         bindings.putAll(retained)
@@ -528,26 +550,7 @@ class PredicateBindingStore {
             TargetHintMatcher.semanticallyEquivalent(previous.targetHint, revised.targetHint)
     }
 
-    private fun actionTarget(action: AgentAction, observation: Observation): UiNodeSnapshot? = when (action) {
-        is AgentAction.ClickText -> {
-            val matches = observation.nodes.filter { it.visible && it.enabled && !it.editable &&
-                (it.text.equals(action.text, true) || it.description.equals(action.text, true)) }
-            matches.singleOrNull()
-        }
-        is AgentAction.ClickNode -> NodeSelector.resolve(observation, action.nodeId, action.selector)
-        is AgentAction.InputText -> if (action.nodeId != null || action.target != null) {
-            NodeSelector.resolve(observation, action.nodeId, action.target)
-        } else {
-            observation.nodes.filter { it.visible && it.enabled && it.editable && !it.password }.singleOrNull { it.focused }
-        }
-        is AgentAction.SubmitInput -> if (action.nodeId != null || action.target != null) {
-            NodeSelector.resolve(observation, action.nodeId, action.target)
-        } else {
-            observation.nodes.filter { it.visible && it.enabled && it.editable && !it.password }.singleOrNull { it.focused }
-        }
-        is AgentAction.EnsureToggle -> NodeSelector.resolve(observation, action.nodeId, action.selector)
-        else -> null
-    }
+    private fun actionTarget(action: AgentAction, observation: Observation): UiNodeSnapshot? = TargetResolver.resolve(action, observation)
 
     private fun actionPredicateId(action: AgentAction): String? = when (action) {
         is AgentAction.ClickText -> action.predicateId
@@ -636,15 +639,17 @@ object MilestoneEvaluator {
         preDispatchSnapshots: PreDispatchEvidenceStore? = null,
     ): PredicateEvidence {
         val details = mutableListOf<String>()
+        val truths = linkedMapOf<String, PredicateTruth>()
         var replanRequired = false
         val indices = predicateIndices ?: milestone.successPredicates.indices.toSet()
         val positiveIndices = indices.filter { index ->
             milestone.successPredicates.getOrNull(index)?.kind in STRONG_POSTCONDITION_KINDS
         }.toSet()
-        val positiveEvidence = if (!computePositiveEvidence || positiveIndices.isEmpty()) {
+        val positiveEvidence: Map<Int, PredicateTruth> = if (!computePositiveEvidence || positiveIndices.isEmpty()) {
             emptyMap()
         } else {
             positiveIndices.associateWith { positiveIndex ->
+                val positiveId = predicateId(milestone, positiveIndex)
                 evaluate(
                     milestone = milestone,
                     plan = plan,
@@ -655,7 +660,7 @@ object MilestoneEvaluator {
                     runId = runId,
                     computePositiveEvidence = false,
                     preDispatchSnapshots = preDispatchSnapshots,
-                ).proven
+                ).truthFor(positiveId)
             }
         }
         val results = milestone.successPredicates.mapIndexedNotNull { predicateIndex, predicate ->
@@ -664,6 +669,7 @@ object MilestoneEvaluator {
                 details += "${predicate.kind}=AUXILIARY: ${predicate.description}"
                 return@mapIndexedNotNull null
             }
+            val currentPredicateId = predicateId(milestone, predicateIndex)
             val value = when (predicate.valueRef) {
                 "goal_text" -> plan.goal.originalGoal
                 else -> predicate.literal
@@ -680,9 +686,19 @@ object MilestoneEvaluator {
                     is IdentityResolution.Ambiguous -> NodeSelector.matchingNodes(observation, binding.identity)
                     else -> emptyList()
                 }
-            } ?: targetSelector?.let { selector -> NodeSelector.matchingNodes(observation, selector) }.orEmpty()
+            } ?: targetSelector?.let { selector -> NodeSelector.matchingNodes(observation, selector) }
+                ?: predicate.targetHint?.let { hint ->
+                    observation.nodes.filter { node -> TargetHintMatcher.match(hint, node) == TargetHintResult.MATCH }
+                }
+                ?: emptyList()
             val target = targetMatches.singleOrNull()
-            val concreteTarget = bound != null || (predicate.target != null && targetMatches.size == 1)
+            val concreteTarget = bound != null || targetMatches.size == 1
+            // State predicates must carry a concrete selector or an existing
+            // runtime binding.  A fuzzy targetHint alone is never a proof,
+            // even when it happens to match one node in this snapshot.
+            val concreteStateTarget = bound != null || (predicate.target != null && targetMatches.size == 1)
+            val targetHintWithoutUniqueTarget = bound == null && predicate.target == null &&
+                !predicate.targetHint.isNullOrBlank() && targetMatches.size != 1
             val bindingRequired = predicate.kind in setOf(
                 UiPredicateKind.EDITABLE_EQUALS,
                 UiPredicateKind.ELEMENT_PRESENT,
@@ -694,35 +710,66 @@ object MilestoneEvaluator {
                 UiPredicateKind.TOGGLE_STATE,
                 UiPredicateKind.TOGGLE_ON,
             )
-            val proven = when (predicate.kind) {
-                UiPredicateKind.PACKAGE_FOREGROUND ->
+            fun observableTruth(proven: Boolean, forceUnknown: Boolean = false): PredicateTruth = when {
+                forceUnknown || observation.privacyFiltered || !observation.isComplete -> PredicateTruth.UNKNOWN
+                proven -> PredicateTruth.PROVEN
+                else -> PredicateTruth.REFUTED
+            }
+            val truth = when (predicate.kind) {
+                UiPredicateKind.PACKAGE_FOREGROUND -> observableTruth(
                     observation.packageName == (
                         predicate.targetPackage
                             ?: predicate.target?.packageName
                             ?: targetPackage
-                        )
+                        ),
+                )
 
-                UiPredicateKind.TEXT_PRESENT -> value != null && if (predicate.target != null || bound != null) {
-                    target?.let { node ->
-                        node.visible && !node.password && !node.isInputMethod &&
-                            (node.text.equals(value, true) || node.description.equals(value, true))
-                    } == true
-                } else {
-                    observation.nodes.any { node ->
-                        node.visible && !node.password && !node.isInputMethod &&
-                            (node.text.equals(value, true) || node.description.equals(value, true))
+                UiPredicateKind.TEXT_PRESENT -> if (value == null) {
+                    PredicateTruth.UNKNOWN
+                } else if (predicate.target != null || bound != null || !predicate.targetHint.isNullOrBlank()) {
+                    if (targetHintWithoutUniqueTarget) {
+                        PredicateTruth.UNKNOWN
+                    } else {
+                        target?.let { node ->
+                            if (node.password || node.isInputMethod) {
+                                PredicateTruth.UNKNOWN
+                            } else {
+                                observableTruth(
+                                    node.visible && (node.text.equals(value, true) || node.description.equals(value, true)),
+                                )
+                            }
+                        } ?: observableTruth(false)
                     }
+                } else {
+                    if (observation.privacyFiltered || !observation.isComplete) {
+                        PredicateTruth.UNKNOWN
+                    } else if (observation.nodes.any { node ->
+                        node.visible && !node.password && !node.isInputMethod &&
+                            (node.text.equals(value, true) || node.description.equals(value, true))
+                    }) PredicateTruth.PROVEN else PredicateTruth.REFUTED
                 }
 
-                UiPredicateKind.EDITABLE_EQUALS -> bindingRequired && concreteTarget && value != null && target?.let { node ->
-                    node.visible && node.enabled && node.editable && !node.password && node.text == value
-                } == true
+                UiPredicateKind.EDITABLE_EQUALS -> if (!bindingRequired || !concreteStateTarget || value == null || target == null) {
+                    PredicateTruth.UNKNOWN
+                } else if (target.password) {
+                    PredicateTruth.UNKNOWN
+                } else {
+                    observableTruth(target.visible && target.enabled && target.editable && target.text == value)
+                }
 
-                UiPredicateKind.IME_HIDDEN -> !observation.imeVisible
-                UiPredicateKind.ELEMENT_PRESENT -> bindingRequired && concreteTarget && targetMatches.size == 1 && targetMatches.single().visible
-                UiPredicateKind.ELEMENT_DISAPPEARED -> bindingRequired && bound != null && when (identityResolution) {
-                    IdentityResolution.MissingInSameWindow -> true
-                    IdentityResolution.BoundWindowGone -> boundWindowGoneCanProve(
+                UiPredicateKind.IME_HIDDEN -> observableTruth(!observation.imeVisible)
+                UiPredicateKind.ELEMENT_PRESENT -> if (!bindingRequired || !concreteStateTarget || target == null) {
+                    PredicateTruth.UNKNOWN
+                } else if (target.password || target.isInputMethod) {
+                    PredicateTruth.UNKNOWN
+                } else {
+                    observableTruth(target.visible)
+                }
+                UiPredicateKind.ELEMENT_DISAPPEARED -> if (!bindingRequired || bound == null) {
+                    PredicateTruth.UNKNOWN
+                } else when (identityResolution) {
+                    IdentityResolution.MissingInSameWindow -> PredicateTruth.PROVEN
+                    IdentityResolution.BoundWindowGone -> if (boundWindowGoneCanProve(
                         binding = bound,
                         observation = observation,
                         strongPostconditionsAfter = positiveEvidence.mapKeys { (index, _) ->
@@ -732,45 +779,88 @@ object MilestoneEvaluator {
                         plan = plan,
                         targetPackage = targetPackage,
                         runId = runId,
+                        bindings = bindings,
                         preDispatchSnapshots = preDispatchSnapshots,
-                    )
-                    else -> false
+                    )) PredicateTruth.PROVEN else PredicateTruth.UNKNOWN
+                    else -> PredicateTruth.UNKNOWN
                 }
-                UiPredicateKind.ELEMENT_ENABLED -> bindingRequired && concreteTarget && target?.let { it.visible && it.enabled } == true
-                UiPredicateKind.ELEMENT_SELECTED -> bindingRequired && concreteTarget && target?.let { it.visible && it.selected } == true
-                UiPredicateKind.ELEMENT_CHECKED -> bindingRequired && concreteTarget && target?.let { it.visible && it.checked == true } == true
-                UiPredicateKind.ELEMENT_TEXT_EQUALS -> bindingRequired && concreteTarget && value != null && target?.let { node ->
-                    node.visible && (node.text == value || node.description == value)
-                } == true
-                UiPredicateKind.TOGGLE_STATE -> bindingRequired && concreteTarget && target?.let { node ->
-                    node.visible && node.checked != null && node.checked == predicate.expectedChecked
-                } == true
-                UiPredicateKind.TOGGLE_ON -> bindingRequired && bound != null && target?.let { node ->
-                    node.visible && (node.checked == true || node.selected)
-                } == true
-                UiPredicateKind.ELEMENT_STATE -> false
-                UiPredicateKind.SEMANTIC_CLAIM -> false
+                UiPredicateKind.ELEMENT_ENABLED -> if (!bindingRequired || !concreteStateTarget || target == null) PredicateTruth.UNKNOWN else observableTruth(target.visible && target.enabled)
+                UiPredicateKind.ELEMENT_SELECTED -> if (!bindingRequired || !concreteStateTarget || target == null) PredicateTruth.UNKNOWN else observableTruth(target.visible && target.selected)
+                UiPredicateKind.ELEMENT_CHECKED -> if (!bindingRequired || !concreteStateTarget || target == null) PredicateTruth.UNKNOWN else observableTruth(target.visible && target.checked == true)
+                UiPredicateKind.ELEMENT_TEXT_EQUALS -> if (!bindingRequired || !concreteStateTarget || value == null || target == null) {
+                    PredicateTruth.UNKNOWN
+                } else if (target.password) {
+                    PredicateTruth.UNKNOWN
+                } else {
+                    observableTruth(target.visible && (target.text == value || target.description == value))
+                }
+                UiPredicateKind.TOGGLE_STATE -> if (!bindingRequired || !concreteStateTarget || target == null) {
+                    PredicateTruth.UNKNOWN
+                } else {
+                    observableTruth(target.visible && target.checked != null && target.checked == predicate.expectedChecked)
+                }
+                UiPredicateKind.TOGGLE_ON -> if (!bindingRequired || !concreteStateTarget || target == null) {
+                    PredicateTruth.UNKNOWN
+                } else {
+                    observableTruth(target.visible && (target.checked == true || target.selected))
+                }
+                UiPredicateKind.ELEMENT_STATE,
+                UiPredicateKind.SEMANTIC_CLAIM,
+                -> PredicateTruth.UNKNOWN
             }
-            val detail = if (!proven && predicate.kind == UiPredicateKind.ELEMENT_DISAPPEARED && identityResolution == IdentityResolution.BoundWindowGone) {
+            val detail = if (truth != PredicateTruth.PROVEN && predicate.kind == UiPredicateKind.ELEMENT_DISAPPEARED && identityResolution == IdentityResolution.BoundWindowGone) {
                 replanRequired = true
                 BOUND_WINDOW_GONE_REPLAN_REASON
             } else {
                 predicate.description
             }
-            details += "${predicate.kind}=${if (proven) "PROVEN" else "UNKNOWN"}: $detail"
-            proven
+            truths[currentPredicateId] = truth
+            details += "${predicate.kind}=${truth.name}: $detail"
+            truth
         }
-        return PredicateEvidence(results.isNotEmpty() && results.all { it }, details, replanRequired)
+        return PredicateEvidence(
+            proven = results.isNotEmpty() && results.all { it == PredicateTruth.PROVEN },
+            details = details,
+            replanRequired = replanRequired,
+            truths = truths,
+        )
+    }
+
+    fun evaluatePredicateTruth(
+        milestone: TaskMilestone,
+        plan: TaskPlan,
+        observation: Observation,
+        targetPackage: String?,
+        predicateIndex: Int,
+        bindings: PredicateBindingStore? = null,
+        runId: String? = null,
+        preDispatchSnapshots: PreDispatchEvidenceStore? = null,
+    ): PredicateTruth {
+        val predicateId = milestone.successPredicates.getOrNull(predicateIndex)?.let { predicate ->
+            predicate.predicateId ?: TaskPlanValidator.predicateIdFor(milestone.id, predicateIndex)
+        } ?: return PredicateTruth.UNKNOWN
+        return evaluate(
+            milestone = milestone,
+            plan = plan,
+            observation = observation,
+            targetPackage = targetPackage,
+            bindings = bindings,
+            predicateIndices = setOf(predicateIndex),
+            runId = runId,
+            computePositiveEvidence = false,
+            preDispatchSnapshots = preDispatchSnapshots,
+        ).truthFor(predicateId)
     }
 
     private fun boundWindowGoneCanProve(
         binding: PredicateBinding,
         observation: Observation,
-        strongPostconditionsAfter: Map<String, Boolean>,
+        strongPostconditionsAfter: Map<String, PredicateTruth>,
         milestone: TaskMilestone,
         plan: TaskPlan,
         targetPackage: String?,
         runId: String?,
+        bindings: PredicateBindingStore?,
         preDispatchSnapshots: PreDispatchEvidenceStore?,
     ): Boolean {
         if (binding.origin != BindingOrigin.MUTATING_ACTION) return false
@@ -794,25 +884,30 @@ object MilestoneEvaluator {
         val originalStructureKey = identity.crossWindowStructureKey ?: return false
         if (samePackageNodes.any { node -> crossWindowKey(node) == originalStructureKey }) return false
         val snapshot = preDispatchSnapshots?.get(binding.preDispatchSnapshotId)
-        return strongPostconditionsAfter.any { (predicateKey, provenAfter) ->
-            if (!provenAfter) return@any false
-            val before = binding.strongPostconditionsBefore[predicateKey] ?: snapshot?.let {
-                val index = milestone.successPredicates.indexOfFirst { predicate ->
-                    predicateId(milestone, milestone.successPredicates.indexOf(predicate)) == predicateKey
+        val predicateIndicesById = milestone.successPredicates.mapIndexed { index, _ ->
+            predicateId(milestone, index) to index
+        }.toMap()
+        return strongPostconditionsAfter.any { (predicateKey, afterTruth) ->
+            if (afterTruth != PredicateTruth.PROVEN) return@any false
+            val before = binding.strongPostconditionTruthBefore[predicateKey]
+                ?: binding.strongPostconditionsBefore[predicateKey]?.let { proven ->
+                    if (proven) PredicateTruth.PROVEN else PredicateTruth.REFUTED
                 }
-                if (index < 0) null else evaluate(
+                ?: snapshot?.let {
+                val index = predicateIndicesById[predicateKey]
+                if (index == null) null else evaluate(
                     milestone = milestone,
                     plan = plan,
                     observation = it.toObservation(),
                     targetPackage = targetPackage,
-                    bindings = null,
+                    bindings = bindings,
                     predicateIndices = setOf(index),
                     runId = runId,
                     computePositiveEvidence = false,
                     preDispatchSnapshots = null,
-                ).proven
+                ).truthFor(predicateKey)
             }
-            before == false
+            before == PredicateTruth.REFUTED
         }
     }
 
@@ -824,9 +919,27 @@ object MilestoneEvaluator {
         bindings: PredicateBindingStore?,
         runId: String? = null,
         preDispatchSnapshots: PreDispatchEvidenceStore? = null,
-    ): Map<String, Boolean> = milestone.successPredicates.mapIndexedNotNull { index, predicate ->
+    ): Map<String, Boolean> = strongPostconditionTruthBaseline(
+        milestone = milestone,
+        plan = plan,
+        observation = observation,
+        targetPackage = targetPackage,
+        bindings = bindings,
+        runId = runId,
+        preDispatchSnapshots = preDispatchSnapshots,
+    ).mapValues { (_, truth) -> truth == PredicateTruth.PROVEN }
+
+    fun strongPostconditionTruthBaseline(
+        milestone: TaskMilestone,
+        plan: TaskPlan,
+        observation: Observation,
+        targetPackage: String?,
+        bindings: PredicateBindingStore?,
+        runId: String? = null,
+        preDispatchSnapshots: PreDispatchEvidenceStore? = null,
+    ): Map<String, PredicateTruth> = milestone.successPredicates.mapIndexedNotNull { index, predicate ->
         if (predicate.kind !in STRONG_POSTCONDITION_KINDS) return@mapIndexedNotNull null
-        val proven = evaluate(
+        val truth = evaluate(
             milestone = milestone,
             plan = plan,
             observation = observation,
@@ -836,8 +949,8 @@ object MilestoneEvaluator {
             runId = runId,
             computePositiveEvidence = false,
             preDispatchSnapshots = preDispatchSnapshots,
-        ).proven
-        predicateId(milestone, index) to proven
+        ).truthFor(predicateId(milestone, index))
+        predicateId(milestone, index) to truth
     }.toMap()
 
     private fun predicateId(milestone: TaskMilestone, index: Int): String =
@@ -1011,8 +1124,9 @@ class ToolGuard(
                 if ((action.nodeId != null || action.target != null) && target == null) {
                     return GuardResult(null, "input_text selector did not resolve to a unique editable target")
                 }
+                if (target?.password == true) return GuardResult(null, "input_text cannot target a password field")
                 if (target == null) {
-                    val editable = editableNodes(observation)
+                    val editable = TargetResolver.editableCandidates(observation)
                     if (editable.count { it.focused } == 1) return GuardResult(action)
                     if (editable.size > 1) return GuardResult(null, "input_text target is ambiguous; provide nodeId or selector")
                     if (editable.isEmpty()) return GuardResult(null, "input_text has no editable target")
@@ -1024,7 +1138,8 @@ class ToolGuard(
                 if ((action.nodeId != null || action.target != null) && target == null) {
                     return GuardResult(null, "submit_input selector did not resolve to a unique editable target")
                 }
-                val editable = editableNodes(observation)
+                if (target?.password == true) return GuardResult(null, "submit_input cannot target a password field")
+                val editable = TargetResolver.editableCandidates(observation)
                 if (target == null && editable.count { it.focused } == 0 && editable.size != 1) {
                     return GuardResult(null, "submit_input target is ambiguous or missing")
                 }
@@ -1071,14 +1186,10 @@ class ToolGuard(
     fun recordDispatch(@Suppress("UNUSED_PARAMETER") action: AgentAction) = Unit
 
     private fun resolveEditable(observation: Observation, nodeId: Int?, selector: ElementSelector?): UiNodeSnapshot? =
-        NodeSelector.resolve(observation, nodeId, selector)?.takeIf { it.editable && it.visible && it.enabled && !it.password }
+        TargetResolver.resolveEditable(observation, nodeId, selector)
 
     private fun resolveTarget(observation: Observation, nodeId: Int?, selector: ElementSelector?): UiNodeSnapshot? =
         NodeSelector.resolve(observation, nodeId, selector)
-
-    private fun editableNodes(observation: Observation): List<UiNodeSnapshot> = observation.nodes.filter {
-        it.visible && it.enabled && it.editable && !it.password && !it.isInputMethod
-    }
 
     private fun isInputMethodPackage(packageName: String?): Boolean {
         val value = packageName.orEmpty().lowercase()

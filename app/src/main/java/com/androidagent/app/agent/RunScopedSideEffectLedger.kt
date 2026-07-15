@@ -13,13 +13,50 @@ enum class SideEffectResultState {
     CONFIRMED,
 }
 
+enum class SideEffectFamily {
+    ACTIVATE_CONTROL,
+    SET_BOOLEAN_CONTROL,
+    INPUT_VALUE,
+    SUBMIT_VALUE,
+    LAUNCH_APP,
+    NAVIGATE_BACK,
+    NAVIGATE_HOME,
+    SCROLL,
+    POINT_ACTIVATION,
+}
+
+enum class SideEffectTargetKind { OTHER, BOOLEAN_CONTROL }
+
 data class SideEffectIdentity(
+    /** Canonical family name retained under the historical actionType field. */
     val actionType: String,
     val targetPackage: String?,
     val targetCrossWindowStructureKey: String?,
     val irreversiblePayloadDigest: String? = null,
     val desiredState: String? = null,
-)
+    val family: SideEffectFamily = familyFor(actionType),
+    val targetKind: SideEffectTargetKind = SideEffectTargetKind.OTHER,
+    val submitRequested: Boolean = false,
+    /** Local observation only; used to decide whether a different toggle target is already satisfied. */
+    val observedChecked: Boolean? = null,
+    /** Explicit once-only policy; false for ordinary repeatable actions. */
+    val onceOnly: Boolean = false,
+) {
+    companion object {
+        fun familyFor(actionType: String): SideEffectFamily = when (actionType.trim().uppercase()) {
+            "CLICK_NODE", "CLICK_TEXT", "ACTIVATE_CONTROL" -> SideEffectFamily.ACTIVATE_CONTROL
+            "ENSURE_TOGGLE", "SET_BOOLEAN_CONTROL" -> SideEffectFamily.SET_BOOLEAN_CONTROL
+            "INPUT_TEXT", "INPUT_VALUE" -> SideEffectFamily.INPUT_VALUE
+            "SUBMIT_INPUT", "SUBMIT_VALUE" -> SideEffectFamily.SUBMIT_VALUE
+            "LAUNCH_APP" -> SideEffectFamily.LAUNCH_APP
+            "BACK", "NAVIGATE_BACK" -> SideEffectFamily.NAVIGATE_BACK
+            "HOME", "NAVIGATE_HOME" -> SideEffectFamily.NAVIGATE_HOME
+            "SWIPE", "SCROLL" -> SideEffectFamily.SCROLL
+            "TAP_POINT", "POINT_ACTIVATION" -> SideEffectFamily.POINT_ACTIVATION
+            else -> SideEffectFamily.ACTIVATE_CONTROL
+        }
+    }
+}
 
 data class SideEffectRecord(
     val identity: SideEffectIdentity,
@@ -46,16 +83,83 @@ class RunScopedSideEffectLedger(val runId: String? = null) {
     @Synchronized
     fun check(identity: SideEffectIdentity): SideEffectCheck {
         val existing = records[identity]
-        return if (existing == null) {
-            SideEffectCheck(true)
-        } else {
-            SideEffectCheck(
+        if (identity.onceOnly && existing?.state == SideEffectResultState.CONFIRMED) {
+            return SideEffectCheck(
                 allowed = false,
-                reason = "side effect identity was already dispatched in this run",
+                reason = "once-only side effect was already confirmed",
                 existing = existing,
             )
         }
+        val confirmedSubmit = if (identity.family == SideEffectFamily.SUBMIT_VALUE) {
+            records.values.firstOrNull { record ->
+                record.state == SideEffectResultState.CONFIRMED &&
+                    record.identity.family == SideEffectFamily.INPUT_VALUE &&
+                    record.identity.submitRequested &&
+                    record.identity.onceOnly &&
+                    sameTarget(record.identity, identity)
+            }
+        } else null
+        if (confirmedSubmit != null) {
+            return SideEffectCheck(
+                allowed = false,
+                reason = "a confirmed submit-on-input already covers this target",
+                existing = confirmedSubmit,
+            )
+        }
+        val unknown = records.values.firstOrNull { record ->
+            if (record.state != SideEffectResultState.UNKNOWN_SIDE_EFFECT) return@firstOrNull false
+            val recorded = record.identity
+            when {
+                recorded == identity -> true
+                identity.family == SideEffectFamily.SET_BOOLEAN_CONTROL &&
+                    recorded.family == SideEffectFamily.SET_BOOLEAN_CONTROL &&
+                    sameTarget(recorded, identity) -> {
+                    val differentDesiredState = recorded.desiredState != identity.desiredState
+                    if (!differentDesiredState) {
+                        true
+                    } else {
+                        // A different toggle transition is safe only when the
+                        // current local snapshot proves the requested state is
+                        // already present, or proves the unknown transition's
+                        // desired state before starting a new transition.
+                        val requested = identity.desiredState?.toBooleanStrictOrNull()
+                        val recordedDesired = recorded.desiredState?.toBooleanStrictOrNull()
+                        !(identity.observedChecked == requested || identity.observedChecked == recordedDesired)
+                    }
+                }
+                identity.family == SideEffectFamily.ACTIVATE_CONTROL &&
+                    recorded.family == SideEffectFamily.ACTIVATE_CONTROL &&
+                    sameTarget(recorded, identity) -> true
+                identity.family == SideEffectFamily.ACTIVATE_CONTROL &&
+                    identity.targetKind == SideEffectTargetKind.BOOLEAN_CONTROL &&
+                    recorded.family == SideEffectFamily.SET_BOOLEAN_CONTROL -> sameTarget(recorded, identity)
+                identity.family == SideEffectFamily.SET_BOOLEAN_CONTROL &&
+                    identity.targetKind == SideEffectTargetKind.BOOLEAN_CONTROL &&
+                    recorded.family == SideEffectFamily.ACTIVATE_CONTROL &&
+                    recorded.targetKind == SideEffectTargetKind.BOOLEAN_CONTROL -> sameTarget(recorded, identity)
+                identity.family == SideEffectFamily.SUBMIT_VALUE &&
+                    recorded.family == SideEffectFamily.INPUT_VALUE &&
+                    recorded.submitRequested -> sameTarget(recorded, identity)
+                else -> false
+            }
+        }
+        return if (unknown != null) {
+            SideEffectCheck(
+                allowed = false,
+                reason = "unknown side effect blocks the same semantic target until locally resolved",
+                existing = unknown,
+            )
+        } else {
+            // Confirmed records remain available for diagnostics but are not a
+            // run-wide hard lock. RunLedger and milestone evidence own normal
+            // repeat detection for confirmed actions.
+            SideEffectCheck(allowed = true, existing = existing)
+        }
     }
+
+    private fun sameTarget(first: SideEffectIdentity, second: SideEffectIdentity): Boolean =
+        first.targetPackage == second.targetPackage &&
+            first.targetCrossWindowStructureKey == second.targetCrossWindowStructureKey
 
     /** Records that Android accepted a dispatch, while its outcome is unknown. */
     @Synchronized
@@ -65,7 +169,11 @@ class RunScopedSideEffectLedger(val runId: String? = null) {
         dispatchSequence: Long = nextDispatchSequence(),
         preDispatchSnapshotId: String? = null,
     ): Boolean {
-        if (records.containsKey(identity)) return false
+        // A confirmed identity is diagnostically retained but must not prevent a
+        // later legitimate dispatch.  Only an existing UNKNOWN record is a
+        // concurrent/ambiguous dispatch conflict; the pre-dispatch check already
+        // rejects that case before Android is touched.
+        if (records[identity]?.state == SideEffectResultState.UNKNOWN_SIDE_EFFECT) return false
         records[identity] = SideEffectRecord(
             identity = identity,
             state = SideEffectResultState.UNKNOWN_SIDE_EFFECT,
@@ -155,6 +263,8 @@ data class PreDispatchEvidenceSnapshot(
     val sideEffectIdentity: SideEffectIdentity,
     val dispatchObservationId: String,
     val dispatchSequence: Long,
+    val isComplete: Boolean = true,
+    val privacyFiltered: Boolean = false,
 ) {
     fun toObservation(): Observation = Observation(
         packageName = packageName,
@@ -184,6 +294,8 @@ data class PreDispatchEvidenceSnapshot(
         imeVisible = imeVisible,
         windowIds = windowIds,
         windowPackages = windowPackages,
+        isComplete = isComplete,
+        privacyFiltered = privacyFiltered,
     )
 }
 
@@ -236,6 +348,8 @@ class PreDispatchEvidenceStore(private val maxSnapshots: Int = 8) {
             sideEffectIdentity = identity,
             dispatchObservationId = observation.observationId,
             dispatchSequence = dispatchSequence,
+            isComplete = safeObservation.isComplete,
+            privacyFiltered = safeObservation.privacyFiltered,
         )
         snapshots[snapshotId] = snapshot
         order.remove(snapshotId)
@@ -275,42 +389,95 @@ object SideEffectIdentityFactory {
         screenshotFingerprint: String? = null,
     ): SideEffectIdentity? {
         val target = targetFor(action, observation)
+        if (action is AgentAction.ClickNode || action is AgentAction.ClickText ||
+            action is AgentAction.EnsureToggle || action is AgentAction.InputText ||
+            action is AgentAction.SubmitInput
+        ) {
+            // Never fall back to a package-only identity for an action whose
+            // meaning depends on a concrete control or input target.
+            if (target == null) return null
+        }
         val targetPackage = target?.packageName?.takeIf(String::isNotBlank) ?: observation.packageName.takeIf(String::isNotBlank)
         val targetKey = target?.let(::crossWindowKey)
+        val targetKind = target?.let { node ->
+            if (TargetResolver.isBooleanControl(node)) SideEffectTargetKind.BOOLEAN_CONTROL else SideEffectTargetKind.OTHER
+        } ?: SideEffectTargetKind.OTHER
         return when (action) {
-            is AgentAction.ClickNode -> SideEffectIdentity("CLICK_NODE", targetPackage, targetKey)
-            is AgentAction.ClickText -> SideEffectIdentity("CLICK_TEXT", targetPackage, targetKey)
+            is AgentAction.ClickNode -> SideEffectIdentity(
+                actionType = SideEffectFamily.ACTIVATE_CONTROL.name,
+                targetPackage = targetPackage,
+                targetCrossWindowStructureKey = targetKey,
+                family = SideEffectFamily.ACTIVATE_CONTROL,
+                targetKind = targetKind,
+                observedChecked = target?.checked,
+            )
+            is AgentAction.ClickText -> SideEffectIdentity(
+                actionType = SideEffectFamily.ACTIVATE_CONTROL.name,
+                targetPackage = targetPackage,
+                targetCrossWindowStructureKey = targetKey,
+                family = SideEffectFamily.ACTIVATE_CONTROL,
+                targetKind = targetKind,
+                observedChecked = target?.checked,
+            )
             is AgentAction.EnsureToggle -> SideEffectIdentity(
-                actionType = "ENSURE_TOGGLE",
+                actionType = SideEffectFamily.SET_BOOLEAN_CONTROL.name,
                 targetPackage = targetPackage,
                 targetCrossWindowStructureKey = targetKey,
                 desiredState = action.desired.toString(),
+                family = SideEffectFamily.SET_BOOLEAN_CONTROL,
+                targetKind = SideEffectTargetKind.BOOLEAN_CONTROL,
+                observedChecked = target?.checked,
             )
             is AgentAction.InputText -> SideEffectIdentity(
-                actionType = "INPUT_TEXT",
+                actionType = SideEffectFamily.INPUT_VALUE.name,
                 targetPackage = targetPackage,
                 targetCrossWindowStructureKey = targetKey,
                 irreversiblePayloadDigest = TraceSanitizer.digest("${action.mode}|${action.submit}|${action.text.length}|${TraceSanitizer.digest(action.text)}"),
-                desiredState = action.mode.name,
+                desiredState = "${action.mode.name}|submit=${action.submit}",
+                family = SideEffectFamily.INPUT_VALUE,
+                submitRequested = action.submit,
+                onceOnly = action.submit,
             )
-            is AgentAction.SubmitInput -> SideEffectIdentity("SUBMIT_INPUT", targetPackage, targetKey)
-            is AgentAction.LaunchApp -> SideEffectIdentity("LAUNCH_APP", action.packageName, null)
+            is AgentAction.SubmitInput -> SideEffectIdentity(
+                actionType = SideEffectFamily.SUBMIT_VALUE.name,
+                targetPackage = targetPackage,
+                targetCrossWindowStructureKey = targetKey,
+                family = SideEffectFamily.SUBMIT_VALUE,
+            )
+            is AgentAction.LaunchApp -> SideEffectIdentity(
+                actionType = SideEffectFamily.LAUNCH_APP.name,
+                targetPackage = action.packageName,
+                targetCrossWindowStructureKey = null,
+                family = SideEffectFamily.LAUNCH_APP,
+            )
             is AgentAction.TapPoint -> SideEffectIdentity(
-                actionType = "TAP_POINT",
+                actionType = SideEffectFamily.POINT_ACTIVATION.name,
                 targetPackage = targetPackage,
                 targetCrossWindowStructureKey = null,
                 irreversiblePayloadDigest = TraceSanitizer.digest(
                     "${screenshotFingerprint.orEmpty()}|${action.x / 24}|${action.y / 24}",
                 ),
+                family = SideEffectFamily.POINT_ACTIVATION,
             )
             is AgentAction.Swipe -> SideEffectIdentity(
-                "SWIPE",
-                targetPackage,
-                null,
+                actionType = SideEffectFamily.SCROLL.name,
+                targetPackage = targetPackage,
+                targetCrossWindowStructureKey = null,
                 irreversiblePayloadDigest = TraceSanitizer.digest(action.direction.trim().lowercase()),
+                family = SideEffectFamily.SCROLL,
             )
-            AgentAction.Back -> SideEffectIdentity("BACK", targetPackage, null)
-            AgentAction.Home -> SideEffectIdentity("HOME", targetPackage, null)
+            AgentAction.Back -> SideEffectIdentity(
+                actionType = SideEffectFamily.NAVIGATE_BACK.name,
+                targetPackage = targetPackage,
+                targetCrossWindowStructureKey = null,
+                family = SideEffectFamily.NAVIGATE_BACK,
+            )
+            AgentAction.Home -> SideEffectIdentity(
+                actionType = SideEffectFamily.NAVIGATE_HOME.name,
+                targetPackage = targetPackage,
+                targetCrossWindowStructureKey = null,
+                family = SideEffectFamily.NAVIGATE_HOME,
+            )
             is AgentAction.BindPredicate,
             is AgentAction.Wait,
             is AgentAction.Finish,
@@ -319,17 +486,7 @@ object SideEffectIdentityFactory {
         }
     }
 
-    private fun targetFor(action: AgentAction, observation: Observation): UiNodeSnapshot? = when (action) {
-        is AgentAction.ClickNode -> NodeSelector.resolve(observation, action.nodeId, action.selector)
-        is AgentAction.ClickText -> observation.nodes.filter { node ->
-            node.visible && node.enabled && !node.editable &&
-                (node.text.equals(action.text, true) || node.description.equals(action.text, true))
-        }.singleOrNull()
-        is AgentAction.EnsureToggle -> NodeSelector.resolve(observation, action.nodeId, action.selector)
-        is AgentAction.InputText -> NodeSelector.resolve(observation, action.nodeId, action.target)
-        is AgentAction.SubmitInput -> NodeSelector.resolve(observation, action.nodeId, action.target)
-        else -> null
-    }
+    private fun targetFor(action: AgentAction, observation: Observation): UiNodeSnapshot? = TargetResolver.resolve(action, observation)
 
     private fun crossWindowKey(node: UiNodeSnapshot): String = node.crossWindowStructureKey.ifBlank {
         NodeIdentityKeys.crossWindowStructureKey(

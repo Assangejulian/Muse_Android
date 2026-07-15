@@ -317,7 +317,7 @@ class DeepSeekClient(
             predicateId is required, non-empty, and must match ^[A-Za-z0-9_-]+$; it is unique across the entire plan and must be preserved when revising a plan with unchanged predicate semantics.
             Predicate IDs are stable milestone-local contracts; the runtime may complete binding only from a fresh observation.
             For target predicates emit targetHint and leave target unbound unless a stable target is explicitly known from user input.
-            PACKAGE_FOREGROUND must include targetPackage. TOGGLE_STATE must include expectedChecked. Every target predicate is bound by the runtime from a unique current node before its action; an unbound predicate can never be proven.
+            PACKAGE_FOREGROUND must include targetPackage. TOGGLE_STATE must include expectedChecked. A targetHint-only predicate is UNKNOWN until the runtime binds one unique live node; an explicit selector may be evaluated only when it resolves uniquely.
             Never return a semantic-only milestone. SEMANTIC_CLAIM is only auxiliary evidence alongside a deterministic predicate.
             Use literal values only when the user explicitly supplied them or the current observation supplies them.
             Preserve IDs and already proven milestones when revising a plan; add explicit repair milestones for gaps.

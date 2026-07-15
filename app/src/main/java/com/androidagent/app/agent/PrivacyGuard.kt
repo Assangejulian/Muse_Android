@@ -37,8 +37,8 @@ object PrivacyGuard {
         )
     }
 
-    fun sanitize(observation: Observation): Observation = observation.copy(
-        nodes = observation.nodes.map { node ->
+    fun sanitize(observation: Observation): Observation {
+        val sanitizedNodes = observation.nodes.map { node ->
             if (node.password) {
                 node.copy(text = "", description = "[redacted-password]")
             } else {
@@ -47,8 +47,12 @@ object PrivacyGuard {
                     description = redact(node.description, node.text),
                 )
             }
-        },
-    )
+        }
+        val privacyFiltered = observation.privacyFiltered || observation.nodes.zip(sanitizedNodes).any { (before, after) ->
+            before.password || before.text != after.text || before.description != after.description
+        }
+        return observation.copy(nodes = sanitizedNodes, privacyFiltered = privacyFiltered)
+    }
 
     private fun redact(value: String, context: String = ""): String = value
         .replace(email, "[redacted-email]")

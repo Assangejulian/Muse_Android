@@ -479,6 +479,10 @@ data class Observation(
     val windowIds: Set<Int> = nodes.mapNotNull { it.windowId }.toSet(),
     /** Optional package ownership for windows that have no emitted nodes. */
     val windowPackages: Map<Int, String> = emptyMap(),
+    /** False when the accessibility snapshot is known to be partial. */
+    val isComplete: Boolean = true,
+    /** True when privacy redaction removed or transformed observable values. */
+    val privacyFiltered: Boolean = false,
 ) {
     val observationId: String get() = stateFingerprint()
 
@@ -558,6 +562,48 @@ data class Observation(
         .trim()
         .replace(Regex("\\b\\d{1,4}([:/.-]\\d{1,4}){1,3}\\b"), "<dynamic>")
         .take(120)
+}
+
+/** Shared action target resolution used by guards, bindings, and side-effect identity. */
+object TargetResolver {
+    fun resolve(action: AgentAction, observation: Observation): UiNodeSnapshot? = when (action) {
+        is AgentAction.ClickText -> clickableTextMatches(observation, action.text).singleOrNull()
+        is AgentAction.ClickNode -> NodeSelector.resolve(observation, action.nodeId, action.selector)
+        is AgentAction.EnsureToggle -> NodeSelector.resolve(observation, action.nodeId, action.selector)
+        is AgentAction.InputText -> resolveEditable(observation, action.nodeId, action.target)
+        is AgentAction.SubmitInput -> resolveEditable(observation, action.nodeId, action.target)
+        is AgentAction.BindPredicate -> NodeSelector.resolve(observation, action.nodeId, action.selector)
+        else -> null
+    }
+
+    fun resolveEditable(
+        observation: Observation,
+        nodeId: Int? = null,
+        selector: ElementSelector? = null,
+    ): UiNodeSnapshot? {
+        if (nodeId != null || selector != null) {
+            return NodeSelector.resolve(observation, nodeId, selector)?.takeIf(::isEditableCandidate)
+        }
+        val candidates = editableCandidates(observation)
+        val focused = candidates.filter { it.focused }
+        return focused.singleOrNull() ?: candidates.singleOrNull()
+    }
+
+    fun editableCandidates(observation: Observation): List<UiNodeSnapshot> = observation.nodes.filter(::isEditableCandidate)
+
+    fun clickableTextMatches(observation: Observation, text: String): List<UiNodeSnapshot> = observation.nodes.filter { node ->
+        node.visible && node.enabled && !node.editable &&
+            (node.text.equals(text, true) || node.description.equals(text, true))
+    }
+
+    fun isBooleanControl(node: UiNodeSnapshot): Boolean {
+        val className = node.className.lowercase()
+        return node.checked != null || className.contains("switch") ||
+            className.contains("checkbox") || className.contains("togglebutton") || className.contains("toggle")
+    }
+
+    private fun isEditableCandidate(node: UiNodeSnapshot): Boolean =
+        node.visible && node.enabled && node.editable && !node.isInputMethod
 }
 
 sealed interface AgentAction {

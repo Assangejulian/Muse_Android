@@ -66,7 +66,112 @@ class RunScopedSideEffectLedgerTest {
         ledger.markFailed(identity)
         assertTrue(ledger.check(identity).allowed)
         ledger.markConfirmed(identity, screen.observationId, dispatchSequence = 2)
+        assertTrue(ledger.check(identity).allowed)
+    }
+
+    @Test
+    fun confirmedScrollCanRepeatAndCanBeDispatchedAgain() {
+        val ledger = RunScopedSideEffectLedger("run-1")
+        val screen = observation(UiNodeSnapshot(1, "", "", "List", false, false, "0,0,100,400", packageName = "primary.app"))
+        val identity = SideEffectIdentityFactory.create(AgentAction.Swipe("up"), screen)!!
+        assertTrue(ledger.markConfirmed(identity, screen.observationId, dispatchSequence = 1))
+        assertTrue(ledger.check(identity).allowed)
+        assertTrue(ledger.markUnknown(identity, screen.observationId, dispatchSequence = 2))
         assertFalse(ledger.check(identity).allowed)
+    }
+
+    @Test
+    fun confirmedBackCanRepeatAfterNavigation() {
+        val ledger = RunScopedSideEffectLedger("run-1")
+        val first = observation(UiNodeSnapshot(1, "page one", "", "TextView", false, false, "0,0,100,40", packageName = "primary.app"))
+        val second = observation(UiNodeSnapshot(2, "page two", "", "TextView", false, false, "0,0,100,40", packageName = "primary.app"))
+        val identity = SideEffectIdentityFactory.create(AgentAction.Back, first)!!
+        val laterIdentity = SideEffectIdentityFactory.create(AgentAction.Back, second)!!
+        assertTrue(ledger.markConfirmed(identity, first.observationId, dispatchSequence = 1))
+        assertTrue(ledger.check(laterIdentity).allowed)
+    }
+
+    @Test
+    fun confirmedClickIsNotARunWideHardLock() {
+        val ledger = RunScopedSideEffectLedger("run-1")
+        val screen = observation(UiNodeSnapshot(1, "Next", "", "Button", true, false, "0,0,100,40", viewId = "primary:id/next", packageName = "primary.app"))
+        val identity = SideEffectIdentityFactory.create(AgentAction.ClickNode(1, predicateId = "m1-p1"), screen)!!
+        assertTrue(ledger.markConfirmed(identity, screen.observationId, dispatchSequence = 1))
+        val later = SideEffectIdentityFactory.create(AgentAction.ClickNode(1, predicateId = "repair-p1"), screen)!!
+        assertTrue(ledger.check(later).allowed)
+    }
+
+    @Test
+    fun clickTextAndClickNodeShareActivationIdentityAcrossReplan() {
+        val screen = observation(UiNodeSnapshot(7, "Next", "", "Button", true, false, "0,0,100,40", viewId = "primary:id/next", treePath = listOf(0, 1), packageName = "primary.app"))
+        val textIdentity = SideEffectIdentityFactory.create(AgentAction.ClickText("Next"), screen)!!
+        val nodeIdentity = SideEffectIdentityFactory.create(AgentAction.ClickNode(7, selector = NodeSelector.from(screen.nodes.single())), screen)!!
+        assertEquals(SideEffectFamily.ACTIVATE_CONTROL, textIdentity.family)
+        assertEquals(textIdentity.targetCrossWindowStructureKey, nodeIdentity.targetCrossWindowStructureKey)
+        assertEquals(textIdentity, nodeIdentity)
+        val ledger = RunScopedSideEffectLedger("run-1")
+        assertTrue(ledger.markUnknown(textIdentity, screen.observationId, dispatchSequence = 1))
+        assertFalse(ledger.check(nodeIdentity).allowed)
+    }
+
+    @Test
+    fun unknownClickNodeBlocksClickTextOnTheSameBooleanControl() {
+        val screen = observation(UiNodeSnapshot(7, "Enable", "", "android.widget.Switch", true, false, "0,0,100,40", checked = false, viewId = "primary:id/enable", packageName = "primary.app"))
+        val nodeIdentity = SideEffectIdentityFactory.create(AgentAction.ClickNode(7), screen)!!
+        val textIdentity = SideEffectIdentityFactory.create(AgentAction.ClickText("Enable"), screen)!!
+        val ledger = RunScopedSideEffectLedger("run-1")
+        assertTrue(ledger.markUnknown(nodeIdentity, screen.observationId, dispatchSequence = 1))
+        assertFalse(ledger.check(textIdentity).allowed)
+    }
+
+    @Test
+    fun unknownEnsureToggleBlocksPlainClickButDifferentButtonIsIndependent() {
+        val target = UiNodeSnapshot(1, "Target", "", "Switch", true, false, "0,0,100,40", checked = false, viewId = "primary:id/target", packageName = "primary.app")
+        val other = UiNodeSnapshot(2, "Other", "", "Button", true, false, "0,50,100,90", viewId = "primary:id/other", packageName = "primary.app")
+        val screen = observation(target, windowId = 1).copy(nodes = listOf(target, other))
+        val toggle = SideEffectIdentityFactory.create(AgentAction.EnsureToggle(1, true), screen)!!
+        val clickTarget = SideEffectIdentityFactory.create(AgentAction.ClickNode(1), screen)!!
+        val clickOther = SideEffectIdentityFactory.create(AgentAction.ClickNode(2), screen)!!
+        val ledger = RunScopedSideEffectLedger("run-1")
+        assertTrue(ledger.markUnknown(toggle, screen.observationId, dispatchSequence = 1))
+        assertFalse(ledger.check(clickTarget).allowed)
+        assertTrue(ledger.check(clickOther).allowed)
+    }
+
+    @Test
+    fun submitInputIsAssociatedWithInputTextSubmitRequest() {
+        val node = UiNodeSnapshot(3, "", "", "EditText", false, true, "0,0,200,50", focused = true, viewId = "primary:id/query", packageName = "primary.app")
+        val screen = observation(node)
+        val input = SideEffectIdentityFactory.create(AgentAction.InputText("query", nodeId = 3, submit = true), screen)!!
+        val submit = SideEffectIdentityFactory.create(AgentAction.SubmitInput(nodeId = 3), screen)!!
+        val ledger = RunScopedSideEffectLedger("run-1")
+        assertTrue(ledger.markUnknown(input, screen.observationId, dispatchSequence = 1))
+        assertFalse(ledger.check(submit).allowed)
+    }
+
+    @Test
+    fun confirmedSubmitOnInputIsTheOnlyExplicitOnceOnlyAssociation() {
+        val node = UiNodeSnapshot(3, "", "", "EditText", false, true, "0,0,200,50", focused = true, viewId = "primary:id/query", packageName = "primary.app")
+        val screen = observation(node)
+        val input = SideEffectIdentityFactory.create(AgentAction.InputText("query", nodeId = 3, submit = true), screen)!!
+        val submit = SideEffectIdentityFactory.create(AgentAction.SubmitInput(nodeId = 3), screen)!!
+        val ledger = RunScopedSideEffectLedger("run-1")
+        assertTrue(ledger.markConfirmed(input, screen.observationId, dispatchSequence = 1))
+        assertFalse(ledger.check(submit).allowed)
+        val ordinaryInput = SideEffectIdentityFactory.create(AgentAction.InputText("next", nodeId = 3, submit = false), screen)!!
+        assertTrue(ledger.check(ordinaryInput).allowed)
+    }
+
+    @Test
+    fun ambiguousEditableTargetCannotProduceIdentity() {
+        val screen = Observation(
+            "primary.app",
+            listOf(
+                UiNodeSnapshot(1, "", "", "EditText", false, true, "0,0,200,50", packageName = "primary.app"),
+                UiNodeSnapshot(2, "", "", "EditText", false, true, "0,60,200,110", packageName = "primary.app"),
+            ),
+        )
+        assertEquals(null, SideEffectIdentityFactory.create(AgentAction.InputText("value"), screen))
     }
 
     @Test
