@@ -195,6 +195,31 @@ class ResolvedActionTargetTest {
     }
 
     @Test
+    fun disabledClickableParentPreventsClickingAnEnabledGrandparent() {
+        val grandparent = labelNode(1, "", listOf(0)).copy(
+            className = "android.widget.LinearLayout",
+            clickable = true,
+            enabled = true,
+            viewId = "primary:id/grandparent",
+        )
+        val disabledParent = labelNode(2, "", listOf(0, 0)).copy(
+            className = "android.widget.LinearLayout",
+            clickable = true,
+            enabled = false,
+            viewId = "primary:id/disabled_parent",
+        )
+        val child = labelNode(3, "Target", listOf(0, 0, 0))
+
+        val resolution = TargetResolver.resolveActionTarget(
+            AgentAction.ClickText("Target"),
+            Observation("primary.app", listOf(grandparent, disabledParent, child)),
+        )
+
+        assertNull(resolution.target)
+        assertEquals(ActionTargetFailure.NOT_ACTIONABLE, resolution.failure)
+    }
+
+    @Test
     fun mutatingClickWithoutIdentityNeverReachesDriverAndOcrIsNotADispatchMode() = runBlocking {
         val milestone = TaskMilestone(
             "m1",

@@ -53,6 +53,56 @@ class HistoricalPredicateTruthTest {
     }
 
     @Test
+    fun uniqueViewIdWithChangedTreePathIsUnknown() {
+        val predicate = presentPredicate(targetHint = "Success")
+        val beforeNode = node(1, "Success", "primary:id/success", "before-key", listOf(0, 1))
+        val afterNode = node(2, "Success", "primary:id/success", "after-key", listOf(1, 3))
+
+        assertEquals(
+            PredicateTruth.UNKNOWN,
+            historical(predicate, snapshot(Observation("primary.app", listOf(beforeNode))), bind(predicate, afterNode)),
+        )
+    }
+
+    @Test
+    fun uniqueViewIdAcrossWindowsIsUnknown() {
+        val predicate = presentPredicate(targetHint = "Success")
+        val beforeNode = node(
+            1,
+            "Success",
+            "primary:id/success",
+            "success-key",
+            listOf(0, 1),
+            windowId = 8,
+        )
+        val afterNode = node(
+            2,
+            "Success",
+            "primary:id/success",
+            "success-key",
+            listOf(0, 1),
+            windowId = 9,
+        )
+
+        assertEquals(
+            PredicateTruth.UNKNOWN,
+            historical(predicate, snapshot(Observation("primary.app", listOf(beforeNode))), bind(predicate, afterNode)),
+        )
+    }
+
+    @Test
+    fun completeSnapshotWithNoStrongIdentityEvidenceIsRefuted() {
+        val predicate = presentPredicate(targetHint = "Success")
+        val unrelated = node(9, "Other", "primary:id/other", "other-key", listOf(0, 0))
+        val target = node(1, "Success", "primary:id/success", "success-key", listOf(0, 1))
+
+        assertEquals(
+            PredicateTruth.REFUTED,
+            historical(predicate, snapshot(Observation("primary.app", listOf(unrelated))), bind(predicate, target)),
+        )
+    }
+
+    @Test
     fun targetHintOnlyPrivacyFilteredAndIncompleteSnapshotsRemainUnknown() {
         val hintOnly = presentPredicate(targetHint = "Success")
         assertEquals(PredicateTruth.UNKNOWN, historical(hintOnly, snapshot(Observation("primary.app", emptyList())), null))
@@ -271,6 +321,7 @@ class HistoricalPredicateTruthTest {
         viewId: String,
         structureKey: String,
         path: List<Int>?,
+        windowId: Int = 9,
     ) = UiNodeSnapshot(
         id = id,
         text = text,
@@ -283,7 +334,7 @@ class HistoricalPredicateTruthTest {
         viewId = viewId,
         treePath = path,
         packageName = "primary.app",
-        windowId = 9,
+        windowId = windowId,
     )
 
     private data class BoundWindowFixture(

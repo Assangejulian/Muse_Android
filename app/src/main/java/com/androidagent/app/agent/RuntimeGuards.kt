@@ -2,6 +2,13 @@ package com.androidagent.app.agent
 
 enum class PredicateTruth { PROVEN, REFUTED, UNKNOWN }
 
+internal sealed interface HistoricalIdentityResolution {
+    data class Found(val node: UiNodeSnapshot) : HistoricalIdentityResolution
+    data object Missing : HistoricalIdentityResolution
+    data object Ambiguous : HistoricalIdentityResolution
+    data object IdentityInvalidated : HistoricalIdentityResolution
+}
+
 data class PredicateEvidence(
     val proven: Boolean,
     val details: List<String>,
@@ -873,8 +880,13 @@ object MilestoneEvaluator {
 
         val observation = preDispatchSnapshot.toObservation()
         val binding = postActionBinding?.takeIf { it.predicateId == predicateId }
+        val historicalIdentity = binding?.let { resolveHistoricalIdentity(preDispatchSnapshot, it.identity) }
+        if (historicalIdentity == HistoricalIdentityResolution.Ambiguous ||
+            historicalIdentity == HistoricalIdentityResolution.IdentityInvalidated
+        ) return PredicateTruth.UNKNOWN
         val candidates = when {
-            binding != null -> historicalIdentityMatches(preDispatchSnapshot, binding.identity)
+            historicalIdentity is HistoricalIdentityResolution.Found -> listOf(historicalIdentity.node)
+            historicalIdentity == HistoricalIdentityResolution.Missing -> emptyList()
             predicate.target != null -> NodeSelector.matchingNodes(observation, predicate.target)
             else -> emptyList()
         }
@@ -995,48 +1007,96 @@ object MilestoneEvaluator {
         }
     }
 
-    private fun historicalIdentityMatches(
+    private fun resolveHistoricalIdentity(
         snapshot: PreDispatchEvidenceSnapshot,
         identity: BoundElementIdentity,
-    ): List<UiNodeSnapshot> {
-        var candidates = snapshot.nodes.asSequence()
-            .filter { identity.packageName.isBlank() || it.packageName == identity.packageName }
-            .toList()
+    ): HistoricalIdentityResolution {
+        if (identity.packageName.isBlank()) return HistoricalIdentityResolution.IdentityInvalidated
+        val packageObservable = snapshot.packageName == identity.packageName ||
+            snapshot.windowPackages.values.any { it == identity.packageName }
+        if (!packageObservable) return HistoricalIdentityResolution.IdentityInvalidated
+
+        val packageNodes = snapshot.nodes.filter { it.packageName == identity.packageName }
+        if (packageNodes.isEmpty()) return HistoricalIdentityResolution.Missing
+
         identity.viewIdResourceName?.let { viewId ->
-            candidates = candidates.filter { it.viewIdResourceName == viewId }
-        } ?: identity.crossWindowStructureKey?.let { key ->
-            candidates = candidates.filter { node -> historicalCrossWindowKey(node) == key }
+            val matches = packageNodes.filter { it.viewIdResourceName == viewId }
+            return when {
+                matches.size > 1 -> HistoricalIdentityResolution.Ambiguous
+                matches.size == 1 -> validateHistoricalCandidate(matches.single(), identity)
+                else -> historicalMissingOrInvalidated(packageNodes, identity)
+            }
         }
-        if (identity.className.isNotBlank()) {
-            candidates = candidates.filter { it.className == identity.className }
+
+        val structureKey = identity.crossWindowStructureKey
+            ?: return HistoricalIdentityResolution.IdentityInvalidated
+        val matches = packageNodes.filter { node ->
+            historicalCrossWindowKey(node) == structureKey &&
+                (identity.className.isBlank() || node.className == identity.className)
         }
-        identity.treePath?.let { path ->
-            candidates = candidates.filter { it.treePath == path }
-        }
-        return candidates.map { node ->
-            UiNodeSnapshot(
-                id = node.id,
-                text = node.safeText.orEmpty(),
-                description = node.safeDescription.orEmpty(),
-                className = node.className,
-                clickable = false,
-                editable = node.editable,
-                bounds = node.bounds.orEmpty(),
-                withinWindowStableKey = node.withinWindowStableKey.orEmpty(),
-                crossWindowStructureKey = node.crossWindowStructureKey.orEmpty(),
-                viewId = node.viewIdResourceName.orEmpty(),
-                treePath = node.treePath,
-                enabled = node.enabled,
-                focused = node.focused,
-                checked = node.checked,
-                selected = node.selected,
-                packageName = node.packageName,
-                visible = node.visible,
-                password = node.password,
-                windowId = node.windowId,
-            )
+        return when {
+            matches.size > 1 -> HistoricalIdentityResolution.Ambiguous
+            matches.size == 1 -> validateHistoricalCandidate(matches.single(), identity)
+            else -> historicalMissingOrInvalidated(packageNodes, identity)
         }
     }
+
+    private fun historicalMissingOrInvalidated(
+        packageNodes: List<PreDispatchNodeSnapshot>,
+        identity: BoundElementIdentity,
+    ): HistoricalIdentityResolution {
+        val emptyHash = TraceSanitizer.digest("")
+        val possibleRelocations = packageNodes.filter { node ->
+            (identity.className.isBlank() || node.className == identity.className) &&
+                ((identity.treePath != null && node.treePath == identity.treePath) ||
+                    (identity.initialTextHash != emptyHash && node.textHash == identity.initialTextHash) ||
+                    (identity.initialDescriptionHash != emptyHash && node.descriptionHash == identity.initialDescriptionHash))
+        }
+        return when {
+            possibleRelocations.size > 1 -> HistoricalIdentityResolution.Ambiguous
+            possibleRelocations.size == 1 -> HistoricalIdentityResolution.IdentityInvalidated
+            else -> HistoricalIdentityResolution.Missing
+        }
+    }
+
+    private fun validateHistoricalCandidate(
+        node: PreDispatchNodeSnapshot,
+        identity: BoundElementIdentity,
+    ): HistoricalIdentityResolution {
+        val classMatches = identity.className.isBlank() || node.className == identity.className
+        val windowMatches = identity.windowId == null || node.windowId == identity.windowId
+        val treePathMatches = identity.treePath == null || node.treePath == identity.treePath
+        val structureMatches = identity.crossWindowStructureKey == null ||
+            historicalCrossWindowKey(node) == identity.crossWindowStructureKey
+        val withinWindowMatches = identity.withinWindowStableKey == null ||
+            node.withinWindowStableKey == identity.withinWindowStableKey
+        if (!classMatches || !windowMatches || !treePathMatches || !structureMatches || !withinWindowMatches) {
+            return HistoricalIdentityResolution.IdentityInvalidated
+        }
+        return HistoricalIdentityResolution.Found(node.toUiNodeSnapshot())
+    }
+
+    private fun PreDispatchNodeSnapshot.toUiNodeSnapshot(): UiNodeSnapshot = UiNodeSnapshot(
+        id = id,
+        text = safeText.orEmpty(),
+        description = safeDescription.orEmpty(),
+        className = className,
+        clickable = false,
+        editable = editable,
+        bounds = bounds.orEmpty(),
+        withinWindowStableKey = withinWindowStableKey.orEmpty(),
+        crossWindowStructureKey = crossWindowStructureKey.orEmpty(),
+        viewId = viewIdResourceName.orEmpty(),
+        treePath = treePath,
+        enabled = enabled,
+        focused = focused,
+        checked = checked,
+        selected = selected,
+        packageName = packageName,
+        visible = visible,
+        password = password,
+        windowId = windowId,
+    )
 
     private fun historicalCrossWindowKey(node: PreDispatchNodeSnapshot): String =
         node.crossWindowStructureKey ?: NodeIdentityKeys.crossWindowStructureKey(
@@ -1476,18 +1536,24 @@ class RunLedger(private var plan: TaskPlan) {
         sideEffectIdentity: SideEffectIdentity?,
     ): String {
         sideEffectIdentity?.let { identity ->
-            val target = identity.targetCrossWindowStructureKey ?: "no-target"
-            val payload = listOfNotNull(
-                identity.irreversiblePayloadDigest,
-                identity.desiredState,
-                identity.inputGeneration?.let { "generation=$it" },
-            ).joinToString(":")
-            return "${identity.family.name}|$target|$payload"
+            return listOf(
+                "family=${identity.family.name}",
+                "package=${identity.targetPackage ?: "no-package"}",
+                "target=${identity.targetCrossWindowStructureKey ?: "no-target"}",
+                "payload=${identity.irreversiblePayloadDigest.orEmpty()}",
+                "desired=${identity.desiredState.orEmpty()}",
+                "generation=${identity.inputGeneration?.toString().orEmpty()}",
+            ).joinToString("|")
         }
         val target = resolvedTarget?.effectiveActionNode ?: when (action) {
             is AgentAction.BindPredicate -> TargetResolver.resolve(action, observation)
             else -> TargetResolver.resolveActionTarget(action, observation).target?.effectiveActionNode
         }
+        val targetPackage = resolvedTarget?.targetPackage?.takeIf(String::isNotBlank)
+            ?: target?.packageName?.takeIf(String::isNotBlank)
+            ?: (action as? AgentAction.LaunchApp)?.packageName
+            ?: observation.packageName.takeIf(String::isNotBlank)
+            ?: "no-package"
         val targetKey = target?.let { node ->
             TargetResolver.crossWindowStructureKey(node)
         } ?: when (action) {
@@ -1508,6 +1574,7 @@ class RunLedger(private var plan: TaskPlan) {
             is AgentAction.Fail -> action.reason.hashCode().toString()
             is AgentAction.TapPoint, AgentAction.Back, AgentAction.Home -> ""
         }
+        val desiredState = (action as? AgentAction.EnsureToggle)?.desired?.toString().orEmpty()
         val actionFamily = when (action) {
             is AgentAction.ClickText, is AgentAction.ClickNode -> SideEffectFamily.ACTIVATE_CONTROL.name
             is AgentAction.EnsureToggle -> SideEffectFamily.SET_BOOLEAN_CONTROL.name
@@ -1515,7 +1582,14 @@ class RunLedger(private var plan: TaskPlan) {
             is AgentAction.SubmitInput -> SideEffectFamily.SUBMIT_VALUE.name
             else -> TraceSanitizer.actionType(action)
         }
-        return "$actionFamily|$targetKey|$payload"
+        return listOf(
+            "family=$actionFamily",
+            "package=$targetPackage",
+            "target=$targetKey",
+            "payload=$payload",
+            "desired=$desiredState",
+            "generation=",
+        ).joinToString("|")
     }
 
     private companion object { const val MAX_ATTEMPTS_PER_SCREEN = 2 }

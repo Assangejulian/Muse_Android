@@ -353,7 +353,7 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         }
         events += RuntimeStepEngineEvent("execute", TraceSanitizer.actionType(action))
         val execution = driver.executeDetailed(action, request.executionObservation, preflight.resolvedTarget)
-        if (!execution.success) {
+        if (!execution.mutationAccepted) {
             request.preDispatchSnapshots.remove(preDispatchSnapshot?.snapshotId)
             events += RuntimeStepEngineEvent("execute_failed", execution.status)
             return recoverOnce(
@@ -370,6 +370,9 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
                 preflight.resolvedTarget,
                 inputGeneration,
             )
+        }
+        if (execution.partialMutation) {
+            events += RuntimeStepEngineEvent("partial_mutation", execution.status)
         }
         if (sideEffectIdentity != null && !request.sideEffects.markUnknown(
                 identity = sideEffectIdentity,
@@ -410,7 +413,15 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         events += RuntimeStepEngineEvent("commit", "MUTATING_ACTION")
         request.evidenceCounters.successfulMutatingActions++
 
-        val settled = driver.settle(request.executionObservation, action)
+        val rawSettled = driver.settle(request.executionObservation, action)
+        val settled = if (execution.partialMutation) {
+            rawSettled.copy(
+                state = DispatchResultState.RESULT_UNKNOWN,
+                detail = "partial mutation (${execution.status}); ${rawSettled.detail}",
+            )
+        } else {
+            rawSettled
+        }
         events += RuntimeStepEngineEvent("wait", "${settled.state}:${settled.detail}")
         return if (settled.state != DispatchResultState.CONFIRMED) {
             request.bindings.markResultUnknown(preparation, actionKey)

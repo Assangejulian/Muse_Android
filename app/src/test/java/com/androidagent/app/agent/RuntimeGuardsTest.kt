@@ -3,6 +3,7 @@ package com.androidagent.app.agent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -62,6 +63,47 @@ class RuntimeGuardsTest {
         assertNull(ledger.blockRepeated(action, screen))
         ledger.recordDispatch(action, screen)
         assertNotNull(ledger.blockRepeated(action, screen))
+    }
+
+    @Test
+    fun unknownActionKeysAreScopedByTargetPackage() {
+        val screen = Observation("launcher.app", emptyList())
+        val ledger = RunLedger(plan)
+        val launchA = AgentAction.LaunchApp("package.a")
+        val launchB = AgentAction.LaunchApp("package.b")
+        val launchIdentityA = SideEffectIdentityFactory.create(launchA, screen)!!
+        val launchIdentityB = SideEffectIdentityFactory.create(launchB, screen)!!
+
+        assertNotEquals(
+            ledger.actionKey(launchA, screen, sideEffectIdentity = launchIdentityA),
+            ledger.actionKey(launchB, screen, sideEffectIdentity = launchIdentityB),
+        )
+        ledger.recordDispatch(
+            launchA,
+            screen,
+            DispatchResultState.RESULT_UNKNOWN,
+            sideEffectIdentity = launchIdentityA,
+        )
+        assertNull(ledger.blockRepeated(launchB, screen, sideEffectIdentity = launchIdentityB))
+
+        listOf<AgentAction>(AgentAction.Back, AgentAction.Home).forEach { navigation ->
+            val packageALedger = RunLedger(plan)
+            val screenA = Observation("package.a", emptyList())
+            val screenB = Observation("package.b", emptyList())
+            val identityA = SideEffectIdentityFactory.create(navigation, screenA)!!
+            val identityB = SideEffectIdentityFactory.create(navigation, screenB)!!
+            assertNotEquals(
+                packageALedger.actionKey(navigation, screenA, sideEffectIdentity = identityA),
+                packageALedger.actionKey(navigation, screenB, sideEffectIdentity = identityB),
+            )
+            packageALedger.recordDispatch(
+                navigation,
+                screenA,
+                DispatchResultState.RESULT_UNKNOWN,
+                sideEffectIdentity = identityA,
+            )
+            assertNull(packageALedger.blockRepeated(navigation, screenB, sideEffectIdentity = identityB))
+        }
     }
 
     @Test

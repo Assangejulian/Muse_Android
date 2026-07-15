@@ -162,16 +162,114 @@ class InputTargetGenerationTest {
         assertTrue(unknownBindings.all().isNotEmpty())
     }
 
+    @Test
+    fun replaceSubmitFailureCommitsPartialMutation() = runBlocking {
+        assertPartialMutationCommitted(
+            screen = inputScreen(initialText = "old"),
+            action = AgentAction.InputText(
+                "replacement",
+                nodeId = 1,
+                mode = InputMode.REPLACE,
+                submit = true,
+                predicateId = "input-p1",
+            ),
+            expectedValue = "replacement",
+        )
+    }
+
+    @Test
+    fun appendSubmitFailureCommitsPartialMutation() = runBlocking {
+        assertPartialMutationCommitted(
+            screen = inputScreen(initialText = "base"),
+            action = AgentAction.InputText(
+                " tail",
+                nodeId = 1,
+                mode = InputMode.APPEND,
+                submit = true,
+                predicateId = "input-p1",
+            ),
+            expectedValue = "base tail",
+        )
+    }
+
+    @Test
+    fun clearSubmitFailureCommitsPartialMutation() = runBlocking {
+        assertPartialMutationCommitted(
+            screen = inputScreen(initialText = "value"),
+            action = AgentAction.InputText(
+                "",
+                nodeId = 1,
+                mode = InputMode.CLEAR,
+                submit = true,
+                predicateId = "input-p1",
+            ),
+            expectedValue = "",
+        )
+    }
+
+    @Test
+    fun appendRetryAfterSubmitFailureIsBlockedBeforeAndroidDispatch() = runBlocking {
+        val screen = inputScreen(initialText = "base")
+        val action = AgentAction.InputText(
+            " tail",
+            nodeId = 1,
+            mode = InputMode.APPEND,
+            submit = true,
+            predicateId = "input-p1",
+        )
+        val target = TargetResolver.resolveActionTarget(action, screen).target!!
+        val sideEffects = RunScopedSideEffectLedger("run-partial-append")
+        val snapshots = PreDispatchEvidenceStore()
+        val bindings = PredicateBindingStore()
+        val driver = PartialInputDriver()
+        val engine = RuntimeStepEngine(driver)
+
+        engine.execute(request(screen, sideEffects, snapshots, bindings, action, "base tail"))
+        val retry = engine.execute(request(screen, sideEffects, snapshots, bindings, action, "base tail"))
+
+        assertEquals(1, driver.executeCount)
+        assertEquals(1, sideEffects.currentInputGeneration(target))
+        assertEquals(SideEffectResultState.UNKNOWN_SIDE_EFFECT, sideEffects.records().single().state)
+        assertTrue(retry.reason.contains("unknown", ignoreCase = true))
+    }
+
+    private suspend fun assertPartialMutationCommitted(
+        screen: Observation,
+        action: AgentAction.InputText,
+        expectedValue: String,
+    ) {
+        val target = TargetResolver.resolveActionTarget(action, screen).target!!
+        val sideEffects = RunScopedSideEffectLedger("run-partial-${action.mode.name.lowercase()}")
+        val snapshots = PreDispatchEvidenceStore()
+        val bindings = PredicateBindingStore()
+        val driver = PartialInputDriver()
+
+        val result = RuntimeStepEngine(driver).execute(
+            request(screen, sideEffects, snapshots, bindings, action, expectedValue),
+        )
+
+        assertEquals(1, driver.executeCount)
+        assertTrue(result.execution?.partialMutation == true)
+        assertEquals(DispatchResultState.RESULT_UNKNOWN, result.dispatchResultState)
+        assertTrue(result.events.any { it.phase == "partial_mutation" })
+        assertEquals(1, sideEffects.currentInputGeneration(target))
+        assertEquals(SideEffectResultState.UNKNOWN_SIDE_EFFECT, sideEffects.records().single().state)
+        assertTrue(bindings.all().isNotEmpty())
+        assertEquals(1, snapshots.all().size)
+    }
+
     private fun request(
         screen: Observation,
         sideEffects: RunScopedSideEffectLedger,
         snapshots: PreDispatchEvidenceStore,
         bindings: PredicateBindingStore,
+        action: AgentAction.InputText = AgentAction.InputText("value", nodeId = 1, predicateId = "input-p1"),
+        expectedValue: String = "value",
     ): RuntimeStepRequest {
         val predicate = UiPredicate(
             UiPredicateKind.EDITABLE_EQUALS,
             predicateId = "input-p1",
-            literal = "value",
+            literal = expectedValue,
             target = ElementSelector(packageName = "primary.app", viewIdResourceName = "primary:id/first"),
             description = "input contains value",
         )
@@ -179,7 +277,7 @@ class InputTargetGenerationTest {
         val plan = TaskPlan("input", "primary.app", GoalContext("input"), listOf(milestone))
         return RuntimeStepRequest(
             step = 1,
-            proposed = AgentAction.InputText("value", nodeId = 1, predicateId = "input-p1"),
+            proposed = action,
             planningObservation = screen,
             executionObservation = screen,
             plan = plan,
@@ -199,10 +297,10 @@ class InputTargetGenerationTest {
         )
     }
 
-    private fun inputScreen(twoFields: Boolean = false): Observation {
+    private fun inputScreen(twoFields: Boolean = false, initialText: String = ""): Observation {
         val first = UiNodeSnapshot(
             1,
-            "",
+            initialText,
             "",
             "android.widget.EditText",
             false,
@@ -239,6 +337,26 @@ class InputTargetGenerationTest {
 
         override suspend fun settle(before: Observation, action: AgentAction) =
             RuntimeStepSettleResult(DispatchResultState.RESULT_UNKNOWN, before, "timeout")
+
+        override suspend fun executeRecovery(decision: RecoveryDecision, observation: Observation) =
+            RuntimeStepRecoveryResult(false, observation, "stop")
+    }
+
+    private class PartialInputDriver : RuntimeStepDriver {
+        var executeCount: Int = 0
+
+        override suspend fun executeDetailed(action: AgentAction, observation: Observation): ActionExecutionResult {
+            executeCount++
+            return InputActionResultPolicy.resolve(
+                textSet = true,
+                textVerified = true,
+                submitRequested = true,
+                submitSucceeded = false,
+            )
+        }
+
+        override suspend fun settle(before: Observation, action: AgentAction) =
+            RuntimeStepSettleResult(DispatchResultState.CONFIRMED, before, "text field settled")
 
         override suspend fun executeRecovery(decision: RecoveryDecision, observation: Observation) =
             RuntimeStepRecoveryResult(false, observation, "stop")

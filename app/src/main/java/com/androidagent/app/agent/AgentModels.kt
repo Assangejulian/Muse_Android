@@ -459,13 +459,27 @@ data class ActionExecutionResult(
     val success: Boolean,
     val status: String,
     val detail: String = "",
-)
+    /** True once Android accepted a mutation, even if a later compound phase failed. */
+    val mutationAccepted: Boolean = success,
+) {
+    val partialMutation: Boolean get() = mutationAccepted && !success
+}
 
 object InputActionResultPolicy {
     fun resolve(textSet: Boolean, textVerified: Boolean, submitRequested: Boolean, submitSucceeded: Boolean): ActionExecutionResult = when {
         !textSet -> ActionExecutionResult(false, "text_set_failed", "text_set failed")
-        !textVerified -> ActionExecutionResult(false, "text_verification_failed", "text verification failed")
-        submitRequested && !submitSucceeded -> ActionExecutionResult(false, "submit_failed", "submit failed")
+        !textVerified -> ActionExecutionResult(
+            false,
+            "text_verification_failed",
+            "text_set was accepted but readback verification failed",
+            mutationAccepted = true,
+        )
+        submitRequested && !submitSucceeded -> ActionExecutionResult(
+            false,
+            "submit_failed",
+            "text_set and text verification succeeded, but submit failed",
+            mutationAccepted = true,
+        )
         submitRequested -> ActionExecutionResult(true, "text_set_and_submitted", "text_set, text_verified, and submit succeeded")
         else -> ActionExecutionResult(true, "text_verified", "text_set and verified")
     }
@@ -690,9 +704,11 @@ object TargetResolver {
             }
             if (candidates.size > 1) return ActionTargetResolution(failure = ActionTargetFailure.AMBIGUOUS)
             val parent = candidates.singleOrNull() ?: continue
-            if (parent.visible && parent.enabled && parent.clickable && !parent.password && !parent.isInputMethod) {
-                return resolved(semantic, parent, ActionDispatchMode.ACCESSIBILITY_CLICK)
+            if (!parent.clickable) continue
+            if (!parent.visible || !parent.enabled || parent.password || parent.isInputMethod) {
+                return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
             }
+            return resolved(semantic, parent, ActionDispatchMode.ACCESSIBILITY_CLICK)
         }
         return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
     }
