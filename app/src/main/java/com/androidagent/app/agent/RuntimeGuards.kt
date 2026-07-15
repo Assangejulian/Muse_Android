@@ -1,6 +1,10 @@
 package com.androidagent.app.agent
 
-data class PredicateEvidence(val proven: Boolean, val details: List<String>)
+data class PredicateEvidence(
+    val proven: Boolean,
+    val details: List<String>,
+    val replanRequired: Boolean = false,
+)
 
 enum class BindingLifecycle { PREPARED, DISPATCHED, COMMITTED, VERIFIED, INVALIDATED, REBIND_REQUIRED }
 
@@ -36,6 +40,7 @@ data class PredicateBinding(
     val dispatchSequence: Long? = null,
     val resultState: BindingResultState = BindingResultState.BOUND_ONLY,
     val strongPostconditionsBefore: Map<String, Boolean> = emptyMap(),
+    val preDispatchSnapshotId: String? = null,
 )
 
 data class BindingTransitionProposal(
@@ -400,6 +405,7 @@ class PredicateBindingStore {
                 dispatchedObservationId = null,
                 dispatchSequence = null,
                 strongPostconditionsBefore = emptyMap(),
+                preDispatchSnapshotId = null,
             )
         }
         updates.forEach { (bindingKey, binding) -> bindings[bindingKey] = binding }
@@ -413,6 +419,7 @@ class PredicateBindingStore {
         actionKey: String,
         observationId: String,
         strongPostconditionsBefore: Map<String, Boolean>,
+        preDispatchSnapshotId: String? = null,
     ): Boolean {
         if (!preparation.prepared || !canCommit(preparation.transitions)) return false
         val sequence = ++dispatchSequence
@@ -426,6 +433,7 @@ class PredicateBindingStore {
                 dispatchSequence = sequence,
                 resultState = BindingResultState.DISPATCHED,
                 strongPostconditionsBefore = strongPostconditionsBefore,
+                preDispatchSnapshotId = preDispatchSnapshotId,
             )
         }
         updates.forEach { (bindingKey, binding) -> bindings[bindingKey] = binding }
@@ -614,6 +622,8 @@ class PredicateBindingStore {
 }
 
 object MilestoneEvaluator {
+    const val BOUND_WINDOW_GONE_REPLAN_REASON = "bound window disappeared but no new strong postcondition was observed"
+
     fun evaluate(
         milestone: TaskMilestone,
         plan: TaskPlan,
@@ -623,8 +633,10 @@ object MilestoneEvaluator {
         predicateIndices: Set<Int>? = null,
         runId: String? = null,
         computePositiveEvidence: Boolean = true,
+        preDispatchSnapshots: PreDispatchEvidenceStore? = null,
     ): PredicateEvidence {
         val details = mutableListOf<String>()
+        var replanRequired = false
         val indices = predicateIndices ?: milestone.successPredicates.indices.toSet()
         val positiveIndices = indices.filter { index ->
             milestone.successPredicates.getOrNull(index)?.kind in STRONG_POSTCONDITION_KINDS
@@ -642,6 +654,7 @@ object MilestoneEvaluator {
                     predicateIndices = setOf(positiveIndex),
                     runId = runId,
                     computePositiveEvidence = false,
+                    preDispatchSnapshots = preDispatchSnapshots,
                 ).proven
             }
         }
@@ -715,6 +728,11 @@ object MilestoneEvaluator {
                         strongPostconditionsAfter = positiveEvidence.mapKeys { (index, _) ->
                             predicateId(milestone, index)
                         },
+                        milestone = milestone,
+                        plan = plan,
+                        targetPackage = targetPackage,
+                        runId = runId,
+                        preDispatchSnapshots = preDispatchSnapshots,
                     )
                     else -> false
                 }
@@ -734,20 +752,26 @@ object MilestoneEvaluator {
                 UiPredicateKind.SEMANTIC_CLAIM -> false
             }
             val detail = if (!proven && predicate.kind == UiPredicateKind.ELEMENT_DISAPPEARED && identityResolution == IdentityResolution.BoundWindowGone) {
-                "bound window disappeared but no new strong postcondition was observed"
+                replanRequired = true
+                BOUND_WINDOW_GONE_REPLAN_REASON
             } else {
                 predicate.description
             }
             details += "${predicate.kind}=${if (proven) "PROVEN" else "UNKNOWN"}: $detail"
             proven
         }
-        return PredicateEvidence(results.isNotEmpty() && results.all { it }, details)
+        return PredicateEvidence(results.isNotEmpty() && results.all { it }, details, replanRequired)
     }
 
     private fun boundWindowGoneCanProve(
         binding: PredicateBinding,
         observation: Observation,
         strongPostconditionsAfter: Map<String, Boolean>,
+        milestone: TaskMilestone,
+        plan: TaskPlan,
+        targetPackage: String?,
+        runId: String?,
+        preDispatchSnapshots: PreDispatchEvidenceStore?,
     ): Boolean {
         if (binding.origin != BindingOrigin.MUTATING_ACTION) return false
         if (binding.lifecycle !in setOf(BindingLifecycle.COMMITTED, BindingLifecycle.VERIFIED)) return false
@@ -769,8 +793,26 @@ object MilestoneEvaluator {
         }
         val originalStructureKey = identity.crossWindowStructureKey ?: return false
         if (samePackageNodes.any { node -> crossWindowKey(node) == originalStructureKey }) return false
-        return strongPostconditionsAfter.any { (predicateId, provenAfter) ->
-            provenAfter && binding.strongPostconditionsBefore[predicateId] == false
+        val snapshot = preDispatchSnapshots?.get(binding.preDispatchSnapshotId)
+        return strongPostconditionsAfter.any { (predicateKey, provenAfter) ->
+            if (!provenAfter) return@any false
+            val before = binding.strongPostconditionsBefore[predicateKey] ?: snapshot?.let {
+                val index = milestone.successPredicates.indexOfFirst { predicate ->
+                    predicateId(milestone, milestone.successPredicates.indexOf(predicate)) == predicateKey
+                }
+                if (index < 0) null else evaluate(
+                    milestone = milestone,
+                    plan = plan,
+                    observation = it.toObservation(),
+                    targetPackage = targetPackage,
+                    bindings = null,
+                    predicateIndices = setOf(index),
+                    runId = runId,
+                    computePositiveEvidence = false,
+                    preDispatchSnapshots = null,
+                ).proven
+            }
+            before == false
         }
     }
 
@@ -781,6 +823,7 @@ object MilestoneEvaluator {
         targetPackage: String?,
         bindings: PredicateBindingStore?,
         runId: String? = null,
+        preDispatchSnapshots: PreDispatchEvidenceStore? = null,
     ): Map<String, Boolean> = milestone.successPredicates.mapIndexedNotNull { index, predicate ->
         if (predicate.kind !in STRONG_POSTCONDITION_KINDS) return@mapIndexedNotNull null
         val proven = evaluate(
@@ -792,6 +835,7 @@ object MilestoneEvaluator {
             predicateIndices = setOf(index),
             runId = runId,
             computePositiveEvidence = false,
+            preDispatchSnapshots = preDispatchSnapshots,
         ).proven
         predicateId(milestone, index) to proven
     }.toMap()
@@ -1161,8 +1205,8 @@ class RunLedger(private var plan: TaskPlan) {
     private fun screenActionKey(milestone: TaskMilestone, action: AgentAction, observation: Observation): String =
         "${milestone.id}|${observation.stateFingerprint()}|${stableActionKey(action, observation)}"
 
-    private fun unknownActionKey(milestone: TaskMilestone, action: AgentAction, observation: Observation): String =
-        "${milestone.id}|${stableActionKey(action, observation)}"
+    private fun unknownActionKey(@Suppress("UNUSED_PARAMETER") milestone: TaskMilestone, action: AgentAction, observation: Observation): String =
+        stableActionKey(action, observation)
 
     private fun stableActionKey(action: AgentAction, observation: Observation): String {
         val target = when (action) {
@@ -1191,11 +1235,11 @@ class RunLedger(private var plan: TaskPlan) {
             else -> "no-target"
         }
         val payload = when (action) {
-            is AgentAction.InputText -> "${action.text.length}:${action.text.hashCode()}:${action.mode}:${action.submit}:${action.predicateId.orEmpty()}"
-            is AgentAction.ClickText -> "${action.text.lowercase().hashCode()}:${action.predicateId.orEmpty()}"
-            is AgentAction.ClickNode -> action.predicateId.orEmpty()
-            is AgentAction.SubmitInput -> action.predicateId.orEmpty()
-            is AgentAction.EnsureToggle -> "${action.desired}:${action.predicateId.orEmpty()}"
+            is AgentAction.InputText -> "${action.text.length}:${action.text.hashCode()}:${action.mode}:${action.submit}"
+            is AgentAction.ClickText -> action.text.lowercase().hashCode().toString()
+            is AgentAction.ClickNode -> ""
+            is AgentAction.SubmitInput -> ""
+            is AgentAction.EnsureToggle -> action.desired.toString()
             is AgentAction.BindPredicate -> action.predicateId
             is AgentAction.LaunchApp -> action.packageName
             is AgentAction.Swipe -> action.direction

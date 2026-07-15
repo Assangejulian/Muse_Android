@@ -47,6 +47,8 @@ class RuntimeContractHarness(
         val history = mutableListOf<ActionRecord>()
         val ledger = RunLedger(plan)
         val bindings = PredicateBindingStore()
+        val sideEffects = RunScopedSideEffectLedger("harness")
+        val preDispatchSnapshots = PreDispatchEvidenceStore()
         val recoveryPolicy = RecoveryPolicy()
         val counters = StopGateEvidenceCounters()
         val engine = RuntimeStepEngine(object : RuntimeStepDriver {
@@ -74,9 +76,16 @@ class RuntimeContractHarness(
                     reason = if (counters.hasLocalEvidence()) "all milestones proven locally" else "stop gate lacks local evidence",
                     events = events,
                     evidence = ledger.evidenceSummary().lines(),
-                )
+                ).also { sideEffects.clear(); preDispatchSnapshots.clear() }
             }
-            val beforeEvidence = MilestoneEvaluator.evaluate(milestone, plan, observation, packagePolicy.primaryPackage, bindings)
+            val beforeEvidence = MilestoneEvaluator.evaluate(
+                milestone,
+                plan,
+                observation,
+                packagePolicy.primaryPackage,
+                bindings,
+                preDispatchSnapshots = preDispatchSnapshots,
+            )
             if (beforeEvidence.proven) {
                 counters.deterministicEvidenceCount++
                 counters.verifiedMilestones++
@@ -92,7 +101,9 @@ class RuntimeContractHarness(
             if (action is AgentAction.Finish) {
                 val done = ledger.complete && counters.hasLocalEvidence()
                 events += RuntimeHarnessEvent("stop_gate", if (done) "accepted" else "rejected")
-                return RuntimeHarnessResult(done, if (done) action.reason else "stop gate rejected finish", events, ledger.evidenceSummary().lines())
+                return RuntimeHarnessResult(done, if (done) action.reason else "stop gate rejected finish", events, ledger.evidenceSummary().lines()).also {
+                    sideEffects.clear(); preDispatchSnapshots.clear()
+                }
             }
 
             // The planner may have spent time on a model call. Always refresh
@@ -118,6 +129,8 @@ class RuntimeContractHarness(
                     targetPackage = packagePolicy.primaryPackage,
                     evidenceCounters = counters,
                     runId = "harness",
+                    sideEffects = sideEffects,
+                    preDispatchSnapshots = preDispatchSnapshots,
                 ),
             )
             events += result.events.map { RuntimeHarnessEvent(it.phase, it.detail) }
@@ -133,12 +146,18 @@ class RuntimeContractHarness(
                 )
             }
             if (result.status == RuntimeStepStatus.ABORTED) {
-                return RuntimeHarnessResult(false, result.reason, events, ledger.evidenceSummary().lines())
+                return RuntimeHarnessResult(false, result.reason, events, ledger.evidenceSummary().lines()).also {
+                    sideEffects.clear(); preDispatchSnapshots.clear()
+                }
             }
             if (result.needsReplan) {
-                return RuntimeHarnessResult(false, result.reason, events, ledger.evidenceSummary().lines())
+                return RuntimeHarnessResult(false, result.reason, events, ledger.evidenceSummary().lines()).also {
+                    sideEffects.clear(); preDispatchSnapshots.clear()
+                }
             }
         }
-        return RuntimeHarnessResult(false, "harness step budget exhausted", events, ledger.evidenceSummary().lines())
+        return RuntimeHarnessResult(false, "harness step budget exhausted", events, ledger.evidenceSummary().lines()).also {
+            sideEffects.clear(); preDispatchSnapshots.clear()
+        }
     }
 }

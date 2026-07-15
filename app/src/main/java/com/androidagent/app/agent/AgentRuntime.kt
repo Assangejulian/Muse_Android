@@ -88,6 +88,8 @@ class AgentRuntime(
         val traceStore = AgentTraceStore(context)
         val runId = traceStore.startRun(immutableGoal, actorModel, runIdOverride)
         var activeBindings: PredicateBindingStore? = null
+        var activeSideEffects: RunScopedSideEffectLedger? = null
+        var activePreDispatchSnapshots: PreDispatchEvidenceStore? = null
 
         fun finish(outcome: RuntimeOutcome, reason: String): RuntimeResult {
             traceStore.event(
@@ -96,6 +98,8 @@ class AgentRuntime(
                 mapOf("outcome" to outcome.name, "reasonCode" to outcome.name),
             )
             activeBindings?.rollbackRun(runId)
+            activeSideEffects?.clear()
+            activePreDispatchSnapshots?.clear()
             traceStore.finish(runId, if (outcome == RuntimeOutcome.SUCCESS) "SUCCEEDED" else "FAILED", reason)
             return RuntimeResult(outcome, reason, runId)
         }
@@ -141,6 +145,10 @@ class AgentRuntime(
                 var ledger = RunLedger(plan)
                 val predicateBindings = PredicateBindingStore()
                 activeBindings = predicateBindings
+                val sideEffects = RunScopedSideEffectLedger(runId)
+                val preDispatchSnapshots = PreDispatchEvidenceStore()
+                activeSideEffects = sideEffects
+                activePreDispatchSnapshots = preDispatchSnapshots
                 fun expectedRecoveryPackage(milestone: TaskMilestone?): String? =
                     expectedPackage(milestone, lockedPackage, predicateBindings)
                 var guard = ToolGuard(plan, packagePolicy)
@@ -171,9 +179,15 @@ class AgentRuntime(
                         if (launchSafetyFailure != null) {
                             return@withTimeout finish(RuntimeOutcome.SAFETY_BLOCKED, "SAFETY_BLOCKED: ${launchSafetyFailure.message.orEmpty()}")
                         }
+                        val launchIdentity = SideEffectIdentityFactory.create(launch, rawBefore)
+                        val launchSequence = launchIdentity?.let { sideEffects.nextDispatchSequence() }
+                        val launchSnapshot = launchIdentity?.let { identity ->
+                            preDispatchSnapshots.capture(rawBefore, identity, launchSequence ?: 0L)
+                        }
                         onPhase(step, "Acting")
                         onAction(describeAction(launch))
                         if (!service.execute(launch, rawBefore)) {
+                            preDispatchSnapshots.remove(launchSnapshot?.snapshotId)
                             val recovery = recoveryPolicy.decide(
                                 RecoveryContext(
                                     expectedPackage = lockedPackage,
@@ -188,9 +202,21 @@ class AgentRuntime(
                             if (!recovered.success) return@withTimeout finish(RuntimeOutcome.ACCESSIBILITY_DISCONNECTED, "Unable to launch the locked target app: ${recovered.detail}")
                             continue
                         }
-                        val launched = awaitStableObservation(rawBefore, launch)
+                        launchIdentity?.let { identity ->
+                            sideEffects.markUnknown(
+                                identity = identity,
+                                dispatchObservationId = rawBefore.observationId,
+                                dispatchSequence = launchSequence ?: sideEffects.nextDispatchSequence(),
+                                preDispatchSnapshotId = launchSnapshot?.snapshotId,
+                            )
+                        }
+                        val launchSettle = awaitStableObservationDetailed(rawBefore, launch)
+                        val launched = launchSettle.observation
                         if (launched.packageName != lockedPackage) {
                             return@withTimeout finish(RuntimeOutcome.TIMEOUT, "Target app did not become ready before the launch deadline")
+                        }
+                        if (launchSettle.state == DispatchResultState.CONFIRMED) {
+                            launchIdentity?.let(sideEffects::markConfirmed)
                         }
                         evidenceCounters.successfulMutatingActions += 1
                         history += "LOCAL_TOOL_RESULT: launched locked package $lockedPackage without exposing the previous app"
@@ -282,6 +308,7 @@ class AgentRuntime(
                             packagePolicy,
                             predicateBindings,
                             runId,
+                            preDispatchSnapshots,
                         )
                         if (verified.done) {
                             return@withTimeout finish(RuntimeOutcome.SUCCESS, verified.reason)
@@ -315,7 +342,15 @@ class AgentRuntime(
                         continue
                     }
 
-                    val deterministicBefore = MilestoneEvaluator.evaluate(milestone, plan, before, lockedPackage, predicateBindings, runId = runId)
+                    val deterministicBefore = MilestoneEvaluator.evaluate(
+                        milestone,
+                        plan,
+                        before,
+                        lockedPackage,
+                        predicateBindings,
+                        runId = runId,
+                        preDispatchSnapshots = preDispatchSnapshots,
+                    )
                     if (deterministicBefore.proven) {
                         val proof = deterministicBefore.details.joinToString(" | ")
                         evidenceCounters.deterministicEvidenceCount += 1
@@ -603,6 +638,9 @@ class AgentRuntime(
                             targetPackage = expectedRecoveryPackage(milestone),
                             evidenceCounters = evidenceCounters,
                             runId = runId,
+                            sideEffects = sideEffects,
+                            preDispatchSnapshots = preDispatchSnapshots,
+                            screenshotFingerprint = before.observationId,
                         ),
                     )
                     val stepAction = engineResult.action ?: proposed
@@ -810,9 +848,13 @@ class AgentRuntime(
         }
         } catch (timeout: TimeoutCancellationException) {
             activeBindings?.rollbackRun(runId)
+            activeSideEffects?.clear()
+            activePreDispatchSnapshots?.clear()
             finish(RuntimeOutcome.TIMEOUT, "five-minute run deadline exceeded")
         } catch (cancelled: CancellationException) {
             activeBindings?.rollbackRun(runId)
+            activeSideEffects?.clear()
+            activePreDispatchSnapshots?.clear()
             val cancellationOutcome = cancellationOutcomeProvider() ?: RuntimeOutcome.USER_CANCELLED
             runCatching {
                 traceStore.event(runId, "RUN_FINISHED", mapOf("outcome" to cancellationOutcome.name, "reasonCode" to cancellationOutcome.name))
@@ -821,9 +863,13 @@ class AgentRuntime(
             throw cancelled
         } catch (failure: TaskPlanException) {
             activeBindings?.rollbackRun(runId)
+            activeSideEffects?.clear()
+            activePreDispatchSnapshots?.clear()
             finish(RuntimeOutcome.PERMANENT_PLAN_ERROR, failure.message ?: "Manager plan failed after retries")
         } catch (error: Throwable) {
             activeBindings?.rollbackRun(runId)
+            activeSideEffects?.clear()
+            activePreDispatchSnapshots?.clear()
             runCatching { traceStore.finish(runId, "FAILED", error.message ?: error::class.simpleName.orEmpty()) }
             throw error
         }
@@ -845,6 +891,7 @@ class AgentRuntime(
         packagePolicy: PackagePolicy,
         predicateBindings: PredicateBindingStore? = null,
         runId: String? = null,
+        preDispatchSnapshots: PreDispatchEvidenceStore? = null,
     ): VerificationResult {
         onPhase(step, "Verifying")
         ledger.currentMilestone?.let {
@@ -894,7 +941,15 @@ class AgentRuntime(
         val finalMilestone = plan.milestones.lastOrNull()
         val hasToggleContract = finalMilestone?.successPredicates?.any { it.kind == UiPredicateKind.TOGGLE_STATE } == true
         if (hasToggleContract) {
-            val local = MilestoneEvaluator.evaluate(finalMilestone!!, plan, observation, lockedPackage, predicateBindings, runId = runId)
+            val local = MilestoneEvaluator.evaluate(
+                finalMilestone!!,
+                plan,
+                observation,
+                lockedPackage,
+                predicateBindings,
+                runId = runId,
+                preDispatchSnapshots = preDispatchSnapshots,
+            )
             if (!local.proven) return VerificationResult(false, "Toggle completion lacks a deterministic ON state")
         }
         return verification

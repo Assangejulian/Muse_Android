@@ -155,4 +155,46 @@ class RunResultCoordinatorTest {
         assertTrue(stats.waiters <= 2)
         assertTrue(stats.tombstones <= 2)
     }
+
+    @Test
+    fun twoWaitersForOneRunConsumeOnlyOneTerminalResult() = runBlocking {
+        val coordinator = RunResultCoordinator()
+        coordinator.registerRun("run-1")
+        val expected = RuntimeResult.failure(RuntimeOutcome.TIMEOUT, "timeout", "run-1")
+        val first = async { coordinator.awaitAndConsumeResult("run-1", 500) }
+        val second = async { coordinator.awaitAndConsumeResult("run-1", 500) }
+        delay(30)
+        assertTrue(coordinator.storeResult("run-1", expected))
+        val values = listOf(first.await(), second.await())
+        assertEquals(1, values.count { it != null })
+        assertEquals(1, values.count { it == expected })
+        assertEquals(0, coordinator.stats().waiters)
+    }
+
+    @Test
+    fun tombstoneCancellationReturnsNullToNormalWorker() = runBlocking {
+        val coordinator = RunResultCoordinator()
+        coordinator.registerRun("run-1")
+        val waiter = async { coordinator.awaitAndConsumeResult("run-1", 500) }
+        delay(30)
+        coordinator.registerLateResultTombstone("run-1")
+        assertNull(waiter.await())
+        assertEquals(0, coordinator.stats().waiters)
+    }
+
+    @Test
+    fun resultStoredAtTimeoutBoundaryIsConsumedAtMostOnce() = runBlocking {
+        val coordinator = RunResultCoordinator()
+        coordinator.registerRun("run-1")
+        val expected = RuntimeResult.failure(RuntimeOutcome.TIMEOUT, "boundary", "run-1")
+        val producer = async {
+            delay(25)
+            coordinator.storeResult("run-1", expected)
+        }
+        val first = coordinator.awaitAndConsumeResult("run-1", 100)
+        producer.await()
+        val second = coordinator.consumeResult("run-1")
+        assertTrue(first == expected || second == expected)
+        assertFalse(first == expected && second == expected)
+    }
 }

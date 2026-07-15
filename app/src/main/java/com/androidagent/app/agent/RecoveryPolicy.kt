@@ -45,6 +45,8 @@ class RecoveryPolicy(
 
     fun failureCounts(): Map<String, Int> = consecutiveFailuresByKey.toMap()
 
+    fun budgetExhausted(): Boolean = consecutiveRecoveries >= maxRecoveries
+
     fun decide(context: RecoveryContext): RecoveryDecision {
         val key = key(context)
         val count = maxOf(context.failureCount, consecutiveFailuresByKey[key] ?: 0)

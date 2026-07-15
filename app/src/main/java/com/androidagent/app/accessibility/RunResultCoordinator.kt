@@ -3,6 +3,8 @@ package com.androidagent.app.accessibility
 import com.androidagent.app.agent.RuntimeResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
 
 internal data class RunResultCoordinatorStats(
@@ -78,7 +80,16 @@ internal class RunResultCoordinator(
                 CompletableDeferred()
             }.also { trimWaiters() }
         }
-        withTimeoutOrNull(timeoutMillis) { waiter.await() } ?: return null
+        val completed = try {
+            withTimeoutOrNull(timeoutMillis) { waiter.await() }
+        } catch (cancelled: CancellationException) {
+            // A tombstone cancels the internal waiter.  Do not leak that
+            // implementation detail as a normal Worker failure, while still
+            // propagating cancellation requested by the caller itself.
+            if (!currentCoroutineContext().isActive) throw cancelled
+            null
+        }
+        if (completed == null) return null
         return consumeResult(runId)
     }
 

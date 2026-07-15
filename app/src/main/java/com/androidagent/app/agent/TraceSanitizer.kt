@@ -112,7 +112,8 @@ object TraceSanitizer {
 
     private fun textMetadata(value: String): String = "[text length=${value.length} sha256=${digest(value)}]"
 
-    private fun digest(value: String): String = MessageDigest.getInstance("SHA-256")
+    /** Short non-reversible digest for local identity and trace metadata. */
+    fun digest(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray())
         .take(8)
         .joinToString("") { "%02x".format(it.toInt() and 0xff) }
