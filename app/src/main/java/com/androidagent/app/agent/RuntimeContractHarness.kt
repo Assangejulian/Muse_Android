@@ -4,6 +4,11 @@ package com.androidagent.app.agent
 interface RuntimeHarnessAccessibilityService {
     suspend fun observe(): Observation
     suspend fun executeDetailed(action: AgentAction, observation: Observation): ActionExecutionResult
+    suspend fun executeDetailed(
+        action: AgentAction,
+        observation: Observation,
+        resolvedTarget: ResolvedActionTarget?,
+    ): ActionExecutionResult = executeDetailed(action, observation)
     suspend fun executeRecovery(action: RecoveryAction, observation: Observation): ActionExecutionResult
 }
 
@@ -54,6 +59,12 @@ class RuntimeContractHarness(
         val engine = RuntimeStepEngine(object : RuntimeStepDriver {
             override suspend fun executeDetailed(action: AgentAction, observation: Observation): ActionExecutionResult =
                 service.executeDetailed(action, observation)
+
+            override suspend fun executeDetailed(
+                action: AgentAction,
+                observation: Observation,
+                resolvedTarget: ResolvedActionTarget?,
+            ): ActionExecutionResult = service.executeDetailed(action, observation, resolvedTarget)
 
             override suspend fun settle(before: Observation, action: AgentAction): RuntimeStepSettleResult =
                 clock.afterAction(before, action, service::observe)

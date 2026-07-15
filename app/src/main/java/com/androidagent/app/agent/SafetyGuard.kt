@@ -7,6 +7,7 @@ object SafetyGuard {
         packagePolicy: PackagePolicy,
         launchablePackages: Set<String>,
         goal: GoalContext? = null,
+        resolvedTarget: ResolvedActionTarget? = null,
     ): Result<AgentAction> = runCatching {
         val recoveryAction = SensitiveOperationPolicy.isSafeRecoveryAction(action)
         val observedAllowed = observation.packageName.isBlank() || packagePolicy.allows(observation.packageName)
@@ -16,6 +17,11 @@ object SafetyGuard {
             }
         }
         SensitiveOperationPolicy.validateAction(action, observation, goal).getOrThrow()
+        resolvedTarget?.targetPackage?.takeIf(String::isNotBlank)?.let { targetPackage ->
+            require(targetPackage == observation.packageName || packagePolicy.allows(targetPackage)) {
+                "Resolved action target is outside the current package policy"
+            }
+        }
         when (action) {
             is AgentAction.LaunchApp -> {
                 require(action.packageName in launchablePackages) { "Package is not in the installed app catalog" }

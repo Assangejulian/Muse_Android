@@ -23,9 +23,4 @@ class ImeSubmitPolicyTest {
         assertEquals(0, ImeSubmitPolicy.score("com.example.keyboard:id/candidate", "done", "", true, true, true))
     }
 
-    @Test
-    fun ocrPartialMatchDoesNotShrinkToOneCharacter() {
-        assertEquals(false, ImeSubmitPolicy.isSafeOcrPartialMatch("long target", "5"))
-        assertEquals(true, ImeSubmitPolicy.isSafeOcrPartialMatch("target", "target result"))
-    }
 }

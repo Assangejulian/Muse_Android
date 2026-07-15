@@ -9,6 +9,7 @@ data class RuntimeStepPreflight(
     val safetyFailure: String? = null,
     val repeatedReason: String? = null,
     val repeatedRecoveryReason: RecoveryReason? = null,
+    val resolvedTarget: ResolvedActionTarget? = null,
 )
 
 object RuntimeStepExecutor {
@@ -42,18 +43,17 @@ object RuntimeStepExecutor {
             packagePolicy,
             launchablePackages,
             goal,
+            guarded.resolvedTarget,
         ).exceptionOrNull()?.message
         if (safetyFailure != null) {
             return RuntimeStepPreflight(executionObservation, false, guarded, action, safetyFailure = safetyFailure)
         }
-        val repeatedReason = ledger.blockRepeated(action, executionObservation)
         return RuntimeStepPreflight(
             executionObservation = executionObservation,
             stale = false,
             guarded = guarded,
             action = action,
-            repeatedReason = repeatedReason,
-            repeatedRecoveryReason = repeatedReason?.let { ledger.repeatedRecoveryReason(action, executionObservation) },
+            resolvedTarget = guarded.resolvedTarget,
         )
     }
 }
@@ -72,6 +72,11 @@ data class RuntimeStepRecoveryResult(
 
 interface RuntimeStepDriver {
     suspend fun executeDetailed(action: AgentAction, observation: Observation): ActionExecutionResult
+    suspend fun executeDetailed(
+        action: AgentAction,
+        observation: Observation,
+        resolvedTarget: ResolvedActionTarget?,
+    ): ActionExecutionResult = executeDetailed(action, observation)
     suspend fun settle(before: Observation, action: AgentAction): RuntimeStepSettleResult
     suspend fun executeRecovery(decision: RecoveryDecision, observation: Observation): RuntimeStepRecoveryResult
 }
@@ -124,6 +129,8 @@ data class RuntimeStepEngineResult(
     val dispatchResultState: DispatchResultState? = null,
     val recoveryDecisions: List<RecoveryDecision> = emptyList(),
     val events: List<RuntimeStepEngineEvent> = emptyList(),
+    val resolvedTarget: ResolvedActionTarget? = null,
+    val inputGeneration: Int? = null,
 ) {
     val completed: Boolean get() = status == RuntimeStepStatus.MILESTONE_COMPLETE
     val needsReplan: Boolean get() = status == RuntimeStepStatus.REPLAN_REQUIRED
@@ -194,25 +201,12 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
             )
         }
 
-        events += RuntimeStepEngineEvent("duplicate", if (preflight.repeatedReason == null) "allowed" else "rejected")
-        if (preflight.repeatedReason != null) {
-            return recoverOnce(
-                request,
-                preflight.repeatedRecoveryReason ?: RecoveryReason.REPEATED_ACTION,
-                action,
-                request.executionObservation,
-                RuntimeStepStatus.BLOCKED,
-                events,
-                recoveryDecisions,
-                preflight.repeatedReason,
-            )
-        }
-
         val preparation = request.bindings.prepareActionBinding(
             request.milestone,
             action,
             request.executionObservation,
             request.runId,
+            preflight.resolvedTarget,
         )
         events += RuntimeStepEngineEvent("prepare_binding", if (preparation.prepared) "prepared" else "rejected")
         if (!preparation.prepared) {
@@ -257,14 +251,65 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
                 evidence = evidence,
                 reason = evidence.details.joinToString(" | ").ifBlank { execution.detail },
                 events = events,
+                resolvedTarget = preflight.resolvedTarget,
             )
         }
 
+        val inputGenerationReservation = if (action is AgentAction.InputText) {
+            preflight.resolvedTarget?.let { request.sideEffects.prepareInputGeneration(action, it) }
+        } else null
+        val inputGeneration = when (action) {
+            is AgentAction.InputText -> inputGenerationReservation?.generation
+            is AgentAction.SubmitInput -> preflight.resolvedTarget?.let(request.sideEffects::currentInputGeneration)
+            else -> null
+        }
         val sideEffectIdentity = SideEffectIdentityFactory.create(
             action = action,
             observation = request.executionObservation,
             screenshotFingerprint = request.screenshotFingerprint,
+            resolvedTarget = preflight.resolvedTarget,
+            inputGeneration = inputGeneration,
         )
+        if (SideEffectIdentityFactory.requiresIdentity(action) && sideEffectIdentity == null) {
+            return recoverOnce(
+                request,
+                RecoveryReason.TARGET_MISSING,
+                action,
+                request.executionObservation,
+                RuntimeStepStatus.BLOCKED,
+                events,
+                recoveryDecisions,
+                "mutating action has no canonical side-effect identity",
+                resolvedTarget = preflight.resolvedTarget,
+                inputGeneration = inputGeneration,
+            )
+        }
+        val repeatedReason = request.ledger.blockRepeated(
+            action,
+            request.executionObservation,
+            preflight.resolvedTarget,
+            sideEffectIdentity,
+        )
+        events += RuntimeStepEngineEvent("duplicate", if (repeatedReason == null) "allowed" else "rejected")
+        if (repeatedReason != null) {
+            return recoverOnce(
+                request,
+                request.ledger.repeatedRecoveryReason(
+                    action,
+                    request.executionObservation,
+                    preflight.resolvedTarget,
+                    sideEffectIdentity,
+                ) ?: RecoveryReason.REPEATED_ACTION,
+                action,
+                request.executionObservation,
+                RuntimeStepStatus.BLOCKED,
+                events,
+                recoveryDecisions,
+                repeatedReason,
+                resolvedTarget = preflight.resolvedTarget,
+                inputGeneration = inputGeneration,
+            )
+        }
         sideEffectIdentity?.let { identity ->
             val check = request.sideEffects.check(identity)
             if (!check.allowed) {
@@ -277,11 +322,18 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
                     events,
                     recoveryDecisions,
                     check.reason.orEmpty(),
+                    resolvedTarget = preflight.resolvedTarget,
+                    inputGeneration = inputGeneration,
                 )
             }
         }
 
-        val actionKey = request.ledger.actionKey(action, request.executionObservation)
+        val actionKey = request.ledger.actionKey(
+            action,
+            request.executionObservation,
+            preflight.resolvedTarget,
+            sideEffectIdentity,
+        )
         val baselineTruth = MilestoneEvaluator.strongPostconditionTruthBaseline(
             milestone = request.milestone,
             plan = request.plan,
@@ -300,7 +352,7 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
             )
         }
         events += RuntimeStepEngineEvent("execute", TraceSanitizer.actionType(action))
-        val execution = driver.executeDetailed(action, request.executionObservation)
+        val execution = driver.executeDetailed(action, request.executionObservation, preflight.resolvedTarget)
         if (!execution.success) {
             request.preDispatchSnapshots.remove(preDispatchSnapshot?.snapshotId)
             events += RuntimeStepEngineEvent("execute_failed", execution.status)
@@ -315,6 +367,8 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
                 execution.detail.ifBlank { execution.status },
                 execution,
                 DispatchResultState.FAILED,
+                preflight.resolvedTarget,
+                inputGeneration,
             )
         }
         if (sideEffectIdentity != null && !request.sideEffects.markUnknown(
@@ -322,8 +376,17 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
                 dispatchObservationId = request.executionObservation.observationId,
                 dispatchSequence = dispatchSequence ?: request.sideEffects.nextDispatchSequence(),
                 preDispatchSnapshotId = preDispatchSnapshot?.snapshotId,
+                inputGenerationReservation = inputGenerationReservation,
             )) {
-            return aborted(request, action, "side effect identity was concurrently dispatched", events, recoveryDecisions)
+            return aborted(
+                request,
+                action,
+                "side effect identity was concurrently dispatched",
+                events,
+                recoveryDecisions,
+                preflight.resolvedTarget,
+                inputGeneration,
+            )
         }
         if (!request.bindings.commitMutation(
                 preparation,
@@ -333,7 +396,15 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
                 preDispatchSnapshotId = preDispatchSnapshot?.snapshotId,
                 strongPostconditionTruthBefore = baselineTruth,
             )) {
-            return aborted(request, action, "predicate binding commit failed after successful dispatch", events, recoveryDecisions)
+            return aborted(
+                request,
+                action,
+                "predicate binding commit failed after successful dispatch",
+                events,
+                recoveryDecisions,
+                preflight.resolvedTarget,
+                inputGeneration,
+            )
         }
         events += RuntimeStepEngineEvent("mark_dispatched", actionKey)
         events += RuntimeStepEngineEvent("commit", "MUTATING_ACTION")
@@ -343,13 +414,46 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         events += RuntimeStepEngineEvent("wait", "${settled.state}:${settled.detail}")
         return if (settled.state != DispatchResultState.CONFIRMED) {
             request.bindings.markResultUnknown(preparation, actionKey)
-            request.ledger.recordDispatch(action, request.executionObservation, DispatchResultState.RESULT_UNKNOWN)
-            resolveUnknown(request, preparation, action, actionKey, execution, settled, sideEffectIdentity, events, recoveryDecisions)
+            request.ledger.recordDispatch(
+                action,
+                request.executionObservation,
+                DispatchResultState.RESULT_UNKNOWN,
+                preflight.resolvedTarget,
+                sideEffectIdentity,
+            )
+            resolveUnknown(
+                request,
+                preparation,
+                action,
+                actionKey,
+                execution,
+                settled,
+                sideEffectIdentity,
+                preflight.resolvedTarget,
+                inputGeneration,
+                events,
+                recoveryDecisions,
+            )
         } else {
             sideEffectIdentity?.let { request.sideEffects.markConfirmed(it) }
             request.bindings.markResultObserved(preparation, actionKey)
-            request.ledger.recordDispatch(action, request.executionObservation, DispatchResultState.CONFIRMED)
-            evaluateConfirmed(request, action, execution, settled.observation, events, recoveryDecisions)
+            request.ledger.recordDispatch(
+                action,
+                request.executionObservation,
+                DispatchResultState.CONFIRMED,
+                preflight.resolvedTarget,
+                sideEffectIdentity,
+            )
+            evaluateConfirmed(
+                request,
+                action,
+                execution,
+                settled.observation,
+                preflight.resolvedTarget,
+                inputGeneration,
+                events,
+                recoveryDecisions,
+            )
         }
     }
 
@@ -361,6 +465,8 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         execution: ActionExecutionResult,
         settled: RuntimeStepSettleResult,
         sideEffectIdentity: SideEffectIdentity?,
+        resolvedTarget: ResolvedActionTarget?,
+        inputGeneration: Int?,
         events: MutableList<RuntimeStepEngineEvent>,
         recoveryDecisions: MutableList<RecoveryDecision>,
     ): RuntimeStepEngineResult {
@@ -375,6 +481,8 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
             dispatchResultState = DispatchResultState.RESULT_UNKNOWN,
             recoveryDecisions = recoveryDecisions,
             events = events,
+            resolvedTarget = resolvedTarget,
+            inputGeneration = inputGeneration,
         )
 
         if (request.recoveryPolicy.budgetExhausted()) {
@@ -437,6 +545,8 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         action: AgentAction,
         execution: ActionExecutionResult,
         after: Observation,
+        resolvedTarget: ResolvedActionTarget?,
+        inputGeneration: Int?,
         events: MutableList<RuntimeStepEngineEvent>,
         recoveryDecisions: List<RecoveryDecision>,
     ): RuntimeStepEngineResult {
@@ -482,6 +592,8 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
             DispatchResultState.CONFIRMED,
             recoveryDecisions,
             events,
+            resolvedTarget,
+            inputGeneration,
         )
     }
 
@@ -559,6 +671,8 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         detail: String = reason.name,
         execution: ActionExecutionResult? = null,
         dispatchResultState: DispatchResultState? = null,
+        resolvedTarget: ResolvedActionTarget? = null,
+        inputGeneration: Int? = null,
     ): RuntimeStepEngineResult {
         val decision = request.recoveryPolicy.decide(
             RecoveryContext(
@@ -598,6 +712,8 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
             dispatchResultState = dispatchResultState,
             recoveryDecisions = decisions,
             events = events,
+            resolvedTarget = resolvedTarget,
+            inputGeneration = inputGeneration,
         )
     }
 
@@ -607,6 +723,8 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         reason: String,
         events: List<RuntimeStepEngineEvent>,
         decisions: List<RecoveryDecision>,
+        resolvedTarget: ResolvedActionTarget? = null,
+        inputGeneration: Int? = null,
     ): RuntimeStepEngineResult = RuntimeStepEngineResult(
         RuntimeStepStatus.ABORTED,
         action,
@@ -615,6 +733,8 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         reason = reason,
         recoveryDecisions = decisions,
         events = events,
+        resolvedTarget = resolvedTarget,
+        inputGeneration = inputGeneration,
     )
 
     private fun classifyFailure(action: AgentAction, detail: String): RecoveryReason {

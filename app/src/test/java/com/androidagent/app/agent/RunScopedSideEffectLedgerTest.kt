@@ -180,7 +180,7 @@ class RunScopedSideEffectLedgerTest {
         val screen = observation(
             UiNodeSnapshot(1, "secret-value", "", "EditText", false, true, "0,0,100,40", packageName = "primary.app", password = true),
         )
-        val identity = SideEffectIdentityFactory.create(AgentAction.InputText("secret-value", nodeId = 1), screen)!!
+        val identity = SideEffectIdentityFactory.create(AgentAction.Back, screen)!!
         repeat(10) { index ->
             store.capture(screen, identity, index.toLong())
         }

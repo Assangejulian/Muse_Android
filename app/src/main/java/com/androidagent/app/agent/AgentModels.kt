@@ -509,8 +509,9 @@ data class Observation(
         }
         val topology = "windowIds=${windowIds.sorted().joinToString(",")};windowPackages=" +
             windowPackages.toSortedMap().entries.joinToString(",") { (windowId, owner) -> "$windowId=$owner" }
+        val completeness = "isComplete=$isComplete;privacyFiltered=$privacyFiltered"
         val digest = MessageDigest.getInstance("SHA-256")
-            .digest("$packageName:$imeVisible:$topology:$stableContent".toByteArray())
+            .digest("$packageName:$imeVisible:$completeness:$topology:$stableContent".toByteArray())
             .take(12)
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
         return "$packageName:$digest"
@@ -564,30 +565,88 @@ data class Observation(
         .take(120)
 }
 
-/** Shared action target resolution used by guards, bindings, and side-effect identity. */
+enum class ActionDispatchMode {
+    ACCESSIBILITY_CLICK,
+    SET_TEXT,
+    SET_TEXT_AND_SUBMIT,
+    SUBMIT_INPUT,
+    OBSERVATION_ONLY,
+}
+
+data class ResolvedActionTarget(
+    val semanticNode: UiNodeSnapshot,
+    val effectiveActionNode: UiNodeSnapshot,
+    val dispatchMode: ActionDispatchMode,
+    val targetPackage: String,
+    val targetWindowId: Int?,
+)
+
+enum class ActionTargetFailure { MISSING, AMBIGUOUS, NOT_ACTIONABLE }
+
+data class ActionTargetResolution(
+    val target: ResolvedActionTarget? = null,
+    val failure: ActionTargetFailure? = null,
+)
+
+/**
+ * Canonical target resolution shared by guards, bindings, ledgers, and the
+ * Android dispatcher. A mutating action must never select its target twice.
+ */
 object TargetResolver {
-    fun resolve(action: AgentAction, observation: Observation): UiNodeSnapshot? = when (action) {
-        is AgentAction.ClickText -> clickableTextMatches(observation, action.text).singleOrNull()
-        is AgentAction.ClickNode -> NodeSelector.resolve(observation, action.nodeId, action.selector)
-        is AgentAction.EnsureToggle -> NodeSelector.resolve(observation, action.nodeId, action.selector)
-        is AgentAction.InputText -> resolveEditable(observation, action.nodeId, action.target)
-        is AgentAction.SubmitInput -> resolveEditable(observation, action.nodeId, action.target)
-        is AgentAction.BindPredicate -> NodeSelector.resolve(observation, action.nodeId, action.selector)
-        else -> null
+    fun resolveActionTarget(action: AgentAction, observation: Observation): ActionTargetResolution {
+        return when (action) {
+            is AgentAction.ClickText -> resolveClick(
+                semanticCandidates = clickableTextMatches(observation, action.text),
+                observation = observation,
+            )
+            is AgentAction.ClickNode -> resolveClick(
+                semanticCandidates = nodeCandidates(observation, action.nodeId, action.selector),
+                observation = observation,
+            )
+            is AgentAction.EnsureToggle -> {
+                val candidates = nodeCandidates(observation, action.nodeId, action.selector)
+                val semantic = unique(candidates) ?: return failed(candidates)
+                if (!semantic.visible || !semantic.enabled || semantic.password || !isBooleanControl(semantic)) {
+                    ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
+                } else {
+                    val current = semantic.checked ?: semantic.selected
+                    if (current == action.desired) {
+                        resolved(semantic, semantic, ActionDispatchMode.OBSERVATION_ONLY)
+                    } else {
+                        resolveClick(listOf(semantic), observation)
+                    }
+                }
+            }
+            is AgentAction.InputText -> resolveEditableTarget(
+                observation,
+                action.nodeId,
+                action.target,
+                if (action.submit) ActionDispatchMode.SET_TEXT_AND_SUBMIT else ActionDispatchMode.SET_TEXT,
+            )
+            is AgentAction.SubmitInput -> resolveEditableTarget(
+                observation,
+                action.nodeId,
+                action.target,
+                ActionDispatchMode.SUBMIT_INPUT,
+            )
+            is AgentAction.BindPredicate -> {
+                val candidates = nodeCandidates(observation, action.nodeId, action.selector)
+                val semantic = unique(candidates) ?: return failed(candidates)
+                resolved(semantic, semantic, ActionDispatchMode.OBSERVATION_ONLY)
+            }
+            else -> ActionTargetResolution()
+        }
     }
+
+    /** Compatibility semantic-node view for callers that do not dispatch. */
+    fun resolve(action: AgentAction, observation: Observation): UiNodeSnapshot? =
+        resolveActionTarget(action, observation).target?.semanticNode
 
     fun resolveEditable(
         observation: Observation,
         nodeId: Int? = null,
         selector: ElementSelector? = null,
-    ): UiNodeSnapshot? {
-        if (nodeId != null || selector != null) {
-            return NodeSelector.resolve(observation, nodeId, selector)?.takeIf(::isEditableCandidate)
-        }
-        val candidates = editableCandidates(observation)
-        val focused = candidates.filter { it.focused }
-        return focused.singleOrNull() ?: candidates.singleOrNull()
-    }
+    ): UiNodeSnapshot? = editableSemanticCandidates(observation, nodeId, selector).singleOrNull()
 
     fun editableCandidates(observation: Observation): List<UiNodeSnapshot> = observation.nodes.filter(::isEditableCandidate)
 
@@ -602,8 +661,107 @@ object TargetResolver {
             className.contains("checkbox") || className.contains("togglebutton") || className.contains("toggle")
     }
 
+    fun crossWindowStructureKey(node: UiNodeSnapshot): String = node.crossWindowStructureKey.ifBlank {
+        NodeIdentityKeys.crossWindowStructureKey(
+            node.packageName,
+            node.viewId,
+            node.className,
+            node.treePath.orEmpty(),
+        )
+    }
+
+    private fun resolveClick(
+        semanticCandidates: List<UiNodeSnapshot>,
+        observation: Observation,
+    ): ActionTargetResolution {
+        val semantic = unique(semanticCandidates) ?: return failed(semanticCandidates)
+        if (!semantic.visible || !semantic.enabled || semantic.password || semantic.isInputMethod) {
+            return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
+        }
+        if (semantic.clickable) return resolved(semantic, semantic, ActionDispatchMode.ACCESSIBILITY_CLICK)
+        val path = semantic.treePath ?: return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
+        for (distance in 1..MAX_CLICKABLE_PARENT_DEPTH) {
+            if (path.size <= distance) break
+            val parentPath = path.dropLast(distance)
+            val candidates = observation.nodes.filter { candidate ->
+                candidate.treePath == parentPath &&
+                    candidate.packageName == semantic.packageName &&
+                    candidate.windowId == semantic.windowId
+            }
+            if (candidates.size > 1) return ActionTargetResolution(failure = ActionTargetFailure.AMBIGUOUS)
+            val parent = candidates.singleOrNull() ?: continue
+            if (parent.visible && parent.enabled && parent.clickable && !parent.password && !parent.isInputMethod) {
+                return resolved(semantic, parent, ActionDispatchMode.ACCESSIBILITY_CLICK)
+            }
+        }
+        return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
+    }
+
+    private fun resolveEditableTarget(
+        observation: Observation,
+        nodeId: Int?,
+        selector: ElementSelector?,
+        dispatchMode: ActionDispatchMode,
+    ): ActionTargetResolution {
+        val candidates = editableSemanticCandidates(observation, nodeId, selector)
+        val semantic = unique(candidates) ?: return failed(candidates)
+        if (!isEditableCandidate(semantic) || semantic.password) {
+            return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
+        }
+        return resolved(semantic, semantic, dispatchMode)
+    }
+
+    private fun editableSemanticCandidates(
+        observation: Observation,
+        nodeId: Int?,
+        selector: ElementSelector?,
+    ): List<UiNodeSnapshot> {
+        if (nodeId != null || selector != null) {
+            return nodeCandidates(observation, nodeId, selector).filter(::isEditableCandidate)
+        }
+        val candidates = editableCandidates(observation)
+        val focused = candidates.filter { it.focused }
+        return when {
+            focused.size == 1 -> focused
+            focused.size > 1 -> focused
+            else -> candidates
+        }
+    }
+
+    private fun nodeCandidates(
+        observation: Observation,
+        nodeId: Int?,
+        selector: ElementSelector?,
+    ): List<UiNodeSnapshot> = if (selector != null) {
+        NodeSelector.matchingNodes(observation, selector)
+    } else {
+        nodeId?.let { id -> observation.nodes.filter { it.id == id } }.orEmpty()
+    }
+
+    private fun unique(candidates: List<UiNodeSnapshot>): UiNodeSnapshot? = candidates.singleOrNull()
+
+    private fun failed(candidates: List<UiNodeSnapshot>): ActionTargetResolution = ActionTargetResolution(
+        failure = if (candidates.isEmpty()) ActionTargetFailure.MISSING else ActionTargetFailure.AMBIGUOUS,
+    )
+
+    private fun resolved(
+        semantic: UiNodeSnapshot,
+        effective: UiNodeSnapshot,
+        dispatchMode: ActionDispatchMode,
+    ): ActionTargetResolution = ActionTargetResolution(
+        target = ResolvedActionTarget(
+            semanticNode = semantic,
+            effectiveActionNode = effective,
+            dispatchMode = dispatchMode,
+            targetPackage = effective.packageName.ifBlank { semantic.packageName },
+            targetWindowId = effective.windowId ?: semantic.windowId,
+        ),
+    )
+
     private fun isEditableCandidate(node: UiNodeSnapshot): Boolean =
         node.visible && node.enabled && node.editable && !node.isInputMethod
+
+    private const val MAX_CLICKABLE_PARENT_DEPTH = 4
 }
 
 sealed interface AgentAction {

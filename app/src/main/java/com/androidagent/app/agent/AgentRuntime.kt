@@ -397,6 +397,7 @@ class AgentRuntime(
                         continue
                     }
                     val screenshot = screenshotCapture.dataUrl
+                    val screenshotFingerprint = screenshot?.let(TraceSanitizer::digest)
                     val workflowAction = guard.requiredWorkflowAction(before, milestone)
                     var planned: PlannedAction? = null
                     val proposed = if (workflowAction != null) {
@@ -592,6 +593,12 @@ class AgentRuntime(
                             observation: Observation,
                         ): ActionExecutionResult = service.executeDetailed(action, observation)
 
+                        override suspend fun executeDetailed(
+                            action: AgentAction,
+                            observation: Observation,
+                            resolvedTarget: ResolvedActionTarget?,
+                        ): ActionExecutionResult = service.executeDetailed(action, observation, resolvedTarget)
+
                         override suspend fun settle(
                             before: Observation,
                             action: AgentAction,
@@ -640,7 +647,7 @@ class AgentRuntime(
                             runId = runId,
                             sideEffects = sideEffects,
                             preDispatchSnapshots = preDispatchSnapshots,
-                            screenshotFingerprint = before.observationId,
+                            screenshotFingerprint = screenshotFingerprint,
                         ),
                     )
                     val stepAction = engineResult.action ?: proposed
@@ -706,6 +713,12 @@ class AgentRuntime(
                                 "status" to engineResult.status.name,
                                 "reasonCode" to TraceSanitizer.reasonCode(engineResult.reason),
                                 "before" to before.observationId,
+                                "effectiveTargetKey" to engineResult.resolvedTarget?.effectiveActionNode
+                                    ?.let(TargetResolver::crossWindowStructureKey),
+                                "targetPackage" to engineResult.resolvedTarget?.targetPackage,
+                                "targetWindowId" to engineResult.resolvedTarget?.targetWindowId,
+                                "dispatchMode" to engineResult.resolvedTarget?.dispatchMode?.name,
+                                "inputGeneration" to engineResult.inputGeneration,
                             ),
                         )
                         continue
@@ -825,6 +838,12 @@ class AgentRuntime(
                             "after" to after.observationId,
                             "judgement" to judgement.name,
                             "evidence" to evidence,
+                            "effectiveTargetKey" to engineResult.resolvedTarget?.effectiveActionNode
+                                ?.let(TargetResolver::crossWindowStructureKey),
+                            "targetPackage" to engineResult.resolvedTarget?.targetPackage,
+                            "targetWindowId" to engineResult.resolvedTarget?.targetWindowId,
+                            "dispatchMode" to engineResult.resolvedTarget?.dispatchMode?.name,
+                            "inputGeneration" to engineResult.inputGeneration,
                         ),
                     )
                     onLog("Result: ${translateJudgement(judgement)} 路 ${evidence.take(100)}")

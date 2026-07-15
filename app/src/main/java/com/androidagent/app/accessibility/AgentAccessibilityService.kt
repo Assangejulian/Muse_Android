@@ -18,15 +18,14 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.androidagent.app.agent.AgentAction
+import com.androidagent.app.agent.ActionDispatchMode
 import com.androidagent.app.agent.ActionExecutionResult
 import com.androidagent.app.agent.Observation
 import com.androidagent.app.agent.UiNodeSnapshot
-import com.androidagent.app.agent.ElementMatchPolicy
-import com.androidagent.app.agent.ElementSelector
 import com.androidagent.app.agent.InputMode
 import com.androidagent.app.agent.InputActionResultPolicy
-import com.androidagent.app.agent.NodeSelector
 import com.androidagent.app.agent.NodeIdentityKeys
+import com.androidagent.app.agent.ResolvedActionTarget
 import com.androidagent.app.overlay.AgentOverlayController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -82,16 +81,20 @@ class AgentAccessibilityService : AccessibilityService() {
     fun observe(): Observation {
         val nodes = mutableListOf<UiNodeSnapshot>()
         val nextId = AtomicInteger(1)
+        val collectionState = ObservationCollectionState(MAX_NODES, MAX_DEPTH)
         val currentWindows = windows
         val imeVisible = currentWindows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD && it.root != null }
         val observableWindows = currentWindows
             .filter { it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD }
             .sortedByDescending { it.layer }
         observableWindows.forEachIndexed { windowIndex, window ->
-            window.root?.let { root ->
-                if (ObservationPolicy.shouldIncludePackage(root.packageName?.toString())) {
-                    collectNodes(root, nodes, nextId, 0, listOf(windowIndex), window.id)
+            val root = window.root
+            if (root == null) {
+                if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                    collectionState.recordMissingApplicationRoot()
                 }
+            } else if (ObservationPolicy.shouldIncludePackage(root.packageName?.toString())) {
+                collectNodes(root, nodes, nextId, 0, listOf(windowIndex), window.id, collectionState)
             }
         }
         val activePackage = rootInActiveWindow?.packageName?.toString().orEmpty()
@@ -111,10 +114,11 @@ class AgentAccessibilityService : AccessibilityService() {
         }.toMap()
         return Observation(
             packageName = foregroundPackage,
-            nodes = nodes.take(MAX_NODES),
+            nodes = nodes,
             imeVisible = imeVisible,
             windowIds = windowIds,
             windowPackages = windowPackages,
+            isComplete = collectionState.isComplete,
         )
     }
 
@@ -125,8 +129,9 @@ class AgentAccessibilityService : AccessibilityService() {
         depth: Int,
         path: List<Int>,
         windowId: Int,
+        collectionState: ObservationCollectionState,
     ) {
-        if (output.size >= MAX_NODES || depth > MAX_DEPTH) return
+        if (collectionState.shouldStopAtNodeCount(output.size) || collectionState.shouldStopAtDepth(depth)) return
         val rect = Rect().also(node::getBoundsInScreen)
         val text = if (node.isPassword) "" else node.text?.toString().orEmpty()
         val description = node.contentDescription?.toString().orEmpty()
@@ -173,10 +178,14 @@ class AgentAccessibilityService : AccessibilityService() {
                 password = node.isPassword,
                 windowId = windowId,
             )
+            collectionState.recordNodeCount(output.size)
         }
         for (index in 0 until node.childCount) {
-            node.getChild(index)?.let { child ->
-                collectNodes(child, output, nextId, depth + 1, path + index, windowId)
+            val child = node.getChild(index)
+            if (child == null) {
+                collectionState.recordMissingChild()
+            } else {
+                collectNodes(child, output, nextId, depth + 1, path + index, windowId, collectionState)
             }
         }
     }
@@ -185,14 +194,28 @@ class AgentAccessibilityService : AccessibilityService() {
         executeDetailed(action, observation).success
 
     suspend fun executeDetailed(action: AgentAction, observation: Observation): ActionExecutionResult = when (action) {
+        is AgentAction.ClickText,
+        is AgentAction.ClickNode,
+        is AgentAction.InputText,
+        is AgentAction.SubmitInput,
+        is AgentAction.EnsureToggle,
+        -> ActionExecutionResult(false, "target_resolution_required", "runtime must supply the canonical resolved target")
+        else -> executeDetailed(action, observation, null)
+    }
+
+    suspend fun executeDetailed(
+        action: AgentAction,
+        observation: Observation,
+        resolvedTarget: ResolvedActionTarget?,
+    ): ActionExecutionResult = when (action) {
         is AgentAction.LaunchApp -> result(launchApp(action.packageName), "launched", "launch_app")
-        is AgentAction.ClickText -> result(clickText(action.text), "clicked", "click_text")
-        is AgentAction.ClickNode -> result(clickNode(action, observation), "clicked", "click_node")
+        is AgentAction.ClickText -> result(clickResolvedTarget(resolvedTarget), "clicked", "click_text")
+        is AgentAction.ClickNode -> result(clickResolvedTarget(resolvedTarget), "clicked", "click_node")
         is AgentAction.TapPoint -> result(tapNormalized(action.x, action.y), "tapped", "tap_point")
         is AgentAction.Swipe -> result(swipe(action.direction), "swiped", "swipe")
-        is AgentAction.InputText -> inputTextDetailed(action, observation)
-        is AgentAction.SubmitInput -> submitInputDetailed(action, observation)
-        is AgentAction.EnsureToggle -> result(ensureToggle(action, observation), "toggle_updated", "ensure_toggle")
+        is AgentAction.InputText -> inputTextDetailed(action, resolvedTarget)
+        is AgentAction.SubmitInput -> submitInputDetailed(resolvedTarget)
+        is AgentAction.EnsureToggle -> result(ensureToggle(action, resolvedTarget), "toggle_updated", "ensure_toggle")
         is AgentAction.BindPredicate -> ActionExecutionResult(false, "not_executable", "bind_predicate is runtime-only")
         is AgentAction.Back -> result(performGlobalAction(GLOBAL_ACTION_BACK), "back", "back")
         is AgentAction.Home -> result(performGlobalAction(GLOBAL_ACTION_HOME), "home", "home")
@@ -208,58 +231,6 @@ class AgentAccessibilityService : AccessibilityService() {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
         startActivity(intent)
         return true
-    }
-
-    private suspend fun clickText(text: String): Boolean {
-        if (text.isBlank()) return false
-        val visible = rootInActiveWindow?.findAccessibilityNodeInfosByText(text).orEmpty().filter { it.isVisibleToUser && it.isEnabled }
-        val candidates = visible.filterNot { it.isEditable }
-        if (visible.isNotEmpty() && candidates.isEmpty()) return false
-        val exact = candidates.filter {
-            it.text?.toString().equals(text, true) || it.contentDescription?.toString().equals(text, true)
-        }
-        val node = when {
-            exact.size == 1 -> exact.single()
-            exact.isEmpty() && candidates.size == 1 -> candidates.single()
-            else -> null
-        }
-        if (node != null && clickNodeOrParent(node)) return true
-        if (exact.size > 1 || candidates.size > 1) return false
-        return clickTextWithOcr(text)
-    }
-
-    private suspend fun clickTextWithOcr(target: String): Boolean {
-        if (target.isBlank()) return false
-        val bitmap = captureScreen() ?: return false
-        return try {
-            val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
-            val result = recognizer.process(InputImage.fromBitmap(bitmap, 0)).await()
-            recognizer.close()
-            val imeBounds = findInputMethodWindow()?.let { Rect().also(it::getBoundsInScreen) }
-            val elements = result.textBlocks.asSequence()
-                .flatMap { it.lines.asSequence() }
-                .flatMap { line -> line.elements.asSequence() }
-                .filter { element ->
-                    val bounds = element.boundingBox
-                    bounds == null || imeBounds == null || !imeBounds.contains(bounds.centerX(), bounds.centerY())
-                }
-                .toList()
-            val exact = elements.filter { it.text.equals(target, true) }
-            val partial = elements.filter { ImeSubmitPolicy.isSafeOcrPartialMatch(target, it.text) }
-            val candidate = (if (exact.isNotEmpty()) exact else partial)
-                .mapNotNull { it.boundingBox }
-                .filter { bounds ->
-                    NodeClickPolicy.isSafeBounds(bounds.left, bounds.top, bounds.right, bounds.bottom, bitmap.width, bitmap.height)
-                }
-                .singleOrNull() ?: return false
-            Log.i(TAG, "OCR fallback matched chars=${target.length} bounds=$candidate")
-            tap(candidate.exactCenterX(), candidate.exactCenterY())
-        } catch (error: Throwable) {
-            Log.w(TAG, "OCR fallback failed chars=${target.length}", error)
-            false
-        } finally {
-            bitmap.recycle()
-        }
     }
 
     suspend fun recognizeScreenText(): String {
@@ -368,14 +339,12 @@ class AgentAccessibilityService : AccessibilityService() {
         })
     }
 
-    private suspend fun clickNode(action: AgentAction.ClickNode, observation: Observation): Boolean {
-        val current = observe()
-        if (action.selector == null && current.observationId != observation.observationId) return false
-        val snapshot = NodeSelector.resolve(current, action.nodeId, action.selector)
-        if (snapshot == null) return false
+    private suspend fun clickResolvedTarget(resolvedTarget: ResolvedActionTarget?): Boolean {
+        if (resolvedTarget?.dispatchMode != ActionDispatchMode.ACCESSIBILITY_CLICK) return false
+        val snapshot = resolvedTarget?.effectiveActionNode ?: return false
         val liveNode = findLiveNode(snapshot) ?: return false
-        if (!liveNode.isVisibleToUser || !liveNode.isEnabled) return false
-        if (clickNodeOrParent(liveNode)) return true
+        if (!liveNode.isVisibleToUser || !liveNode.isEnabled || !liveNode.isClickable) return false
+        if (liveNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
 
         val bounds = Rect().also(liveNode::getBoundsInScreen)
         if (!NodeClickPolicy.isSafeBounds(
@@ -390,9 +359,18 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private fun findLiveNode(snapshot: UiNodeSnapshot): AccessibilityNodeInfo? {
-        var bestNode: AccessibilityNodeInfo? = null
-        var bestScore = 0
-        var bestCount = 0
+        snapshot.treePath?.let { treePath ->
+            val matchingWindows = windows.filter { window ->
+                snapshot.windowId == null || snapshot.windowId == window.id
+            }
+            if (matchingWindows.size != 1) return null
+            var candidate = matchingWindows.single().root ?: return null
+            for (childIndex in treePath.drop(1)) {
+                candidate = candidate.getChild(childIndex) ?: return null
+            }
+            return candidate.takeIf { liveNodeMatchesSnapshot(it, snapshot) }
+        }
+        val matches = mutableListOf<AccessibilityNodeInfo>()
         windows.sortedByDescending { it.layer }.forEach { window ->
             window.root?.let { root ->
                 val rootPackage = root.packageName?.toString().orEmpty()
@@ -400,51 +378,42 @@ class AgentAccessibilityService : AccessibilityService() {
                     (snapshot.packageName.isBlank() || snapshot.packageName == rootPackage) &&
                     (snapshot.windowId == null || snapshot.windowId == window.id)
                 ) {
-                    findBestLiveNode(root, snapshot, 0, emptyList()) { node, score ->
-                        if (score > bestScore) {
-                            bestNode = node
-                            bestScore = score
-                            bestCount = 1
-                        } else if (score == bestScore) {
-                            bestCount += 1
-                        }
-                    }
+                    collectLiveIdentityMatches(root, snapshot, 0, matches)
                 }
             }
         }
-        val minimumScore = ElementMatchPolicy.minimumScore(snapshot)
-        return bestNode?.takeIf { bestScore >= minimumScore && bestCount == 1 }
+        return matches.singleOrNull()
     }
 
-    private fun findBestLiveNode(
+    private fun liveNodeMatchesSnapshot(node: AccessibilityNodeInfo, snapshot: UiNodeSnapshot): Boolean {
+        if (snapshot.packageName.isNotBlank() && node.packageName?.toString() != snapshot.packageName) return false
+        if (snapshot.className.isNotBlank() && node.className?.toString() != snapshot.className) return false
+        if (snapshot.viewId.isNotBlank() && node.viewIdResourceName != snapshot.viewId) return false
+        return true
+    }
+
+    private fun collectLiveIdentityMatches(
         node: AccessibilityNodeInfo,
         snapshot: UiNodeSnapshot,
         depth: Int,
-        path: List<Int>,
-        onCandidate: (AccessibilityNodeInfo, Int) -> Unit,
+        output: MutableList<AccessibilityNodeInfo>,
     ) {
-        if (depth > MAX_DEPTH) return
+        if (depth > MAX_DEPTH || output.size > 1) return
         val rect = Rect().also(node::getBoundsInScreen)
-        val score = ElementMatchPolicy.score(
-            snapshot = snapshot,
-            packageName = node.packageName?.toString().orEmpty(),
-            viewId = node.viewIdResourceName.orEmpty(),
-            text = node.text?.toString().orEmpty(),
-            description = node.contentDescription?.toString().orEmpty(),
-            className = node.className?.toString().orEmpty(),
-            bounds = "${rect.left},${rect.top},${rect.right},${rect.bottom}",
-            editable = node.isEditable,
-            clickable = node.isClickable,
-            treePath = path,
-        )
-        if (score > 0) onCandidate(node, score)
+        val bounds = "${rect.left},${rect.top},${rect.right},${rect.bottom}"
+        val strongIdentityMatches = liveNodeMatchesSnapshot(node, snapshot) && when {
+            snapshot.viewId.isNotBlank() -> node.viewIdResourceName == snapshot.viewId
+            snapshot.bounds.isNotBlank() -> bounds == snapshot.bounds
+            else -> false
+        }
+        if (strongIdentityMatches) output += node
         for (index in 0 until node.childCount) {
             val child = node.getChild(index) ?: continue
-            findBestLiveNode(child, snapshot, depth + 1, path + index, onCandidate)
+            collectLiveIdentityMatches(child, snapshot, depth + 1, output)
         }
     }
 
-    private fun clickNodeOrParent(start: AccessibilityNodeInfo): Boolean {
+    private fun clickImeNodeOrParent(start: AccessibilityNodeInfo): Boolean {
         var node: AccessibilityNodeInfo? = start
         repeat(5) {
             if (node?.isClickable == true) return node?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
@@ -493,23 +462,20 @@ class AgentAccessibilityService : AccessibilityService() {
         return tap(physicalX, physicalY)
     }
 
-    private suspend fun inputTextDetailed(action: AgentAction.InputText, observation: Observation): ActionExecutionResult {
-        val root = rootInActiveWindow ?: return ActionExecutionResult(false, "target_missing", "no active window")
-        val current = observe()
-        if (action.nodeId != null && action.target == null && current.observationId != observation.observationId) {
-            return ActionExecutionResult(false, "target_missing", "stale numeric input target")
+    private suspend fun inputTextDetailed(
+        action: AgentAction.InputText,
+        resolvedTarget: ResolvedActionTarget?,
+    ): ActionExecutionResult {
+        if (resolvedTarget?.dispatchMode !in setOf(ActionDispatchMode.SET_TEXT, ActionDispatchMode.SET_TEXT_AND_SUBMIT)) {
+            return ActionExecutionResult(false, "target_missing", "input dispatch mode is invalid")
         }
-        val focused = if (action.nodeId != null || action.target != null) {
-            val snapshot = NodeSelector.resolve(current, action.nodeId, action.target)
-                ?: return ActionExecutionResult(false, "target_missing", "input target is missing or ambiguous")
-            if (!snapshot.editable || snapshot.password) return ActionExecutionResult(false, "target_missing", "input target is not editable")
-            findLiveNode(snapshot) ?: return ActionExecutionResult(false, "target_missing", "live input target is missing")
-        } else {
-            root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-                ?.takeIf { it.isEditable && it.isVisibleToUser && !it.isPassword }
-                ?: findUniqueEditableNode(root)
-                ?: return ActionExecutionResult(false, "target_missing", "input target is missing or ambiguous")
+        val snapshot = resolvedTarget?.effectiveActionNode
+            ?: return ActionExecutionResult(false, "target_missing", "input target was not resolved before dispatch")
+        if (!snapshot.editable || snapshot.password) {
+            return ActionExecutionResult(false, "target_missing", "input target is not editable")
         }
+        val focused = findLiveNode(snapshot)
+            ?: return ActionExecutionResult(false, "target_missing", "live input target is missing")
         if (!focused.isFocused) {
             focused.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
             focused.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -525,30 +491,26 @@ class AgentAccessibilityService : AccessibilityService() {
             return InputActionResultPolicy.resolve(false, false, action.submit, false)
         }
         delay(180)
-        val liveText = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text?.toString()
-            ?: focused.text?.toString()
+        focused.refresh()
+        val liveText = focused.text?.toString()
         val verified = liveText == nextText
         if (!verified) return InputActionResultPolicy.resolve(true, false, action.submit, false)
         if (!action.submit) return InputActionResultPolicy.resolve(true, true, false, true)
-        val submit = submitInputDetailed(AgentAction.SubmitInput(action.nodeId, action.target), observation)
+        val submit = submitInputDetailed(resolvedTarget)
         return InputActionResultPolicy.resolve(true, true, true, submit.success)
     }
 
-    private suspend fun submitInputDetailed(action: AgentAction.SubmitInput, observation: Observation): ActionExecutionResult {
-        val current = observe()
-        if (action.nodeId != null && action.target == null && current.observationId != observation.observationId) {
-            return ActionExecutionResult(false, "target_missing", "stale numeric submit target")
+    private suspend fun submitInputDetailed(resolvedTarget: ResolvedActionTarget?): ActionExecutionResult {
+        if (resolvedTarget?.dispatchMode !in setOf(ActionDispatchMode.SUBMIT_INPUT, ActionDispatchMode.SET_TEXT_AND_SUBMIT)) {
+            return ActionExecutionResult(false, "target_missing", "submit dispatch mode is invalid")
         }
-        val node = if (action.nodeId != null || action.target != null) {
-            val snapshot = NodeSelector.resolve(current, action.nodeId, action.target)
-                ?: return ActionExecutionResult(false, "target_missing", "submit target is missing or ambiguous")
-            if (!snapshot.editable || snapshot.password) return ActionExecutionResult(false, "target_missing", "submit target is not editable")
-            findLiveNode(snapshot) ?: return ActionExecutionResult(false, "target_missing", "live submit target is missing")
-        } else {
-            val root = rootInActiveWindow ?: return ActionExecutionResult(false, "target_missing", "no active window")
-            root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: findUniqueEditableNode(root)
-                ?: return ActionExecutionResult(false, "target_missing", "submit target is missing or ambiguous")
+        val snapshot = resolvedTarget?.effectiveActionNode
+            ?: return ActionExecutionResult(false, "target_missing", "submit target was not resolved before dispatch")
+        if (!snapshot.editable || snapshot.password) {
+            return ActionExecutionResult(false, "target_missing", "submit target is not editable")
         }
+        val node = findLiveNode(snapshot)
+            ?: return ActionExecutionResult(false, "target_missing", "live submit target is missing")
         if (!node.isEditable || !node.isVisibleToUser) return ActionExecutionResult(false, "target_missing", "submit target is not actionable")
         if (!node.isFocused) {
             node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
@@ -561,7 +523,7 @@ class AgentAccessibilityService : AccessibilityService() {
 
         val submitKey = findImeSubmitKey()
         if (submitKey != null) {
-            if (clickNodeOrParent(submitKey)) return ActionExecutionResult(true, "submitted", "IME submit key clicked")
+            if (clickImeNodeOrParent(submitKey)) return ActionExecutionResult(true, "submitted", "IME submit key clicked")
             val bounds = Rect().also(submitKey::getBoundsInScreen)
             if (NodeClickPolicy.isSafeBounds(
                     left = bounds.left,
@@ -625,29 +587,12 @@ class AgentAccessibilityService : AccessibilityService() {
         }
     }
 
-    private suspend fun ensureToggle(action: AgentAction.EnsureToggle, observation: Observation): Boolean {
-        val current = observe()
-        if (action.selector == null && current.observationId != observation.observationId) return false
-        val snapshot = NodeSelector.resolve(current, action.nodeId, action.selector) ?: return false
-        return when (val state = ToggleStatePolicy.state(snapshot)) {
-            ToggleState.ON -> if (action.desired) true else clickNode(AgentAction.ClickNode(action.nodeId, action.selector), observation)
-            ToggleState.OFF -> if (action.desired) clickNode(AgentAction.ClickNode(action.nodeId, action.selector), observation) else true
+    private suspend fun ensureToggle(action: AgentAction.EnsureToggle, resolvedTarget: ResolvedActionTarget?): Boolean {
+        val snapshot = resolvedTarget?.semanticNode ?: return false
+        return when (ToggleStatePolicy.state(snapshot)) {
+            ToggleState.ON -> if (action.desired) true else clickResolvedTarget(resolvedTarget)
+            ToggleState.OFF -> if (action.desired) clickResolvedTarget(resolvedTarget) else true
             ToggleState.UNKNOWN -> false
-        }
-    }
-
-    private fun findUniqueEditableNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        val matches = mutableListOf<AccessibilityNodeInfo>()
-        collectEditableNodes(root, matches, 0)
-        return matches.singleOrNull()
-    }
-
-    private fun collectEditableNodes(node: AccessibilityNodeInfo, output: MutableList<AccessibilityNodeInfo>, depth: Int) {
-        if (depth > MAX_DEPTH || output.size > 1) return
-        if (node.isEditable && node.isVisibleToUser && node.isEnabled && !node.isPassword) output += node
-        for (index in 0 until node.childCount) {
-            val child = node.getChild(index) ?: continue
-            collectEditableNodes(child, output, depth + 1)
         }
     }
 
@@ -732,12 +677,6 @@ internal object ImeSubmitPolicy {
         if (positiveIdTokens.any(id::contains)) score += 65
         if (clickable) score += 10
         return score
-    }
-
-    fun isSafeOcrPartialMatch(target: String, recognized: String): Boolean {
-        val normalizedTarget = normalizeLabel(target)
-        val normalizedRecognized = normalizeLabel(recognized)
-        return normalizedTarget.length >= 2 && normalizedRecognized.contains(normalizedTarget, ignoreCase = true)
     }
 
     private fun normalizeLabel(value: String): String = value.trim().lowercase().replace(Regex("[\\s:,.!?]+"), "")

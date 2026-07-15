@@ -228,9 +228,10 @@ class PredicateBindingStore {
         action: AgentAction,
         observation: Observation,
         runId: String? = null,
+        resolvedTarget: ResolvedActionTarget? = null,
     ): BindingPreparation {
         if (action is AgentAction.BindPredicate) return prepareExplicitBinding(milestone, action, observation, runId)
-        val target = actionTarget(action, observation)
+        val target = resolvedTarget?.semanticNode ?: actionTarget(action, observation)
             ?: return if (action is AgentAction.ClickText || action is AgentAction.ClickNode ||
                 action is AgentAction.InputText || action is AgentAction.SubmitInput || action is AgentAction.EnsureToggle
             ) BindingPreparation(false, reason = "action target is missing or ambiguous") else BindingPreparation(true)
@@ -852,6 +853,86 @@ object MilestoneEvaluator {
         ).truthFor(predicateId)
     }
 
+    /**
+     * Evaluates a predicate against an immutable pre-dispatch snapshot. Unlike
+     * live milestone evaluation, complete absence of a concrete selector or
+     * bound identity is deterministic REFUTED evidence.
+     */
+    fun evaluateHistoricalPredicateTruth(
+        predicate: UiPredicate,
+        predicateId: String,
+        preDispatchSnapshot: PreDispatchEvidenceSnapshot,
+        postActionBinding: PredicateBinding?,
+        targetPackage: String?,
+        resolvedValue: String? = predicate.literal,
+    ): PredicateTruth {
+        if (!preDispatchSnapshot.isComplete || preDispatchSnapshot.privacyFiltered) return PredicateTruth.UNKNOWN
+        if (!predicate.targetHint.isNullOrBlank() && predicate.target == null &&
+            (postActionBinding == null || postActionBinding.predicateId != predicateId)
+        ) return PredicateTruth.UNKNOWN
+
+        val observation = preDispatchSnapshot.toObservation()
+        val binding = postActionBinding?.takeIf { it.predicateId == predicateId }
+        val candidates = when {
+            binding != null -> historicalIdentityMatches(preDispatchSnapshot, binding.identity)
+            predicate.target != null -> NodeSelector.matchingNodes(observation, predicate.target)
+            else -> emptyList()
+        }
+        val targetScoped = binding != null || predicate.target != null
+        if (targetScoped && candidates.size > 1) return PredicateTruth.UNKNOWN
+        val target = candidates.singleOrNull()
+
+        fun targetTruth(test: (UiNodeSnapshot) -> Boolean): PredicateTruth {
+            if (!targetScoped) return PredicateTruth.UNKNOWN
+            if (target == null) return PredicateTruth.REFUTED
+            if (target.password || target.isInputMethod) return PredicateTruth.UNKNOWN
+            return if (test(target)) PredicateTruth.PROVEN else PredicateTruth.REFUTED
+        }
+
+        return when (predicate.kind) {
+            UiPredicateKind.PACKAGE_FOREGROUND -> if (
+                preDispatchSnapshot.packageName == (
+                    predicate.targetPackage ?: predicate.target?.packageName ?: targetPackage
+                    )
+            ) PredicateTruth.PROVEN else PredicateTruth.REFUTED
+
+            UiPredicateKind.IME_HIDDEN -> if (!preDispatchSnapshot.imeVisible) PredicateTruth.PROVEN else PredicateTruth.REFUTED
+            UiPredicateKind.TEXT_PRESENT -> {
+                val value = resolvedValue ?: return PredicateTruth.UNKNOWN
+                if (targetScoped) {
+                    targetTruth { node ->
+                        node.visible && (node.text.equals(value, true) || node.description.equals(value, true))
+                    }
+                } else if (observation.nodes.any { node ->
+                        node.visible && !node.password && !node.isInputMethod &&
+                            (node.text.equals(value, true) || node.description.equals(value, true))
+                    }
+                ) PredicateTruth.PROVEN else PredicateTruth.REFUTED
+            }
+
+            UiPredicateKind.EDITABLE_EQUALS -> {
+                val value = resolvedValue ?: return PredicateTruth.UNKNOWN
+                targetTruth { node -> node.visible && node.enabled && node.editable && node.text == value }
+            }
+            UiPredicateKind.ELEMENT_PRESENT -> targetTruth { it.visible }
+            UiPredicateKind.ELEMENT_ENABLED -> targetTruth { it.visible && it.enabled }
+            UiPredicateKind.ELEMENT_SELECTED -> targetTruth { it.visible && it.selected }
+            UiPredicateKind.ELEMENT_CHECKED -> targetTruth { it.visible && it.checked == true }
+            UiPredicateKind.ELEMENT_TEXT_EQUALS -> {
+                val value = resolvedValue ?: return PredicateTruth.UNKNOWN
+                targetTruth { node -> node.visible && (node.text == value || node.description == value) }
+            }
+            UiPredicateKind.TOGGLE_STATE -> targetTruth { node ->
+                node.visible && node.checked != null && node.checked == predicate.expectedChecked
+            }
+            UiPredicateKind.TOGGLE_ON -> targetTruth { node -> node.visible && (node.checked == true || node.selected) }
+            UiPredicateKind.ELEMENT_DISAPPEARED,
+            UiPredicateKind.ELEMENT_STATE,
+            UiPredicateKind.SEMANTIC_CLAIM,
+            -> PredicateTruth.UNKNOWN
+        }
+    }
+
     private fun boundWindowGoneCanProve(
         binding: PredicateBinding,
         observation: Observation,
@@ -889,27 +970,81 @@ object MilestoneEvaluator {
         }.toMap()
         return strongPostconditionsAfter.any { (predicateKey, afterTruth) ->
             if (afterTruth != PredicateTruth.PROVEN) return@any false
-            val before = binding.strongPostconditionTruthBefore[predicateKey]
-                ?: binding.strongPostconditionsBefore[predicateKey]?.let { proven ->
-                    if (proven) PredicateTruth.PROVEN else PredicateTruth.REFUTED
-                }
-                ?: snapshot?.let {
-                val index = predicateIndicesById[predicateKey]
-                if (index == null) null else evaluate(
-                    milestone = milestone,
-                    plan = plan,
-                    observation = it.toObservation(),
+            val index = predicateIndicesById[predicateKey]
+            val before = if (snapshot != null && index != null) {
+                val predicate = milestone.successPredicates[index]
+                evaluateHistoricalPredicateTruth(
+                    predicate = predicate,
+                    predicateId = predicateKey,
+                    preDispatchSnapshot = snapshot,
+                    postActionBinding = bindings?.get(milestone.id, index),
                     targetPackage = targetPackage,
-                    bindings = bindings,
-                    predicateIndices = setOf(index),
-                    runId = runId,
-                    computePositiveEvidence = false,
-                    preDispatchSnapshots = null,
-                ).truthFor(predicateKey)
+                    resolvedValue = when (predicate.valueRef) {
+                        "goal_text" -> plan.goal.originalGoal
+                        else -> predicate.literal
+                    },
+                )
+            } else {
+                binding.strongPostconditionTruthBefore[predicateKey]
+                    ?: binding.strongPostconditionsBefore[predicateKey]?.let { proven ->
+                        if (proven) PredicateTruth.PROVEN else PredicateTruth.REFUTED
+                    }
+                    ?: PredicateTruth.UNKNOWN
             }
             before == PredicateTruth.REFUTED
         }
     }
+
+    private fun historicalIdentityMatches(
+        snapshot: PreDispatchEvidenceSnapshot,
+        identity: BoundElementIdentity,
+    ): List<UiNodeSnapshot> {
+        var candidates = snapshot.nodes.asSequence()
+            .filter { identity.packageName.isBlank() || it.packageName == identity.packageName }
+            .toList()
+        identity.viewIdResourceName?.let { viewId ->
+            candidates = candidates.filter { it.viewIdResourceName == viewId }
+        } ?: identity.crossWindowStructureKey?.let { key ->
+            candidates = candidates.filter { node -> historicalCrossWindowKey(node) == key }
+        }
+        if (identity.className.isNotBlank()) {
+            candidates = candidates.filter { it.className == identity.className }
+        }
+        identity.treePath?.let { path ->
+            candidates = candidates.filter { it.treePath == path }
+        }
+        return candidates.map { node ->
+            UiNodeSnapshot(
+                id = node.id,
+                text = node.safeText.orEmpty(),
+                description = node.safeDescription.orEmpty(),
+                className = node.className,
+                clickable = false,
+                editable = node.editable,
+                bounds = node.bounds.orEmpty(),
+                withinWindowStableKey = node.withinWindowStableKey.orEmpty(),
+                crossWindowStructureKey = node.crossWindowStructureKey.orEmpty(),
+                viewId = node.viewIdResourceName.orEmpty(),
+                treePath = node.treePath,
+                enabled = node.enabled,
+                focused = node.focused,
+                checked = node.checked,
+                selected = node.selected,
+                packageName = node.packageName,
+                visible = node.visible,
+                password = node.password,
+                windowId = node.windowId,
+            )
+        }
+    }
+
+    private fun historicalCrossWindowKey(node: PreDispatchNodeSnapshot): String =
+        node.crossWindowStructureKey ?: NodeIdentityKeys.crossWindowStructureKey(
+            node.packageName,
+            node.viewIdResourceName.orEmpty(),
+            node.className,
+            node.treePath.orEmpty(),
+        )
 
     fun strongPostconditionBaseline(
         milestone: TaskMilestone,
@@ -1076,6 +1211,7 @@ data class GuardResult(
     val action: AgentAction?,
     val rejection: String? = null,
     val shortCircuit: ActionExecutionResult? = null,
+    val resolvedTarget: ResolvedActionTarget? = null,
 )
 
 /** Generic pre-tool validation. It never rewrites model-generated input. */
@@ -1099,70 +1235,63 @@ class ToolGuard(
         if (milestone?.kind == TaskMilestoneKind.LAUNCH_APP && observation.packageName != launchPackage(milestone)) {
             launchPackage(milestone)?.let { return GuardResult(AgentAction.LaunchApp(it)) }
         }
+        var resolvedTarget: ResolvedActionTarget? = null
+        fun resolveRequiredTarget(label: String): GuardResult? {
+            val resolution = TargetResolver.resolveActionTarget(action, observation)
+            val target = resolution.target
+            if (target != null) {
+                resolvedTarget = target
+                return null
+            }
+            val reason = when (resolution.failure) {
+                ActionTargetFailure.AMBIGUOUS -> "$label target is ambiguous in the current observation"
+                ActionTargetFailure.NOT_ACTIONABLE -> "$label target is not actionable in the current observation"
+                else -> "$label target is missing in the current observation"
+            }
+            return GuardResult(null, reason)
+        }
         when (action) {
             is AgentAction.ClickNode -> {
-                val target = resolveTarget(observation, action.nodeId, action.selector)
-                    ?: return GuardResult(null, "node selector is missing or ambiguous in the current observation")
-                if (!target.visible || !target.enabled) return GuardResult(null, "node is not visible and enabled")
-                if (target.isInputMethod || isInputMethodPackage(target.packageName)) {
+                resolveRequiredTarget("click_node")?.let { return it }
+                val target = resolvedTarget!!.semanticNode
+                val effective = resolvedTarget!!.effectiveActionNode
+                if (target.isInputMethod || effective.isInputMethod ||
+                    isInputMethodPackage(target.packageName) || isInputMethodPackage(effective.packageName)
+                ) {
                     return GuardResult(null, "direct IME key clicks are forbidden; use submit_input")
                 }
             }
 
             is AgentAction.ClickText -> {
                 if (action.text.isBlank()) return GuardResult(null, "click_text requires non-blank visible text")
-                val matches = observation.nodes.count { node ->
-                    node.visible && node.enabled && !node.editable &&
-                        (node.text.equals(action.text, true) || node.description.equals(action.text, true))
-                }
-                if (matches > 1) return GuardResult(null, "click_text target is ambiguous in the current observation")
+                resolveRequiredTarget("click_text")?.let { return it }
             }
 
             is AgentAction.InputText -> {
                 if (action.text.length > MAX_INPUT_LENGTH) return GuardResult(null, "input_text is too long")
-                val target = resolveEditable(observation, action.nodeId, action.target)
-                if ((action.nodeId != null || action.target != null) && target == null) {
-                    return GuardResult(null, "input_text selector did not resolve to a unique editable target")
-                }
-                if (target?.password == true) return GuardResult(null, "input_text cannot target a password field")
-                if (target == null) {
-                    val editable = TargetResolver.editableCandidates(observation)
-                    if (editable.count { it.focused } == 1) return GuardResult(action)
-                    if (editable.size > 1) return GuardResult(null, "input_text target is ambiguous; provide nodeId or selector")
-                    if (editable.isEmpty()) return GuardResult(null, "input_text has no editable target")
-                }
+                resolveRequiredTarget("input_text")?.let { return it }
+                if (resolvedTarget!!.semanticNode.password) return GuardResult(null, "input_text cannot target a password field")
             }
 
             is AgentAction.SubmitInput -> {
-                val target = resolveEditable(observation, action.nodeId, action.target)
-                if ((action.nodeId != null || action.target != null) && target == null) {
-                    return GuardResult(null, "submit_input selector did not resolve to a unique editable target")
-                }
-                if (target?.password == true) return GuardResult(null, "submit_input cannot target a password field")
-                val editable = TargetResolver.editableCandidates(observation)
-                if (target == null && editable.count { it.focused } == 0 && editable.size != 1) {
-                    return GuardResult(null, "submit_input target is ambiguous or missing")
-                }
+                resolveRequiredTarget("submit_input")?.let { return it }
+                if (resolvedTarget!!.semanticNode.password) return GuardResult(null, "submit_input cannot target a password field")
             }
 
             is AgentAction.EnsureToggle -> {
-                val target = resolveTarget(observation, action.nodeId, action.selector)
-                    ?: return GuardResult(null, "toggle selector is missing or ambiguous")
-                if (!target.visible || !target.enabled || target.password) return GuardResult(null, "toggle target is not actionable")
-                val current = target.checked ?: target.selected
-                if (current == action.desired) {
+                resolveRequiredTarget("ensure_toggle")?.let { return it }
+                if (resolvedTarget!!.dispatchMode == ActionDispatchMode.OBSERVATION_ONLY) {
                     return GuardResult(
                         action = null,
                         shortCircuit = ActionExecutionResult(true, "already_satisfied", "toggle already has the requested state"),
+                        resolvedTarget = resolvedTarget,
                     )
                 }
             }
 
             is AgentAction.BindPredicate -> {
                 if (action.predicateId.isBlank()) return GuardResult(null, "bind_predicate requires predicateId")
-                if (NodeSelector.resolve(observation, action.nodeId, action.selector) == null) {
-                    return GuardResult(null, "bind_predicate target is missing or ambiguous")
-                }
+                resolveRequiredTarget("bind_predicate")?.let { return it }
             }
 
             is AgentAction.TapPoint -> if (observation.imeVisible) {
@@ -1175,7 +1304,7 @@ class ToolGuard(
 
             else -> Unit
         }
-        return GuardResult(action)
+        return GuardResult(action, resolvedTarget = resolvedTarget)
     }
 
     fun requiredWorkflowAction(observation: Observation, milestone: TaskMilestone? = null): AgentAction? =
@@ -1184,12 +1313,6 @@ class ToolGuard(
         } else null
 
     fun recordDispatch(@Suppress("UNUSED_PARAMETER") action: AgentAction) = Unit
-
-    private fun resolveEditable(observation: Observation, nodeId: Int?, selector: ElementSelector?): UiNodeSnapshot? =
-        TargetResolver.resolveEditable(observation, nodeId, selector)
-
-    private fun resolveTarget(observation: Observation, nodeId: Int?, selector: ElementSelector?): UiNodeSnapshot? =
-        NodeSelector.resolve(observation, nodeId, selector)
 
     private fun isInputMethodPackage(packageName: String?): Boolean {
         val value = packageName.orEmpty().lowercase()
@@ -1244,23 +1367,33 @@ class RunLedger(private var plan: TaskPlan) {
     }
 
     /** Read-only duplicate check. Attempts are charged only by recordDispatch after execution. */
-    fun blockRepeated(action: AgentAction, observation: Observation): String? {
+    fun blockRepeated(
+        action: AgentAction,
+        observation: Observation,
+        resolvedTarget: ResolvedActionTarget? = null,
+        sideEffectIdentity: SideEffectIdentity? = null,
+    ): String? {
         val milestone = currentMilestone ?: return null
-        val unknownKey = unknownActionKey(milestone, action, observation)
+        val unknownKey = unknownActionKey(milestone, action, observation, resolvedTarget, sideEffectIdentity)
         if (unknownKey in unknownDispatches) {
             return "previous dispatch result is unknown for the same milestone, action, and target"
         }
-        val key = screenActionKey(milestone, action, observation)
+        val key = screenActionKey(milestone, action, observation, resolvedTarget, sideEffectIdentity)
         return if (attempts.getOrDefault(key, 0) >= MAX_ATTEMPTS_PER_SCREEN) {
             "strategy exhausted for the same milestone and screen"
         } else null
     }
 
-    fun repeatedRecoveryReason(action: AgentAction, observation: Observation): RecoveryReason? {
+    fun repeatedRecoveryReason(
+        action: AgentAction,
+        observation: Observation,
+        resolvedTarget: ResolvedActionTarget? = null,
+        sideEffectIdentity: SideEffectIdentity? = null,
+    ): RecoveryReason? {
         val milestone = currentMilestone ?: return null
-        return if (unknownActionKey(milestone, action, observation) in unknownDispatches) {
+        return if (unknownActionKey(milestone, action, observation, resolvedTarget, sideEffectIdentity) in unknownDispatches) {
             RecoveryReason.RESULT_UNKNOWN
-        } else if (blockRepeated(action, observation) != null) {
+        } else if (blockRepeated(action, observation, resolvedTarget, sideEffectIdentity) != null) {
             RecoveryReason.REPEATED_ACTION
         } else {
             null
@@ -1271,18 +1404,25 @@ class RunLedger(private var plan: TaskPlan) {
         action: AgentAction,
         observation: Observation,
         resultState: DispatchResultState = DispatchResultState.CONFIRMED,
+        resolvedTarget: ResolvedActionTarget? = null,
+        sideEffectIdentity: SideEffectIdentity? = null,
     ) {
         if (action is AgentAction.Wait || action is AgentAction.BindPredicate) return
         val milestone = currentMilestone ?: return
         if (resultState == DispatchResultState.FAILED) return
-        val key = screenActionKey(milestone, action, observation)
+        val key = screenActionKey(milestone, action, observation, resolvedTarget, sideEffectIdentity)
         attempts[key] = attempts.getOrDefault(key, 0) + 1
         if (resultState == DispatchResultState.RESULT_UNKNOWN) {
-            unknownDispatches += unknownActionKey(milestone, action, observation)
+            unknownDispatches += unknownActionKey(milestone, action, observation, resolvedTarget, sideEffectIdentity)
         }
     }
 
-    fun actionKey(action: AgentAction, observation: Observation): String = stableActionKey(action, observation)
+    fun actionKey(
+        action: AgentAction,
+        observation: Observation,
+        resolvedTarget: ResolvedActionTarget? = null,
+        sideEffectIdentity: SideEffectIdentity? = null,
+    ): String = stableActionKey(action, observation, resolvedTarget, sideEffectIdentity)
 
     fun record(trace: StepTrace) {
         traces += trace
@@ -1313,41 +1453,50 @@ class RunLedger(private var plan: TaskPlan) {
 
     fun evidenceSummary(): String = if (evidence.isEmpty()) "No milestone evidence recorded" else evidence.entries.joinToString("\n") { (id, proof) -> "$id: $proof" }
 
-    private fun screenActionKey(milestone: TaskMilestone, action: AgentAction, observation: Observation): String =
-        "${milestone.id}|${observation.stateFingerprint()}|${stableActionKey(action, observation)}"
+    private fun screenActionKey(
+        milestone: TaskMilestone,
+        action: AgentAction,
+        observation: Observation,
+        resolvedTarget: ResolvedActionTarget?,
+        sideEffectIdentity: SideEffectIdentity?,
+    ): String = "${milestone.id}|${observation.stateFingerprint()}|${stableActionKey(action, observation, resolvedTarget, sideEffectIdentity)}"
 
-    private fun unknownActionKey(@Suppress("UNUSED_PARAMETER") milestone: TaskMilestone, action: AgentAction, observation: Observation): String =
-        stableActionKey(action, observation)
+    private fun unknownActionKey(
+        @Suppress("UNUSED_PARAMETER") milestone: TaskMilestone,
+        action: AgentAction,
+        observation: Observation,
+        resolvedTarget: ResolvedActionTarget?,
+        sideEffectIdentity: SideEffectIdentity?,
+    ): String = stableActionKey(action, observation, resolvedTarget, sideEffectIdentity)
 
-    private fun stableActionKey(action: AgentAction, observation: Observation): String {
-        val target = when (action) {
-            is AgentAction.ClickNode -> NodeSelector.resolve(observation, action.nodeId, action.selector)
-            is AgentAction.InputText -> NodeSelector.resolve(observation, action.nodeId, action.target)
-            is AgentAction.SubmitInput -> NodeSelector.resolve(observation, action.nodeId, action.target)
-            is AgentAction.EnsureToggle -> NodeSelector.resolve(observation, action.nodeId, action.selector)
-            is AgentAction.BindPredicate -> NodeSelector.resolve(observation, action.nodeId, action.selector)
-            is AgentAction.ClickText -> observation.nodes.singleOrNull { node ->
-                node.visible && node.enabled && !node.editable &&
-                    (node.text.equals(action.text, true) || node.description.equals(action.text, true))
-            }
-            else -> null
+    private fun stableActionKey(
+        action: AgentAction,
+        observation: Observation,
+        resolvedTarget: ResolvedActionTarget?,
+        sideEffectIdentity: SideEffectIdentity?,
+    ): String {
+        sideEffectIdentity?.let { identity ->
+            val target = identity.targetCrossWindowStructureKey ?: "no-target"
+            val payload = listOfNotNull(
+                identity.irreversiblePayloadDigest,
+                identity.desiredState,
+                identity.inputGeneration?.let { "generation=$it" },
+            ).joinToString(":")
+            return "${identity.family.name}|$target|$payload"
+        }
+        val target = resolvedTarget?.effectiveActionNode ?: when (action) {
+            is AgentAction.BindPredicate -> TargetResolver.resolve(action, observation)
+            else -> TargetResolver.resolveActionTarget(action, observation).target?.effectiveActionNode
         }
         val targetKey = target?.let { node ->
-            node.crossWindowStructureKey.ifBlank {
-                NodeIdentityKeys.crossWindowStructureKey(
-                    node.packageName,
-                    node.viewId,
-                    node.className,
-                    node.treePath.orEmpty(),
-                )
-            }
+            TargetResolver.crossWindowStructureKey(node)
         } ?: when (action) {
             is AgentAction.TapPoint -> "${action.x},${action.y}"
             else -> "no-target"
         }
         val payload = when (action) {
             is AgentAction.InputText -> "${action.text.length}:${action.text.hashCode()}:${action.mode}:${action.submit}"
-            is AgentAction.ClickText -> action.text.lowercase().hashCode().toString()
+            is AgentAction.ClickText -> ""
             is AgentAction.ClickNode -> ""
             is AgentAction.SubmitInput -> ""
             is AgentAction.EnsureToggle -> action.desired.toString()
@@ -1359,7 +1508,14 @@ class RunLedger(private var plan: TaskPlan) {
             is AgentAction.Fail -> action.reason.hashCode().toString()
             is AgentAction.TapPoint, AgentAction.Back, AgentAction.Home -> ""
         }
-        return "${TraceSanitizer.actionType(action)}|$targetKey|$payload"
+        val actionFamily = when (action) {
+            is AgentAction.ClickText, is AgentAction.ClickNode -> SideEffectFamily.ACTIVATE_CONTROL.name
+            is AgentAction.EnsureToggle -> SideEffectFamily.SET_BOOLEAN_CONTROL.name
+            is AgentAction.InputText -> SideEffectFamily.INPUT_VALUE.name
+            is AgentAction.SubmitInput -> SideEffectFamily.SUBMIT_VALUE.name
+            else -> TraceSanitizer.actionType(action)
+        }
+        return "$actionFamily|$targetKey|$payload"
     }
 
     private companion object { const val MAX_ATTEMPTS_PER_SCREEN = 2 }

@@ -1,4 +1,4 @@
-# Muse Android Agent 0.8.5
+# Muse Android Agent 0.8.6
 
 A private, sideloaded Android 13 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, executes it, and independently checks the result.
 

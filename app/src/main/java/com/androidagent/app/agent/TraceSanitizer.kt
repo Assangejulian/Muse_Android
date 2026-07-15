@@ -13,6 +13,7 @@ object TraceSanitizer {
         "before", "after", "basedon", "judgement", "source",
         "observationid", "fingerprint", "reasoncode", "addedcount", "removedcount",
         "packagechanged", "frompackage", "topackage", "success", "ok", "outcome", "actiontype",
+        "effectivetargetkey", "targetpackage", "targetwindowid", "dispatchmode", "inputgeneration",
     )
 
     fun goal(value: String): String = "[goal length=${value.length} sha256=${digest(value)}]"

@@ -41,6 +41,8 @@ data class SideEffectIdentity(
     val observedChecked: Boolean? = null,
     /** Explicit once-only policy; false for ordinary repeatable actions. */
     val onceOnly: Boolean = false,
+    /** Input/submit idempotence is scoped to one concrete input generation. */
+    val inputGeneration: Int? = null,
 ) {
     companion object {
         fun familyFor(actionType: String): SideEffectFamily = when (actionType.trim().uppercase()) {
@@ -57,6 +59,18 @@ data class SideEffectIdentity(
         }
     }
 }
+
+data class InputTargetKey(
+    val packageName: String,
+    val crossWindowStructureKey: String,
+)
+
+data class InputGenerationReservation(
+    val targetKey: InputTargetKey,
+    val generation: Int,
+    val payloadDigest: String,
+    val advancesGeneration: Boolean,
+)
 
 data class SideEffectRecord(
     val identity: SideEffectIdentity,
@@ -75,6 +89,7 @@ data class SideEffectCheck(
 /** In-memory, run-scoped idempotence ledger. It is cleared when the run ends. */
 class RunScopedSideEffectLedger(val runId: String? = null) {
     private val records = linkedMapOf<SideEffectIdentity, SideEffectRecord>()
+    private val inputGenerations = linkedMapOf<InputTargetKey, Int>()
     private var sequence = 0L
 
     @Synchronized
@@ -96,7 +111,7 @@ class RunScopedSideEffectLedger(val runId: String? = null) {
                     record.identity.family == SideEffectFamily.INPUT_VALUE &&
                     record.identity.submitRequested &&
                     record.identity.onceOnly &&
-                    sameTarget(record.identity, identity)
+                    sameTargetAndGeneration(record.identity, identity)
             }
         } else null
         if (confirmedSubmit != null) {
@@ -139,7 +154,7 @@ class RunScopedSideEffectLedger(val runId: String? = null) {
                     recorded.targetKind == SideEffectTargetKind.BOOLEAN_CONTROL -> sameTarget(recorded, identity)
                 identity.family == SideEffectFamily.SUBMIT_VALUE &&
                     recorded.family == SideEffectFamily.INPUT_VALUE &&
-                    recorded.submitRequested -> sameTarget(recorded, identity)
+                    recorded.submitRequested -> sameTargetAndGeneration(recorded, identity)
                 else -> false
             }
         }
@@ -161,6 +176,40 @@ class RunScopedSideEffectLedger(val runId: String? = null) {
         first.targetPackage == second.targetPackage &&
             first.targetCrossWindowStructureKey == second.targetCrossWindowStructureKey
 
+    private fun sameTargetAndGeneration(first: SideEffectIdentity, second: SideEffectIdentity): Boolean =
+        sameTarget(first, second) && first.inputGeneration == second.inputGeneration
+
+    @Synchronized
+    fun prepareInputGeneration(
+        action: AgentAction.InputText,
+        target: ResolvedActionTarget,
+    ): InputGenerationReservation {
+        val targetKey = inputTargetKey(target)
+        val current = inputGenerations[targetKey] ?: 0
+        val payloadDigest = SideEffectIdentityFactory.inputPayloadDigest(action)
+        val unknownReplay = records.values.any { record ->
+            record.state == SideEffectResultState.UNKNOWN_SIDE_EFFECT &&
+                record.identity.family == SideEffectFamily.INPUT_VALUE &&
+                record.identity.targetPackage == targetKey.packageName &&
+                record.identity.targetCrossWindowStructureKey == targetKey.crossWindowStructureKey &&
+                record.identity.inputGeneration == current &&
+                record.identity.irreversiblePayloadDigest == payloadDigest
+        }
+        return InputGenerationReservation(
+            targetKey = targetKey,
+            generation = if (unknownReplay) current else current + 1,
+            payloadDigest = payloadDigest,
+            advancesGeneration = !unknownReplay,
+        )
+    }
+
+    @Synchronized
+    fun currentInputGeneration(target: ResolvedActionTarget): Int =
+        inputGenerations[inputTargetKey(target)] ?: 0
+
+    @Synchronized
+    fun currentInputGeneration(targetKey: InputTargetKey): Int = inputGenerations[targetKey] ?: 0
+
     /** Records that Android accepted a dispatch, while its outcome is unknown. */
     @Synchronized
     fun markUnknown(
@@ -168,12 +217,14 @@ class RunScopedSideEffectLedger(val runId: String? = null) {
         dispatchObservationId: String,
         dispatchSequence: Long = nextDispatchSequence(),
         preDispatchSnapshotId: String? = null,
+        inputGenerationReservation: InputGenerationReservation? = null,
     ): Boolean {
         // A confirmed identity is diagnostically retained but must not prevent a
         // later legitimate dispatch.  Only an existing UNKNOWN record is a
         // concurrent/ambiguous dispatch conflict; the pre-dispatch check already
         // rejects that case before Android is touched.
         if (records[identity]?.state == SideEffectResultState.UNKNOWN_SIDE_EFFECT) return false
+        if (!commitInputGeneration(identity, inputGenerationReservation)) return false
         records[identity] = SideEffectRecord(
             identity = identity,
             state = SideEffectResultState.UNKNOWN_SIDE_EFFECT,
@@ -191,12 +242,14 @@ class RunScopedSideEffectLedger(val runId: String? = null) {
         dispatchObservationId: String = "",
         dispatchSequence: Long = nextDispatchSequence(),
         preDispatchSnapshotId: String? = null,
+        inputGenerationReservation: InputGenerationReservation? = null,
     ): Boolean {
         val existing = records[identity]
         if (existing != null) {
             records[identity] = existing.copy(state = SideEffectResultState.CONFIRMED)
             return true
         }
+        if (!commitInputGeneration(identity, inputGenerationReservation)) return false
         records[identity] = SideEffectRecord(
             identity = identity,
             state = SideEffectResultState.CONFIRMED,
@@ -220,7 +273,34 @@ class RunScopedSideEffectLedger(val runId: String? = null) {
     @Synchronized
     fun clear() {
         records.clear()
+        inputGenerations.clear()
         sequence = 0L
+    }
+
+    private fun inputTargetKey(target: ResolvedActionTarget): InputTargetKey {
+        val effective = target.effectiveActionNode
+        return InputTargetKey(
+            packageName = target.targetPackage.ifBlank { effective.packageName },
+            crossWindowStructureKey = TargetResolver.crossWindowStructureKey(effective),
+        )
+    }
+
+    private fun commitInputGeneration(
+        identity: SideEffectIdentity,
+        reservation: InputGenerationReservation?,
+    ): Boolean {
+        if (reservation == null) return true
+        if (!reservation.advancesGeneration) return false
+        if (identity.family != SideEffectFamily.INPUT_VALUE ||
+            identity.inputGeneration != reservation.generation ||
+            identity.targetPackage != reservation.targetKey.packageName ||
+            identity.targetCrossWindowStructureKey != reservation.targetKey.crossWindowStructureKey ||
+            identity.irreversiblePayloadDigest != reservation.payloadDigest
+        ) return false
+        val current = inputGenerations[reservation.targetKey] ?: 0
+        if (reservation.generation != current + 1) return false
+        inputGenerations[reservation.targetKey] = reservation.generation
+        return true
     }
 }
 
@@ -322,8 +402,17 @@ class PreDispatchEvidenceStore(private val maxSnapshots: Int = 8) {
                 className = node.className,
                 treePath = node.treePath,
                 bounds = node.bounds.takeIf(String::isNotBlank),
-                withinWindowStableKey = node.withinWindowStableKey.takeIf(String::isNotBlank),
-                crossWindowStructureKey = node.crossWindowStructureKey.takeIf(String::isNotBlank),
+                withinWindowStableKey = node.withinWindowStableKey.takeIf(String::isNotBlank)
+                    ?: node.windowId?.let { windowId ->
+                        NodeIdentityKeys.withinWindowStableKey(
+                            node.packageName,
+                            windowId,
+                            node.viewId,
+                            node.className,
+                            node.treePath.orEmpty(),
+                        )
+                    },
+                crossWindowStructureKey = TargetResolver.crossWindowStructureKey(node),
                 visible = node.visible,
                 enabled = node.enabled,
                 checked = node.checked,
@@ -387,8 +476,12 @@ object SideEffectIdentityFactory {
         action: AgentAction,
         observation: Observation,
         screenshotFingerprint: String? = null,
+        resolvedTarget: ResolvedActionTarget? = null,
+        inputGeneration: Int? = null,
     ): SideEffectIdentity? {
-        val target = targetFor(action, observation)
+        val canonicalTarget = resolvedTarget ?: TargetResolver.resolveActionTarget(action, observation).target
+        val semanticTarget = canonicalTarget?.semanticNode
+        val target = canonicalTarget?.effectiveActionNode
         if (action is AgentAction.ClickNode || action is AgentAction.ClickText ||
             action is AgentAction.EnsureToggle || action is AgentAction.InputText ||
             action is AgentAction.SubmitInput
@@ -400,8 +493,16 @@ object SideEffectIdentityFactory {
         val targetPackage = target?.packageName?.takeIf(String::isNotBlank) ?: observation.packageName.takeIf(String::isNotBlank)
         val targetKey = target?.let(::crossWindowKey)
         val targetKind = target?.let { node ->
-            if (TargetResolver.isBooleanControl(node)) SideEffectTargetKind.BOOLEAN_CONTROL else SideEffectTargetKind.OTHER
+            if (TargetResolver.isBooleanControl(semanticTarget ?: node) || TargetResolver.isBooleanControl(node)) {
+                SideEffectTargetKind.BOOLEAN_CONTROL
+            } else SideEffectTargetKind.OTHER
         } ?: SideEffectTargetKind.OTHER
+        val observedBooleanState = when {
+            semanticTarget != null && TargetResolver.isBooleanControl(semanticTarget) ->
+                semanticTarget.checked ?: semanticTarget.selected
+            target != null && TargetResolver.isBooleanControl(target) -> target.checked ?: target.selected
+            else -> null
+        }
         return when (action) {
             is AgentAction.ClickNode -> SideEffectIdentity(
                 actionType = SideEffectFamily.ACTIVATE_CONTROL.name,
@@ -409,7 +510,7 @@ object SideEffectIdentityFactory {
                 targetCrossWindowStructureKey = targetKey,
                 family = SideEffectFamily.ACTIVATE_CONTROL,
                 targetKind = targetKind,
-                observedChecked = target?.checked,
+                observedChecked = observedBooleanState,
             )
             is AgentAction.ClickText -> SideEffectIdentity(
                 actionType = SideEffectFamily.ACTIVATE_CONTROL.name,
@@ -417,7 +518,7 @@ object SideEffectIdentityFactory {
                 targetCrossWindowStructureKey = targetKey,
                 family = SideEffectFamily.ACTIVATE_CONTROL,
                 targetKind = targetKind,
-                observedChecked = target?.checked,
+                observedChecked = observedBooleanState,
             )
             is AgentAction.EnsureToggle -> SideEffectIdentity(
                 actionType = SideEffectFamily.SET_BOOLEAN_CONTROL.name,
@@ -426,23 +527,26 @@ object SideEffectIdentityFactory {
                 desiredState = action.desired.toString(),
                 family = SideEffectFamily.SET_BOOLEAN_CONTROL,
                 targetKind = SideEffectTargetKind.BOOLEAN_CONTROL,
-                observedChecked = target?.checked,
+                observedChecked = observedBooleanState,
             )
             is AgentAction.InputText -> SideEffectIdentity(
                 actionType = SideEffectFamily.INPUT_VALUE.name,
                 targetPackage = targetPackage,
                 targetCrossWindowStructureKey = targetKey,
-                irreversiblePayloadDigest = TraceSanitizer.digest("${action.mode}|${action.submit}|${action.text.length}|${TraceSanitizer.digest(action.text)}"),
+                irreversiblePayloadDigest = inputPayloadDigest(action),
                 desiredState = "${action.mode.name}|submit=${action.submit}",
                 family = SideEffectFamily.INPUT_VALUE,
                 submitRequested = action.submit,
                 onceOnly = action.submit,
+                inputGeneration = inputGeneration,
             )
             is AgentAction.SubmitInput -> SideEffectIdentity(
                 actionType = SideEffectFamily.SUBMIT_VALUE.name,
                 targetPackage = targetPackage,
                 targetCrossWindowStructureKey = targetKey,
                 family = SideEffectFamily.SUBMIT_VALUE,
+                onceOnly = true,
+                inputGeneration = inputGeneration,
             )
             is AgentAction.LaunchApp -> SideEffectIdentity(
                 actionType = SideEffectFamily.LAUNCH_APP.name,
@@ -486,7 +590,28 @@ object SideEffectIdentityFactory {
         }
     }
 
-    private fun targetFor(action: AgentAction, observation: Observation): UiNodeSnapshot? = TargetResolver.resolve(action, observation)
+    fun requiresIdentity(action: AgentAction): Boolean = when (action) {
+        is AgentAction.LaunchApp,
+        is AgentAction.ClickText,
+        is AgentAction.ClickNode,
+        is AgentAction.TapPoint,
+        is AgentAction.Swipe,
+        is AgentAction.InputText,
+        is AgentAction.SubmitInput,
+        is AgentAction.EnsureToggle,
+        AgentAction.Back,
+        AgentAction.Home,
+        -> true
+        is AgentAction.BindPredicate,
+        is AgentAction.Wait,
+        is AgentAction.Finish,
+        is AgentAction.Fail,
+        -> false
+    }
+
+    fun inputPayloadDigest(action: AgentAction.InputText): String = TraceSanitizer.digest(
+        "${action.mode}|${action.submit}|${action.text.length}|${TraceSanitizer.digest(action.text)}",
+    )
 
     private fun crossWindowKey(node: UiNodeSnapshot): String = node.crossWindowStructureKey.ifBlank {
         NodeIdentityKeys.crossWindowStructureKey(
