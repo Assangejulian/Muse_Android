@@ -23,4 +23,30 @@ class ModelRequestPolicyTest {
         assertEquals(false, body.getBoolean("enable_thinking"))
         assertFalse(body.has("thinking"))
     }
+
+    @Test
+    fun deepseekProManagerMayKeepThinkingEnabled() {
+        val body = JSONObject()
+        ProviderRequestPolicy.configure(
+            body = body,
+            baseUrl = "https://api.deepseek.com",
+            provider = "deepseek",
+            model = "deepseek-v4-pro",
+            allowThinking = true,
+        )
+        assertFalse(body.has("thinking"))
+    }
+
+    @Test
+    fun deepseekActorStillDisablesThinkingByDefault() {
+        val body = JSONObject()
+        ProviderRequestPolicy.configure(
+            body = body,
+            baseUrl = "https://api.deepseek.com",
+            provider = "deepseek",
+            model = "deepseek-v4-pro",
+            allowThinking = false,
+        )
+        assertEquals("disabled", body.getJSONObject("thinking").getString("type"))
+    }
 }

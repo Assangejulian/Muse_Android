@@ -54,8 +54,12 @@ class SecureSettings(context: Context) {
         set(value) = prefs.edit().putString("model_base_url", value.trim().trimEnd('/')).apply()
 
     var modelName: String
-        get() = prefs.getString("model_name", "deepseek-v4-flash").orEmpty().let {
-            if (it == "qwen3.5-omni-plus") "qwen3.6-flash" else it
+        get() = prefs.getString("model_name", "deepseek-v4-pro").orEmpty().let {
+            when (it) {
+                "qwen3.5-omni-plus" -> "qwen3.6-flash"
+                "deepseek-v4-flash" -> "deepseek-v4-pro"
+                else -> it
+            }
         }
         set(value) = prefs.edit().putString("model_name", value.trim()).apply()
 

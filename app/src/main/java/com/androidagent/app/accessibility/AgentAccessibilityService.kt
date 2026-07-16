@@ -119,6 +119,7 @@ class AgentAccessibilityService : AccessibilityService() {
             windowIds = windowIds,
             windowPackages = windowPackages,
             isComplete = collectionState.isComplete,
+            collectionIssues = collectionState.issueSummary(),
         )
     }
 
@@ -329,7 +330,11 @@ class AgentAccessibilityService : AccessibilityService() {
                 val hardwareBuffer = screenshot.hardwareBuffer
                 val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, screenshot.colorSpace)?.copy(Bitmap.Config.ARGB_8888, false)
                 hardwareBuffer.close()
-                if (continuation.isActive) continuation.resume(bitmap)
+                if (continuation.isActive) {
+                    continuation.resume(bitmap)
+                } else {
+                    bitmap?.recycle()
+                }
             }
 
             override fun onFailure(errorCode: Int) {

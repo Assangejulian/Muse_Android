@@ -24,6 +24,8 @@ object PrivacyGuard {
         val packageBlocked = blockedPackages.any(packageName::startsWith)
         val passwordField = observation.nodes.any { it.visible && it.password }
         val matchedTerm = SensitiveOperationPolicy.matchObservation(observation)
+        // Keep model access blocked for sensitive surfaces; the runtime now degrades by
+        // recovering (back/relaunch/replan) instead of aborting the whole run immediately.
         val reason = when {
             packageBlocked -> "system permission or installer surface"
             passwordField -> "password field is visible"
@@ -50,8 +52,12 @@ object PrivacyGuard {
         }
         val privacyFiltered = observation.privacyFiltered || observation.nodes.zip(sanitizedNodes).any { (before, after) ->
             before.password || before.text != after.text || before.description != after.description
-        }
-        return observation.copy(nodes = sanitizedNodes, privacyFiltered = privacyFiltered)
+        } || redact(observation.ocrText) != observation.ocrText
+        return observation.copy(
+            nodes = sanitizedNodes,
+            ocrText = redact(observation.ocrText),
+            privacyFiltered = privacyFiltered,
+        )
     }
 
     private fun redact(value: String, context: String = ""): String = value

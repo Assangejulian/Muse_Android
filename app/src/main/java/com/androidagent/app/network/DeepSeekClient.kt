@@ -304,7 +304,7 @@ class DeepSeekClient(
         SensitiveOperationPolicy.validateGoal(goal.originalGoal).getOrThrow()
         val prompt = """
             You are the isolated Manager of an Android GUI agent. Decompose the complete immutable user goal into
-            2-8 ordered, app-agnostic milestones. Return one JSON object:
+            1-8 ordered, app-agnostic milestones. Return one JSON object:
             {"summary":"...","targetAppHint":"...","allowedPackages":["optional explicit package ids"],"milestones":[
               {"id":"m1","kind":"LAUNCH_APP|INPUT|INTERACTION|VERIFICATION|GENERIC","objective":"...","successPredicates":[
                 {"predicateId":"m1-p1","kind":"PACKAGE_FOREGROUND|TEXT_PRESENT|EDITABLE_EQUALS|IME_HIDDEN|ELEMENT_PRESENT|ELEMENT_DISAPPEARED|ELEMENT_ENABLED|ELEMENT_SELECTED|ELEMENT_CHECKED|ELEMENT_TEXT_EQUALS|TOGGLE_STATE|SEMANTIC_CLAIM",
@@ -318,6 +318,8 @@ class DeepSeekClient(
             Predicate IDs are stable milestone-local contracts; the runtime may complete binding only from a fresh observation.
             For target predicates emit targetHint and leave target unbound unless a stable target is explicitly known from user input.
             PACKAGE_FOREGROUND must include targetPackage. TOGGLE_STATE must include expectedChecked. A targetHint-only predicate is UNKNOWN until the runtime binds one unique live node; an explicit selector may be evaluated only when it resolves uniquely.
+            A LAUNCH_APP milestone must use PACKAGE_FOREGROUND as its only success predicate. If launching one installed
+            app is the complete requested outcome, emit exactly one LAUNCH_APP milestone and do not invent a page-element milestone.
             Never return a semantic-only milestone. SEMANTIC_CLAIM is only auxiliary evidence alongside a deterministic predicate.
             Use literal values only when the user explicitly supplied them or the current observation supplies them.
             Preserve IDs and already proven milestones when revising a plan; add explicit repair milestones for gaps.
@@ -486,7 +488,7 @@ class DeepSeekClient(
                 .put("messages", JSONArray(messages.toString()))
                 .put("tools", JSONArray().put(NativePlannerProtocol.toolDefinition()))
                 .put("tool_choice", NativePlannerProtocol.toolChoice())
-            configureNonThinkingMode(bodyJson, baseUrl, provider)
+            configureRequestMode(bodyJson, baseUrl, provider, model, purpose = "planner-native")
             val request = Request.Builder()
                 .url(completionsUrl(baseUrl))
                 .header("Authorization", "Bearer $apiKey")
@@ -573,7 +575,7 @@ class DeepSeekClient(
                 .put("messages", workingMessages)
             if (jsonMode) bodyJson.put("response_format", JSONObject().put("type", "json_object"))
             requireCompatibleModel(model)
-            configureNonThinkingMode(bodyJson, baseUrl, provider)
+            configureRequestMode(bodyJson, baseUrl, provider, model, purpose)
             val request = Request.Builder()
                 .url(completionsUrl(baseUrl))
                 .header("Authorization", "Bearer $apiKey")
@@ -656,8 +658,22 @@ class DeepSeekClient(
         return "$normalized/chat/completions"
     }
 
-    private fun configureNonThinkingMode(body: JSONObject, baseUrl: String, provider: String) {
-        ProviderRequestPolicy.configure(body, baseUrl, provider)
+    private fun configureRequestMode(
+        body: JSONObject,
+        baseUrl: String,
+        provider: String,
+        model: String,
+        purpose: String,
+    ) {
+        // Manager planning benefits most from DeepSeek V4 Pro thinking mode.
+        val allowThinking = purpose == "manager" || purpose.startsWith("manager-")
+        ProviderRequestPolicy.configure(
+            body = body,
+            baseUrl = baseUrl,
+            provider = provider,
+            model = model,
+            allowThinking = allowThinking,
+        )
     }
 
     private fun requireCompatibleModel(model: String) {
@@ -697,7 +713,7 @@ class DeepSeekClient(
         const val ROUTE_OUTPUT_TOKENS = 2_048
         const val PLAN_OUTPUT_TOKENS = 4_096
         const val MAX_ATTEMPTS = 3
-        const val MAX_MANAGER_PLAN_ATTEMPTS = 2
+        const val MAX_MANAGER_PLAN_ATTEMPTS = 3
     }
 }
 

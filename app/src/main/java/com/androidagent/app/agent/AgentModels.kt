@@ -497,6 +497,10 @@ data class Observation(
     val isComplete: Boolean = true,
     /** True when privacy redaction removed or transformed observable values. */
     val privacyFiltered: Boolean = false,
+    /** Non-fatal collector diagnostics. This must never contain live UI text. */
+    val collectionIssues: String = "none",
+    /** Optional local-only OCR text used when accessibility exposes too little text. */
+    val ocrText: String = "",
 ) {
     val observationId: String get() = stateFingerprint()
 
@@ -523,7 +527,12 @@ data class Observation(
         }
         val topology = "windowIds=${windowIds.sorted().joinToString(",")};windowPackages=" +
             windowPackages.toSortedMap().entries.joinToString(",") { (windowId, owner) -> "$windowId=$owner" }
+        // Diagnostic issue counters can vary while Android recycles virtual
+        // children; they must not make an otherwise stable screen look new.
         val completeness = "isComplete=$isComplete;privacyFiltered=$privacyFiltered"
+        // Local OCR comes from an asynchronous screenshot and is not an
+        // actionable accessibility identity. Excluding it prevents harmless
+        // video/canvas text changes from invalidating a node-bound action.
         val digest = MessageDigest.getInstance("SHA-256")
             .digest("$packageName:$imeVisible:$completeness:$topology:$stableContent".toByteArray())
             .take(12)
@@ -534,10 +543,13 @@ data class Observation(
     fun visibleText(): String = nodes.asSequence()
         .filter { it.visible && !it.password && !it.isInputMethod }
         .joinToString(" ") { "${it.text} ${it.description}" }
+        .let { nodeText -> listOf(nodeText, ocrText).filter(String::isNotBlank).joinToString(" ") }
 
     fun compactText(): String = buildString {
         appendLine("package=$packageName")
         appendLine("imeVisible=$imeVisible")
+        appendLine("observationComplete=$isComplete privacyFiltered=$privacyFiltered nodeCount=${nodes.size} collectionIssues=$collectionIssues")
+        if (ocrText.isNotBlank()) appendLine("localOcr=${ocrText.take(2_000)}")
         prioritizedNodes().take(120).forEach { node ->
             append("#${node.id} ${node.className}")
             if (node.text.isNotBlank() && !node.password) append(" text=${node.text.take(120)}")
@@ -810,7 +822,7 @@ data class AgentUiState(
     val running: Boolean = false,
     val accessibilityConnected: Boolean = false,
     val step: Int = 0,
-    val maxSteps: Int = 24,
+    val maxSteps: Int = 80,
     val status: String = "Idle",
     val goal: String = "",
     val currentAction: String = "",

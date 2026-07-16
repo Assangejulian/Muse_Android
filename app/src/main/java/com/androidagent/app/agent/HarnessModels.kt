@@ -268,14 +268,82 @@ object TaskPlanParser {
     @Suppress("UNUSED_PARAMETER")
     fun parse(raw: String, goal: String, ignoredLegacyValue: String?): TaskPlan = parse(raw, goal)
 
-    fun fallback(goal: GoalContext, targetAppHint: String): TaskPlan = throw TaskPlanException(
-        "Manager plan unavailable after retries; refusing an unverifiable fallback plan",
-    )
+    fun fallback(goal: GoalContext, targetAppHint: String): TaskPlan {
+        val packageName = resolveFallbackPackage(targetAppHint)
+        val launchMilestone = packageName?.let { pkg ->
+            TaskMilestone(
+                id = "launch",
+                objective = "Launch the requested target app",
+                successPredicates = listOf(
+                    UiPredicate(
+                        kind = UiPredicateKind.PACKAGE_FOREGROUND,
+                        targetPackage = pkg,
+                        description = "The primary target app is foreground",
+                        predicateId = "launch-p1",
+                    ),
+                ),
+                kind = TaskMilestoneKind.LAUNCH_APP,
+            )
+        }
+        // Keep fallback deliberately narrow: launch only when a package is known.
+        // Never invent input/search/content milestones that cannot be proven.
+        val milestones = listOfNotNull(launchMilestone).ifEmpty {
+            listOf(
+                TaskMilestone(
+                    id = "reach",
+                    objective = "Bring a relevant installed app into the foreground",
+                    successPredicates = listOf(
+                        UiPredicate(
+                            kind = UiPredicateKind.TEXT_PRESENT,
+                            literal = firstFallbackLiteral(goal.originalGoal),
+                            description = "Goal-related visible text is present",
+                            predicateId = "reach-p1",
+                        ),
+                    ),
+                    kind = TaskMilestoneKind.GENERIC,
+                ),
+            )
+        }
+        return TaskPlanValidator.requireValid(
+            TaskPlan(
+                summary = "Deterministic fallback for: ${goal.originalGoal.take(120)}",
+                targetAppHint = targetAppHint.ifBlank { packageName.orEmpty() },
+                goal = goal,
+                milestones = milestones,
+                allowedPackages = packageName?.let(::setOf) ?: emptySet(),
+            ),
+        )
+    }
 
     fun fallback(goal: String, targetAppHint: String): TaskPlan = fallback(ConservativeGoalInterpreter.interpret(goal), targetAppHint)
 
     @Suppress("UNUSED_PARAMETER")
     fun fallback(goal: String, targetAppHint: String, ignoredLegacyValue: String?): TaskPlan = fallback(goal, targetAppHint)
+
+    private fun resolveFallbackPackage(targetAppHint: String): String? {
+        val value = targetAppHint.trim()
+        if (value.isBlank()) return null
+        // package-like tokens only; never invent selectors or content goals
+        if (value.matches(Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$"))) return value
+        return null
+    }
+
+    private fun firstFallbackLiteral(goal: String): String {
+        val cleaned = goal
+            .replace(Regex("[“”\"']"), " ")
+            .split(Regex("[\\s,，。；;：:]+"))
+            .map { it.trim() }
+            .firstOrNull { token ->
+                token.length in 2..24 &&
+                    !token.equals("打开", true) &&
+                    !token.equals("open", true) &&
+                    !token.equals("launch", true) &&
+                    !token.equals("搜索", true) &&
+                    !token.equals("search", true)
+            }
+            .orEmpty()
+        return cleaned.ifBlank { "ready" }.take(24)
+    }
 
     private fun extractObject(raw: String): String {
         val start = raw.indexOf('{')

@@ -11,6 +11,7 @@ enum class RecoveryReason {
     APP_NOT_RESPONDING,
     NETWORK_ERROR,
     RESULT_UNKNOWN,
+    SENSITIVE_SURFACE,
 }
 
 enum class RecoveryAction { REOBSERVE, REPLAN, BACK, DISMISS, WAIT, RELAUNCH, ABORT }
@@ -33,9 +34,9 @@ data class RecoveryDecision(
 )
 
 class RecoveryPolicy(
-    private val maxActionRetries: Int = 2,
-    private val maxScreenRepeats: Int = 3,
-    private val maxRecoveries: Int = 6,
+    private val maxActionRetries: Int = 3,
+    private val maxScreenRepeats: Int = 4,
+    private val maxRecoveries: Int = 12,
 ) {
     private val consecutiveFailuresByKey = mutableMapOf<String, Int>()
     var consecutiveRecoveries: Int = 0
@@ -59,7 +60,11 @@ class RecoveryPolicy(
         val decision = when (context.reason) {
             RecoveryReason.SCREEN_UNCHANGED -> if (count < maxScreenRepeats) RecoveryAction.REOBSERVE else RecoveryAction.REPLAN
             RecoveryReason.REPEATED_ACTION, RecoveryReason.ABAB_LOOP -> RecoveryAction.REPLAN
-            RecoveryReason.TARGET_MISSING, RecoveryReason.AMBIGUOUS_TARGET -> if (count == 0) RecoveryAction.REOBSERVE else RecoveryAction.REPLAN
+            RecoveryReason.TARGET_MISSING, RecoveryReason.AMBIGUOUS_TARGET -> when {
+                context.failedAction is AgentAction.BindPredicate -> RecoveryAction.REPLAN
+                count == 0 -> RecoveryAction.REOBSERVE
+                else -> RecoveryAction.REPLAN
+            }
             RecoveryReason.WRONG_PACKAGE -> if (count == 0) RecoveryAction.REOBSERVE else RecoveryAction.REPLAN
             RecoveryReason.INPUT_FAILED -> if (count < maxActionRetries) RecoveryAction.REOBSERVE else RecoveryAction.REPLAN
             RecoveryReason.APP_NOT_RESPONDING -> when {
@@ -72,6 +77,11 @@ class RecoveryPolicy(
             RecoveryReason.RESULT_UNKNOWN -> when (count) {
                 0 -> RecoveryAction.REOBSERVE
                 1 -> RecoveryAction.WAIT
+                else -> RecoveryAction.REPLAN
+            }
+            RecoveryReason.SENSITIVE_SURFACE -> when {
+                count == 0 -> RecoveryAction.BACK
+                count == 1 -> RecoveryAction.RELAUNCH
                 else -> RecoveryAction.REPLAN
             }
         }

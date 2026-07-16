@@ -31,8 +31,8 @@ class ActionParserTest {
     }
 
     @Test
-    fun rejectsFieldsThatDoNotBelongToTheAction() {
-        assertTrue(runCatching { ActionParser.parse("""{"action":"back","text":"hidden"}""") }.isFailure)
+    fun ignoresUnknownFieldsThatDoNotBelongToTheAction() {
+        assertEquals(AgentAction.Back, ActionParser.parse("""{"action":"back","text":"hidden","note":"extra"}"""))
         assertTrue(runCatching { ActionParser.parse("""{"action":"ensure_toggle","nodeId":1}""") }.isFailure)
     }
 

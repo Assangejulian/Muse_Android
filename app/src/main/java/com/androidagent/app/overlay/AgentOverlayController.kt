@@ -16,6 +16,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.androidagent.app.R
 import com.androidagent.app.accessibility.AgentController
 import com.androidagent.app.agent.AgentUiState
 
@@ -31,7 +32,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
             return
         }
         if (borderView == null) show()
-        statusText?.text = "第 ${state.step} 步 · ${statusLabel(state.status)}"
+        statusText?.text = service.getString(R.string.agent_overlay_status, state.step, statusLabel(state.status))
     }
 
     fun hide() {
@@ -78,14 +79,14 @@ class AgentOverlayController(private val service: AccessibilityService) {
             }
         }
         statusText = TextView(service).apply {
-            text = "AI 正在操作"
+            setText(R.string.agent_overlay_operating)
             setTextColor(Color.WHITE)
             textSize = 15f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         val stop = Button(service).apply {
-            text = "停止"
+            setText(R.string.agent_overlay_stop)
             isAllCaps = false
             setTextColor(Color.WHITE)
             background = GradientDrawable().apply {
@@ -126,6 +127,7 @@ private class IntelligenceBorderView(context: android.content.Context) : View(co
         strokeWidth = 7 * resources.displayMetrics.density
     }
     private var phase = 0f
+    private var gradient: LinearGradient? = null
     private val animator = ValueAnimator.ofFloat(0f, 1f).apply {
         duration = 2200
         repeatCount = ValueAnimator.INFINITE
@@ -137,15 +139,29 @@ private class IntelligenceBorderView(context: android.content.Context) : View(co
     fun start() = animator.start()
     fun stop() = animator.cancel()
 
+    override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight)
+        gradient = LinearGradient(
+            0f,
+            0f,
+            width.toFloat(),
+            height.toFloat(),
+            intArrayOf(
+                Color.rgb(72, 210, 255),
+                Color.rgb(152, 92, 255),
+                Color.rgb(72, 255, 181),
+                Color.rgb(72, 210, 255),
+            ),
+            floatArrayOf(0f, .34f, .68f, 1f),
+            Shader.TileMode.CLAMP,
+        )
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         paint.alpha = (150 + phase * 95).toInt()
         paint.strokeWidth = (5 + phase * 3) * resources.displayMetrics.density
-        paint.shader = LinearGradient(
-            0f, 0f, width.toFloat(), height.toFloat(),
-            intArrayOf(Color.rgb(72, 210, 255), Color.rgb(152, 92, 255), Color.rgb(72, 255, 181), Color.rgb(72, 210, 255)),
-            floatArrayOf(0f, .34f, .68f, 1f), Shader.TileMode.CLAMP,
-        )
+        paint.shader = gradient
         val inset = paint.strokeWidth / 2
         canvas.drawRoundRect(inset, inset, width - inset, height - inset, 24 * resources.displayMetrics.density, 24 * resources.displayMetrics.density, paint)
     }

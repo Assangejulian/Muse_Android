@@ -83,7 +83,7 @@ class AgentTraceStore(context: Context) {
                 listOf(cursor.getString(0), cursor.getString(1), cursor.getString(2), cursor.getString(3).orEmpty())
             }
         val events = buildList {
-            db.query("events", arrayOf("event_type", "payload"), "run_id=?", arrayOf(run[0]), null, null, "id DESC", "40")
+            db.query("events", arrayOf("event_type", "payload"), "run_id=?", arrayOf(run[0]), null, null, "id DESC", "120")
                 .use { cursor ->
                     while (cursor.moveToNext()) add("${cursor.getString(0)}: ${cursor.getString(1)}")
                 }

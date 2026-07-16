@@ -88,13 +88,13 @@ class DeepSeekClientTest {
     }
 
     @Test
-    fun rejectsInvalidNativeArgumentsThroughActionParser() {
+    fun ignoresUnknownNativeArgumentFieldsThroughActionParser() {
         val response = """
             {
               "choices": [{
                 "message": {
                   "tool_calls": [{
-                    "id": "call_bad",
+                    "id": "call_extra",
                     "type": "function",
                     "function": {
                       "name": "android_action",
@@ -106,7 +106,8 @@ class DeepSeekClientTest {
             }
         """.trimIndent()
 
-        assertTrue(runCatching { NativePlannerProtocol.parseActionResponse(response) }.isFailure)
+        val planned = NativePlannerProtocol.parseActionResponse(response)
+        assertEquals(AgentAction.Back, planned.action)
     }
 
     @Test

@@ -12,12 +12,30 @@ internal object ModelRetryPolicy {
 }
 
 internal object ProviderRequestPolicy {
-    fun configure(body: JSONObject, baseUrl: String, provider: String) {
+    /**
+     * @param allowThinking When true and the provider is DeepSeek V4 Pro, leave
+     * thinking enabled for stronger multi-step planning. Other paths stay non-thinking
+     * for latency and cost.
+     */
+    fun configure(
+        body: JSONObject,
+        baseUrl: String,
+        provider: String,
+        model: String = "",
+        allowThinking: Boolean = false,
+    ) {
+        val deepseek = provider.equals("deepseek", true) ||
+            (provider.isBlank() && baseUrl.contains("deepseek.com", true))
+        val qwen = provider.equals("qwen", true) ||
+            (provider.isBlank() && baseUrl.contains("aliyuncs.com", true))
         when {
-            provider.equals("qwen", true) -> body.put("enable_thinking", false)
-            provider.equals("deepseek", true) -> body.put("thinking", JSONObject().put("type", "disabled"))
-            provider.isBlank() && baseUrl.contains("aliyuncs.com", true) -> body.put("enable_thinking", false)
-            provider.isBlank() && baseUrl.contains("deepseek.com", true) -> body.put("thinking", JSONObject().put("type", "disabled"))
+            qwen -> body.put("enable_thinking", false)
+            deepseek -> {
+                val proThinking = allowThinking && model.contains("deepseek-v4-pro", ignoreCase = true)
+                if (!proThinking) {
+                    body.put("thinking", JSONObject().put("type", "disabled"))
+                }
+            }
         }
     }
 }

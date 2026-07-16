@@ -30,13 +30,14 @@ class ObservationCollectionStateTest {
     }
 
     @Test
-    fun missingExpectedRootOrChildMarksCollectionIncomplete() {
+    fun missingExpectedRootMarksCollectionIncompleteButNullableChildIsDiagnosticOnly() {
         val missingRoot = ObservationCollectionState(maxNodes = 250, maxDepth = 30)
         missingRoot.recordMissingApplicationRoot()
         assertFalse(missingRoot.isComplete)
 
         val missingChild = ObservationCollectionState(maxNodes = 250, maxDepth = 30)
         missingChild.recordMissingChild()
-        assertFalse(missingChild.isComplete)
+        assertTrue(missingChild.isComplete)
+        assertTrue(missingChild.issueSummary().contains("unresolved_children=1"))
     }
 }

@@ -26,6 +26,22 @@ class ObservationFingerprintContractTest {
         assertEquals(first.observationId, second.observationId)
     }
 
+    @Test
+    fun diagnosticCollectorCountersDoNotCreateFalseScreenChanges() {
+        val first = observation().copy(collectionIssues = "unresolved_children=1")
+        val second = observation().copy(collectionIssues = "unresolved_children=3")
+
+        assertEquals(first.observationId, second.observationId)
+    }
+
+    @Test
+    fun localOcrDoesNotInvalidateAccessibilityBoundObservationIdentity() {
+        val first = observation().copy(ocrText = "Loading")
+        val second = observation().copy(ocrText = "Ready")
+
+        assertEquals(first.observationId, second.observationId)
+    }
+
     private fun observation(text: String = "Ready") = Observation(
         packageName = "primary.app",
         nodes = listOf(

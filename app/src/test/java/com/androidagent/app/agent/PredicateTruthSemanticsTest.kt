@@ -41,6 +41,52 @@ class PredicateTruthSemanticsTest {
     }
 
     @Test
+    fun visiblePositiveEvidenceRemainsProvenInPartialObservation() {
+        val packageMilestone = TaskMilestone(
+            "launch",
+            "launch target",
+            listOf(
+                UiPredicate(
+                    UiPredicateKind.PACKAGE_FOREGROUND,
+                    predicateId = "launch-p1",
+                    targetPackage = "primary.app",
+                    description = "primary app is foreground",
+                ),
+            ),
+        )
+        val textMilestone = TaskMilestone(
+            "ready",
+            "find ready",
+            listOf(UiPredicate(UiPredicateKind.TEXT_PRESENT, predicateId = "ready-p1", literal = "Ready", description = "ready is visible")),
+        )
+        val partial = Observation("primary.app", listOf(node(1, "Ready", "TextView")), isComplete = false)
+
+        assertEquals(
+            PredicateTruth.PROVEN,
+            MilestoneEvaluator.evaluatePredicateTruth(packageMilestone, plan(packageMilestone), partial, "primary.app", 0),
+        )
+        assertEquals(
+            PredicateTruth.PROVEN,
+            MilestoneEvaluator.evaluatePredicateTruth(textMilestone, plan(textMilestone), partial, "primary.app", 0),
+        )
+    }
+
+    @Test
+    fun missingEvidenceRemainsUnknownInPartialObservation() {
+        val milestone = TaskMilestone(
+            "m1",
+            "find text",
+            listOf(UiPredicate(UiPredicateKind.TEXT_PRESENT, predicateId = "ready-p1", literal = "Ready", description = "ready is visible")),
+        )
+        val partial = Observation("primary.app", emptyList(), isComplete = false)
+
+        assertEquals(
+            PredicateTruth.UNKNOWN,
+            MilestoneEvaluator.evaluatePredicateTruth(milestone, plan(milestone), partial, "primary.app", 0),
+        )
+    }
+
+    @Test
     fun actionBeforeAbsentAndAfterUniqueTextAppearsIsProven() {
         val milestone = TaskMilestone(
             "m1",

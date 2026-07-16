@@ -9,7 +9,10 @@ import org.junit.Test
 class GenericSearchRegressionTest {
     @Test
     fun fallbackDoesNotInventInputOrContentMilestones() {
-        assertTrue(runCatching { TaskPlanParser.fallback("Complete a multi-step task", "example.app") }.isFailure)
+        val plan = TaskPlanParser.fallback("Complete a multi-step task", "example.app")
+        assertEquals(1, plan.milestones.size)
+        assertEquals(TaskMilestoneKind.LAUNCH_APP, plan.milestones.single().kind)
+        assertFalse(plan.milestones.any { it.kind == TaskMilestoneKind.INPUT })
     }
 
     @Test

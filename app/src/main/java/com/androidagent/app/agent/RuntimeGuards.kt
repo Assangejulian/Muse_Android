@@ -719,8 +719,9 @@ object MilestoneEvaluator {
                 UiPredicateKind.TOGGLE_ON,
             )
             fun observableTruth(proven: Boolean, forceUnknown: Boolean = false): PredicateTruth = when {
-                forceUnknown || observation.privacyFiltered || !observation.isComplete -> PredicateTruth.UNKNOWN
+                forceUnknown -> PredicateTruth.UNKNOWN
                 proven -> PredicateTruth.PROVEN
+                observation.privacyFiltered || !observation.isComplete -> PredicateTruth.UNKNOWN
                 else -> PredicateTruth.REFUTED
             }
             val truth = when (predicate.kind) {
@@ -749,12 +750,16 @@ object MilestoneEvaluator {
                         } ?: observableTruth(false)
                     }
                 } else {
-                    if (observation.privacyFiltered || !observation.isComplete) {
-                        PredicateTruth.UNKNOWN
-                    } else if (observation.nodes.any { node ->
+                    if (observation.nodes.any { node ->
                         node.visible && !node.password && !node.isInputMethod &&
                             (node.text.equals(value, true) || node.description.equals(value, true))
-                    }) PredicateTruth.PROVEN else PredicateTruth.REFUTED
+                    } || observation.ocrText.lineSequence().any { it.trim().equals(value, true) }) {
+                        PredicateTruth.PROVEN
+                    } else if (observation.privacyFiltered || !observation.isComplete) {
+                        PredicateTruth.UNKNOWN
+                    } else {
+                        PredicateTruth.REFUTED
+                    }
                 }
 
                 UiPredicateKind.EDITABLE_EQUALS -> if (!bindingRequired || !concreteStateTarget || value == null || target == null) {
@@ -776,7 +781,11 @@ object MilestoneEvaluator {
                 UiPredicateKind.ELEMENT_DISAPPEARED -> if (!bindingRequired || bound == null) {
                     PredicateTruth.UNKNOWN
                 } else when (identityResolution) {
-                    IdentityResolution.MissingInSameWindow -> PredicateTruth.PROVEN
+                    IdentityResolution.MissingInSameWindow -> if (observation.isComplete && !observation.privacyFiltered) {
+                        PredicateTruth.PROVEN
+                    } else {
+                        PredicateTruth.UNKNOWN
+                    }
                     IdentityResolution.BoundWindowGone -> if (boundWindowGoneCanProve(
                         binding = bound,
                         observation = observation,
@@ -1592,5 +1601,5 @@ class RunLedger(private var plan: TaskPlan) {
         ).joinToString("|")
     }
 
-    private companion object { const val MAX_ATTEMPTS_PER_SCREEN = 2 }
+    private companion object { const val MAX_ATTEMPTS_PER_SCREEN = 4 }
 }

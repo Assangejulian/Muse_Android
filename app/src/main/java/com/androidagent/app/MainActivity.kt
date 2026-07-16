@@ -44,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -121,7 +122,7 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
     var updateMessage by remember { mutableStateOf<String?>(null) }
     var downloadProgress by remember { mutableStateOf<DownloadProgress?>(null) }
     var updateJob by remember { mutableStateOf<Job?>(null) }
-    var nextRunAt by remember { mutableStateOf(settings.nextRunAt) }
+    var nextRunAt by remember { mutableLongStateOf(settings.nextRunAt) }
     val apps = remember { catalog.list() }
     val updater = remember { GitHubUpdater(context) }
 
@@ -187,7 +188,7 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                         val values = when (preset) {
                             "qwen" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "qwen3.6-flash"
                             "mimo" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "mimo-v2.5-pro"
-                            else -> "https://api.deepseek.com" to "deepseek-v4-flash"
+                            else -> "https://api.deepseek.com" to "deepseek-v4-pro"
                         }
                         settings.currentProvider = preset
                         activeProvider = preset

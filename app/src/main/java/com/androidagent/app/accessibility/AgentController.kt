@@ -52,12 +52,6 @@ object AgentController {
     @Volatile
     private var runGeneration: Long = 0
 
-    /** Compatibility view for the UI. Workers must use resultForRun(runId). */
-    @Deprecated("Use resultForRun(runId) to avoid cross-run races")
-    @Volatile
-    var lastResult: RuntimeResult? = null
-        private set
-
     fun setAccessibilityConnected(connected: Boolean) = update { copy(accessibilityConnected = connected) }
     fun setCurrentPackage(packageName: String) = update { copy(currentPackage = packageName) }
 
@@ -91,7 +85,6 @@ object AgentController {
         val effectiveGoal = goalOverride?.trim().takeUnless { it.isNullOrBlank() } ?: settings.taskGoal
         if (settings.apiKey.isBlank() || effectiveGoal.isBlank()) {
             val result = RuntimeResult.failure(RuntimeOutcome.PERMANENT_PLAN_ERROR, "API key and a permitted task goal are required")
-            lastResult = result
             update { copy(status = "Failed", outcome = result.reason, goal = effectiveGoal) }
             log("Invalid task goal or missing API key")
             return AgentStartResult.InvalidGoal
@@ -99,7 +92,6 @@ object AgentController {
         val safetyFailure = SensitiveOperationPolicy.validateGoal(effectiveGoal).exceptionOrNull()
         if (safetyFailure != null) {
             val result = RuntimeResult.failure(RuntimeOutcome.SAFETY_BLOCKED, "SAFETY_BLOCKED: ${safetyFailure.message.orEmpty()}")
-            lastResult = result
             update { copy(status = "Blocked", outcome = result.reason, goal = effectiveGoal) }
             log("Safety policy blocked the task goal")
             return AgentStartResult.SafetyBlocked(result.reason)
@@ -108,7 +100,6 @@ object AgentController {
         val service = AgentAccessibilityService.current()
             ?: run {
                 val result = RuntimeResult.failure(RuntimeOutcome.ACCESSIBILITY_DISCONNECTED, "Accessibility service is not connected")
-                lastResult = result
                 update { copy(status = "Failed", outcome = result.reason, accessibilityConnected = false, goal = effectiveGoal) }
                 log(result.reason)
                 return AgentStartResult.AccessibilityDisconnected
@@ -118,12 +109,11 @@ object AgentController {
         val runId = UUID.randomUUID().toString()
         activeRunId = runId
         runResults.registerRun(runId)
-        lastResult = null
         update {
             copy(
                 running = false,
                 step = 0,
-                maxSteps = 24,
+                maxSteps = 80,
                 status = "Preparing",
                 goal = effectiveGoal,
                 currentAction = "",
@@ -146,7 +136,7 @@ object AgentController {
                     runIdOverride = runId,
                     cancellationOutcomeProvider = { runResults.stopCauseFor(runId)?.runtimeOutcome() },
                 ).run()
-                storeResult(generation, runId, result)
+                storeResult(runId, result)
                 if (result.succeeded) {
                     logFor(generation, "Verified completion: ${result.reason}")
                     updateFor(generation) { copy(status = "Succeeded: ${result.reason}", outcome = result.reason) }
@@ -158,11 +148,11 @@ object AgentController {
                 val cause = runResults.stopCauseFor(runId) ?: AgentStopCause.APP_SHUTDOWN
                 val outcome = cause.runtimeOutcome()
                 val reason = cause.reason()
-                storeResult(generation, runId, RuntimeResult.failure(outcome, reason, runId))
+                storeResult(runId, RuntimeResult.failure(outcome, reason, runId))
                 updateFor(generation) { copy(status = if (outcome == RuntimeOutcome.TIMEOUT) "Timed out" else "Cancelled", outcome = reason) }
             } catch (error: Throwable) {
                 val result = RuntimeResult.failure(RuntimeOutcome.INTERNAL_ERROR, error.message ?: error::class.simpleName.orEmpty(), runId)
-                storeResult(generation, runId, result)
+                storeResult(runId, result)
                 Log.e(TAG, "Agent runtime failed", error)
                 logFor(generation, "Failed: ${error.message ?: error::class.simpleName}")
                 updateFor(generation) { copy(status = "Failed", outcome = result.reason) }
@@ -223,10 +213,9 @@ object AgentController {
         }
     }
 
-    private fun storeResult(generation: Long, runId: String, result: RuntimeResult) {
+    private fun storeResult(runId: String, result: RuntimeResult) {
         val normalized = if (result.runId == runId) result else result.copy(runId = runId)
-        val stored = runResults.storeResult(runId, normalized)
-        if (stored && generation == runGeneration) lastResult = normalized
+        runResults.storeResult(runId, normalized)
     }
 
     private fun log(message: String) {

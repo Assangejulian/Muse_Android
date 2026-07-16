@@ -11,22 +11,8 @@ object ActionParser {
         val clean = trimmed.substring(start, end + 1)
         val json = JSONObject(clean)
         val action = json.getString("action")
-        val actionFields = when (action) {
-            "launch_app" -> setOf("action", "packageName")
-            "click_text" -> setOf("action", "text", "predicateId")
-            "click_node" -> setOf("action", "nodeId", "selector", "predicateId")
-            "tap_point" -> setOf("action", "x", "y")
-            "swipe" -> setOf("action", "direction")
-            "input_text" -> setOf("action", "text", "nodeId", "target", "mode", "submit", "predicateId")
-            "submit_input" -> setOf("action", "nodeId", "target", "predicateId")
-            "ensure_toggle" -> setOf("action", "nodeId", "desired", "selector", "predicateId")
-            "bind_predicate", "inspect_element" -> setOf("action", "predicateId", "nodeId", "selector")
-            "wait" -> setOf("action", "milliseconds")
-            "finish", "fail" -> setOf("action", "reason")
-            "back", "home" -> setOf("action")
-            else -> error("Unknown action")
-        }
-        require(json.keys().asSequence().all { it in actionFields }) { "Unexpected field for $action" }
+        // Ignore unknown fields instead of rejecting the whole turn; models often
+        // add commentary keys that do not change the executable contract.
         return when (action) {
             "launch_app" -> AgentAction.LaunchApp(json.getString("packageName").also { require(it.isNotBlank()) })
             "click_text" -> AgentAction.ClickText(

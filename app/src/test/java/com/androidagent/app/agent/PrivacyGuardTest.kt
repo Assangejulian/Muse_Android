@@ -36,6 +36,21 @@ class PrivacyGuardTest {
     }
 
     @Test
+    fun redactsLocalOcrBeforeModelAccess() {
+        val sanitized = PrivacyGuard.sanitize(
+            Observation(
+                packageName = "contacts.app",
+                nodes = emptyList(),
+                ocrText = "Contact 13800138000 user@example.com",
+            ),
+        )
+
+        assertFalse(sanitized.ocrText.contains("13800138000"))
+        assertFalse(sanitized.ocrText.contains("user@example.com"))
+        assertTrue(sanitized.privacyFiltered)
+    }
+
+    @Test
     fun ordinaryScreenCanReachModel() {
         assertTrue(PrivacyGuard.prepare(Observation("video.app", listOf(UiNodeSnapshot(1, "hello", "", "Button", true, false, "0,0,100,30")))).allowed)
     }

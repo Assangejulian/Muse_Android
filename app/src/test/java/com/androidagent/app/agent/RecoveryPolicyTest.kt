@@ -35,6 +35,18 @@ class RecoveryPolicyTest {
     }
 
     @Test
+    fun missingPredicateBindingReplansImmediately() {
+        val policy = RecoveryPolicy(maxRecoveries = 6)
+        val context = RecoveryContext(
+            currentMilestoneId = "m1",
+            failedAction = AgentAction.BindPredicate("m1-p1", selector = ElementSelector(text = "Target")),
+            reason = RecoveryReason.TARGET_MISSING,
+        )
+
+        assertEquals(RecoveryAction.REPLAN, policy.decide(context).action)
+    }
+
+    @Test
     fun networkRecoveryUsesIndependentBackoffBudget() {
         val policy = RecoveryPolicy(maxActionRetries = 2, maxRecoveries = 4)
         val context = RecoveryContext(reason = RecoveryReason.NETWORK_ERROR)
@@ -78,5 +90,18 @@ class RecoveryPolicyTest {
         assertEquals(RecoveryAction.REOBSERVE, policy.decide(context).action)
         assertEquals(RecoveryAction.WAIT, policy.decide(context).action)
         assertEquals(RecoveryAction.RELAUNCH, policy.decide(context).action)
+    }
+
+    @Test
+    fun sensitiveSurfaceBacksThenRelaunchesThenReplans() {
+        val policy = RecoveryPolicy(maxRecoveries = 6)
+        val context = RecoveryContext(
+            expectedPackage = "example.app",
+            currentMilestoneId = "m1",
+            reason = RecoveryReason.SENSITIVE_SURFACE,
+        )
+        assertEquals(RecoveryAction.BACK, policy.decide(context).action)
+        assertEquals(RecoveryAction.RELAUNCH, policy.decide(context).action)
+        assertEquals(RecoveryAction.REPLAN, policy.decide(context).action)
     }
 }

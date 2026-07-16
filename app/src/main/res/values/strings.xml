@@ -1,4 +1,8 @@
 <resources>
     <string name="app_name">Muse</string>
+    <string name="accessibility_service_name">Muse Control</string>
     <string name="accessibility_description">Reads the current screen and performs user-configured automation tasks.</string>
+    <string name="agent_overlay_status">第 %1$d 步 · %2$s</string>
+    <string name="agent_overlay_operating">AI 正在操作</string>
+    <string name="agent_overlay_stop">停止</string>
 </resources>

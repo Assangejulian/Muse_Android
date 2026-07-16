@@ -57,6 +57,24 @@ class TraceSanitizerTest {
     fun traceRetainsSafeActionAndOutcomeCodesOnly() {
         assertEquals("INPUT_TEXT", TraceSanitizer.actionType(AgentAction.InputText("hidden")))
         assertEquals("TIMEOUT", TraceSanitizer.reasonCode("TIMEOUT: worker deadline"))
+        assertEquals("reasonCode=PERMANENT_PLAN_ERROR", TraceSanitizer.reason("PERMANENT_PLAN_ERROR: contract gap"))
         assertEquals("UNCLASSIFIED", TraceSanitizer.reasonCode("raw user sentence with private data"))
+    }
+
+    @Test
+    fun observationQualityMetadataRemainsReadable() {
+        val payload = TraceSanitizer.payload(
+            mapOf(
+                "complete" to false,
+                "nodeCount" to 250,
+                "collectionIssues" to "node_limit,unresolved_children=2",
+                "ocrPresent" to true,
+            ),
+        )
+
+        assertEquals(false, payload["complete"])
+        assertEquals(250, payload["nodeCount"])
+        assertEquals("node_limit,unresolved_children=2", payload["collectionIssues"])
+        assertEquals(true, payload["ocrPresent"])
     }
 }
