@@ -58,7 +58,11 @@ class AgentOverlayController(private val service: AccessibilityService) {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    // Planning pauses run longer than a typical display timeout. If the
+                    // screen sleeps mid-run, gestures are cancelled and screenshots fail,
+                    // so the run dies of failed actions rather than of anything real.
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
                 android.graphics.PixelFormat.TRANSLUCENT,
             ))
             view.start()

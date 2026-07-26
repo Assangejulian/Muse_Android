@@ -1,4 +1,4 @@
-# Muse Android Agent 0.8.9
+# Muse Android Agent 0.9.0
 
 A private, sideloaded Android 13 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, executes it, and independently checks the result.
 
@@ -58,12 +58,19 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 - Neutral app selection that exposes only the goal and installed app catalog until a target package is locked
 - Explicit opt-in for screenshot sharing; vision is never enabled merely because a Qwen key exists
 - Race-safe run state updates across UI, WorkManager, and accessibility callbacks
+- Optional Shizuku 13.1.5 UserService backend with ADB-shell/root identity
+- Privileged foreground-app detection plus launch, tap, swipe, Back, Home, and Enter fallbacks
+- Explicit user-only `/shell <command>` console with bounded command length, timeout, and output
 
-Foreground service and exact-alarm special access are intentionally deferred. Scheduled work uses WorkManager and may run later than the parsed time under Android battery optimization.
+User-started runs are protected by a foreground service. Exact-alarm special access remains intentionally deferred; scheduled work uses WorkManager and may run later than the parsed time under Android battery optimization.
 
-## Why there is no terminal
+## Optional privileged backend
 
-Muse intentionally does not expose an arbitrary shell. A normal Android app terminal still runs under the Muse app UID and cannot reliably control other apps; granting Shizuku or root access would materially expand the trust boundary. The current typed accessibility tools are observable, locally validated, package-bound, and auditable. A future terminal bridge should therefore be an explicit optional backend, not part of the default agent loop.
+Muse can connect to the separately installed Shizuku manager through its official API. When enabled and authorized, a Shizuku UserService runs as ADB shell (or root when Shizuku uses root) and acts as a fallback for the existing typed device actions. The autonomous model loop still receives only the constrained action schema; it does not receive arbitrary shell access.
+
+The raw console is deliberately explicit: only text entered by the user as `/shell <command>` is passed to the privileged service. Commands are limited to 16,000 characters, run for at most 30 seconds, and return at most 64 KiB from each output stream.
+
+Shizuku itself is not bundled into the APK. On Android 11 and newer it can be started from its manager using wireless debugging. A non-root Shizuku service must be started again after a device reboot.
 
 ## Build
 
@@ -78,11 +85,12 @@ Muse intentionally does not expose an arbitrary shell. A normal Android app term
 1. Install the debug APK.
 2. Open Muse.
 3. Tap **Accessibility** and enable **Muse Control**.
-4. Select DeepSeek or Qwen and enter that provider's API key. The Qwen text preset uses `qwen3.6-flash`; optional vision uses `qwen3-vl-flash`.
-5. Optionally set a default target package. Leave it blank for automatic app selection.
-6. Enter a narrow, low-risk task in the chat input and tap **发送**.
-7. Enter `/list` to inspect the launchable app catalog.
-8. To schedule an explicit task, enter `/schedule <future epoch millis>|<goal>`; scheduling is never inferred from business keywords.
+4. Optional: install and start Shizuku, enable **特权执行后端** in Muse, authorize it, and tap **测试特权连接**.
+5. Select DeepSeek or Qwen and enter that provider's API key. The Qwen text preset uses `qwen3.6-flash`; optional vision uses `qwen3-vl-flash`.
+6. Optionally set a default target package. Leave it blank for automatic app selection.
+7. Enter a narrow, low-risk task in the chat input and tap **发送**.
+8. Enter `/list` to inspect the launchable app catalog, or `/shell <command>` to run an explicit privileged command.
+9. To schedule an explicit task, enter `/schedule <future epoch millis>|<goal>`; scheduling is never inferred from business keywords.
 
 Do not use this MVP for payments, purchases, account security, verification codes, permission granting, or system settings.
 

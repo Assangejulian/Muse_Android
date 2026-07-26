@@ -69,6 +69,7 @@ import com.androidagent.app.chat.Conversation
 import com.androidagent.app.data.SecureSettings
 import com.androidagent.app.network.DeepSeekClient
 import com.androidagent.app.network.InteractionDecision
+import com.androidagent.app.privileged.ShizukuBridge
 import com.androidagent.app.update.GitHubUpdater
 import com.androidagent.app.update.UpdateInfo
 import com.androidagent.app.update.DownloadProgress
@@ -87,6 +88,7 @@ private val Line = Color(0xFFDDE2DC)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ShizukuBridge.initialize(applicationContext)
         setContent {
             MaterialTheme {
                 AgentChatApp(openAccessibilitySettings = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
@@ -118,6 +120,7 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
     var visionApiKey by remember { mutableStateOf(settings.visionApiKey) }
     var visionBaseUrl by remember { mutableStateOf(settings.visionBaseUrl) }
     var visionModelName by remember { mutableStateOf(settings.visionModelName) }
+    var privilegedEnabled by remember { mutableStateOf(settings.privilegedBackendEnabled) }
     var availableUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
     var updateMessage by remember { mutableStateOf<String?>(null) }
     var downloadProgress by remember { mutableStateOf<DownloadProgress?>(null) }
@@ -135,6 +138,9 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
     }
     LaunchedEffect(agentState.status) {
         if (!agentState.running) nextRunAt = settings.nextRunAt
+    }
+    LaunchedEffect(privilegedEnabled) {
+        ShizukuBridge.configure(context, privilegedEnabled)
     }
 
     fun persist(updated: List<Conversation>) {
@@ -159,6 +165,7 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                     visionApiKey = visionApiKey,
                     visionBaseUrl = visionBaseUrl,
                     visionModelName = visionModelName,
+                    privilegedEnabled = privilegedEnabled,
                     appCount = apps.size,
                     connected = AgentController.state.value.accessibilityConnected,
                     nextRunAt = nextRunAt,
@@ -184,6 +191,10 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                     onVisionApiKey = { visionApiKey = it; settings.visionApiKey = it },
                     onVisionBaseUrl = { visionBaseUrl = it; settings.visionBaseUrl = it },
                     onVisionModelName = { visionModelName = it; settings.visionModelName = it },
+                    onPrivilegedEnabled = {
+                        privilegedEnabled = it
+                        settings.privilegedBackendEnabled = it
+                    },
                     onModelPreset = { preset ->
                         val values = when (preset) {
                             "qwen" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "qwen3.6-flash"
@@ -279,6 +290,7 @@ private fun DrawerContent(
     visionApiKey: String,
     visionBaseUrl: String,
     visionModelName: String,
+    privilegedEnabled: Boolean,
     appCount: Int,
     connected: Boolean,
     nextRunAt: Long,
@@ -295,11 +307,16 @@ private fun DrawerContent(
     onVisionApiKey: (String) -> Unit,
     onVisionBaseUrl: (String) -> Unit,
     onVisionModelName: (String) -> Unit,
+    onPrivilegedEnabled: (Boolean) -> Unit,
     onModelPreset: (String) -> Unit,
     onCancelSchedule: () -> Unit,
     openAccessibilitySettings: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val privilegedState by ShizukuBridge.state.collectAsState()
     var pendingDelete by remember { mutableStateOf<String?>(null) }
+    var privilegedFeedback by remember { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxHeight().padding(18.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column {
@@ -341,6 +358,88 @@ private fun DrawerContent(
             Text("Agent 配置", color = Color.White, fontWeight = FontWeight.Bold)
             Text(if (connected) "● 无障碍已连接" else "○ 无障碍未连接", color = if (connected) Color(0xFF80DDA8) else Color(0xFFFFC36A))
             Text("已发现 $appCount 个可启动应用", color = Color(0xFFB9C2BC), style = MaterialTheme.typography.bodySmall)
+            HorizontalDivider(color = Color(0xFF354139))
+            Text("特权执行后端", color = Color.White, fontWeight = FontWeight.SemiBold)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        when {
+                            privilegedState.connected -> "● Shizuku 已连接"
+                            privilegedState.connecting -> "○ Shizuku 正在连接"
+                            privilegedState.permissionGranted -> "○ Shizuku 已授权"
+                            privilegedState.binderAvailable -> "○ Shizuku 等待授权"
+                            else -> "○ Shizuku 未启动"
+                        },
+                        color = if (privilegedState.connected) Color(0xFF80DDA8) else Color(0xFFFFC36A),
+                    )
+                    val identity = privilegedState.serverUid?.let { uid ->
+                        val mode = if (uid == 0) "Root" else "ADB shell"
+                        "$mode · UID $uid"
+                    } ?: privilegedState.detail
+                    Text(identity, color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
+                }
+                Switch(checked = privilegedEnabled, onCheckedChange = onPrivilegedEnabled)
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        when {
+                            !privilegedState.binderAvailable -> {
+                                privilegedFeedback = if (ShizukuBridge.openManager(context)) {
+                                    "请在 Shizuku 中启动服务后返回 Muse"
+                                } else {
+                                    "未安装 Shizuku，请先安装 Shizuku 管理器"
+                                }
+                            }
+                            !privilegedState.permissionGranted -> ShizukuBridge.requestPermission()
+                            else -> ShizukuBridge.connect()
+                        }
+                    },
+                    enabled = privilegedEnabled,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(
+                        when {
+                            !privilegedState.binderAvailable -> "启动 Shizuku"
+                            !privilegedState.permissionGranted -> "授权"
+                            else -> "连接"
+                        },
+                        color = Color.White,
+                    )
+                }
+                OutlinedButton(
+                    onClick = {
+                        privilegedFeedback = if (ShizukuBridge.openManager(context)) {
+                            "已打开 Shizuku"
+                        } else {
+                            "未安装 Shizuku"
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("打开 Shizuku", color = Color.White)
+                }
+            }
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        privilegedFeedback = ShizukuBridge.testConnection().displayText()
+                    }
+                },
+                enabled = privilegedState.connected,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("测试特权连接", color = Color.White)
+            }
+            privilegedFeedback?.let {
+                Text(it.take(500), color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
+            }
+            Text(
+                "Agent 只把 Shizuku 用作现有动作的兜底；原始命令仅响应你输入的 /shell。",
+                color = Color(0xFFB9C2BC),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            HorizontalDivider(color = Color(0xFF354139))
             if (nextRunAt > System.currentTimeMillis()) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column {
@@ -510,7 +609,7 @@ private fun ChatWorkspace(
             if (conversation.messages.isEmpty()) {
                 Spacer(Modifier.height(60.dp))
                 Text("想让平板做什么？", style = MaterialTheme.typography.headlineMedium, color = Ink, fontWeight = FontWeight.Bold)
-                Text("直接说出应用名称和任务。输入 /list 查看已发现的应用。", color = Muted)
+                Text("直接说出应用名称和任务。输入 /list 查看应用，/shell 执行特权命令。", color = Muted)
             }
             conversation.messages.forEach { message -> MessageBubble(message) }
         }
@@ -520,7 +619,7 @@ private fun ChatWorkspace(
                 value = input,
                 onValueChange = { input = it },
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("聊天或交代任务；/chat 只聊天，/run 强制执行，/trace 看轨迹") },
+                placeholder = { Text("聊天或任务；/run 执行，/shell 命令，/trace 轨迹") },
                 minLines = 2,
                 maxLines = 5,
             )
@@ -544,6 +643,29 @@ private fun ChatWorkspace(
                         } else if (text.equals("/trace", true)) {
                             val response = AgentTraceStore(context).latestRunSummary()
                             updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
+                        } else if (text.equals("/shell", true) || text.startsWith("/shell ", ignoreCase = true)) {
+                            val command = text.substringAfter(' ', "").trim()
+                            when {
+                                command.isBlank() -> {
+                                    updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "用法：/shell <command>")))
+                                }
+                                !settings.privilegedBackendEnabled -> {
+                                    updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先在侧栏启用并连接 Shizuku 特权后端。")))
+                                }
+                                else -> {
+                                    sending = true
+                                    interactionScope.launch {
+                                        val response = ShizukuBridge.execute(command).displayText()
+                                        updateConversation(
+                                            withUser.copy(
+                                                updatedAt = System.currentTimeMillis(),
+                                                messages = withUser.messages + ChatMessage("assistant", response),
+                                            ),
+                                        )
+                                        sending = false
+                                    }
+                                }
+                            }
                         } else if (ScheduleCommandParser.isCommand(text)) {
                             val request = ScheduleCommandParser.parse(text)
                             val goalRisk = request?.let { SensitiveOperationPolicy.matchGoal(it.goal) }

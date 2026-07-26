@@ -81,6 +81,10 @@ class SecureSettings(context: Context) {
         get() = prefs.getString("vision_api_key", "").orEmpty()
         set(value) = prefs.edit().putString("vision_api_key", value.trim()).apply()
 
+    var privilegedBackendEnabled: Boolean
+        get() = prefs.getBoolean("privileged_backend_enabled", false)
+        set(value) = prefs.edit().putBoolean("privileged_backend_enabled", value).apply()
+
     var scheduledTaskId: String
         get() = prefs.getString("scheduled_task_id", "").orEmpty()
         set(value) = prefs.edit().putString("scheduled_task_id", value.trim()).apply()

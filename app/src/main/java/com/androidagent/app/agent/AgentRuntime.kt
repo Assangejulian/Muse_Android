@@ -7,6 +7,7 @@ import com.androidagent.app.data.SecureSettings
 import com.androidagent.app.network.DeepSeekClient
 import com.androidagent.app.network.PlannedAction
 import com.androidagent.app.network.PlannerTurn
+import com.androidagent.app.privileged.PrivilegedDeviceBackend
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
@@ -1294,6 +1295,12 @@ class AgentRuntime(
                 if (observation.packageName.isNotBlank()) {
                     return if (includeOcr) enrichWithLocalOcr(observation, lockedPackage) else observation
                 }
+            }
+        }
+        if (observation.packageName.isBlank() && settings.privilegedBackendEnabled) {
+            val privilegedPackage = PrivilegedDeviceBackend.foregroundPackage()
+            if (!privilegedPackage.isNullOrBlank()) {
+                observation = observation.copy(packageName = privilegedPackage)
             }
         }
         return if (includeOcr) enrichWithLocalOcr(observation, lockedPackage) else observation

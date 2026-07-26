@@ -11,9 +11,11 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import android.view.Display
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -27,12 +29,15 @@ import com.androidagent.app.agent.InputActionResultPolicy
 import com.androidagent.app.agent.NodeIdentityKeys
 import com.androidagent.app.agent.ResolvedActionTarget
 import com.androidagent.app.overlay.AgentOverlayController
+import com.androidagent.app.privileged.PrivilegedDeviceBackend
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -48,6 +53,25 @@ class AgentAccessibilityService : AccessibilityService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var overlayController: AgentOverlayController
 
+    // Building a recognizer loads the Chinese model; doing that per OCR call cost
+    // hundreds of milliseconds on the observation path.
+    private val textRecognizerDelegate = lazy {
+        TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+    }
+    private val textRecognizer by textRecognizerDelegate
+
+    /**
+     * takeScreenshot is rate limited by the framework to roughly one call per
+     * second; a capture inside that window fails with
+     * ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT. Vision planning, OCR, and the
+     * before/after critic captures routinely land closer together than that, so
+     * requests are spaced instead of being allowed to fail silently.
+     */
+    private val screenshotMutex = Mutex()
+
+    @Volatile
+    private var lastScreenshotAtElapsedRealtime = 0L
+
     override fun onServiceConnected() {
         instance = this
         overlayController = AgentOverlayController(this)
@@ -60,11 +84,14 @@ class AgentAccessibilityService : AccessibilityService() {
         event?.packageName?.toString()?.let(AgentController::setCurrentPackage)
     }
 
+    /**
+     * The framework calls this to tell a service to stop *announcing* feedback, not
+     * to tear the service down. The binding stays alive and every node and gesture
+     * API keeps working, so cancelling the run here aborted healthy long tasks for
+     * no reason. Real teardown arrives through [onDestroy].
+     */
     override fun onInterrupt() {
-        Log.w(TAG, "Accessibility service interrupted")
-        if (AgentController.currentRunId() != null) {
-            AgentController.stopWithCause(AgentStopCause.ACCESSIBILITY_INTERRUPTED)
-        }
+        Log.w(TAG, "Accessibility feedback interrupted; the run continues")
     }
 
     override fun onDestroy() {
@@ -73,6 +100,7 @@ class AgentAccessibilityService : AccessibilityService() {
         }
         if (::overlayController.isInitialized) overlayController.hide()
         serviceScope.cancel()
+        if (textRecognizerDelegate.isInitialized()) textRecognizer.close()
         if (instance === this) instance = null
         AgentController.setAccessibilityConnected(false)
         super.onDestroy()
@@ -218,8 +246,8 @@ class AgentAccessibilityService : AccessibilityService() {
         is AgentAction.SubmitInput -> submitInputDetailed(resolvedTarget)
         is AgentAction.EnsureToggle -> result(ensureToggle(action, resolvedTarget), "toggle_updated", "ensure_toggle")
         is AgentAction.BindPredicate -> ActionExecutionResult(false, "not_executable", "bind_predicate is runtime-only")
-        is AgentAction.Back -> result(performGlobalAction(GLOBAL_ACTION_BACK), "back", "back")
-        is AgentAction.Home -> result(performGlobalAction(GLOBAL_ACTION_HOME), "home", "home")
+        is AgentAction.Back -> result(globalActionOrPrivileged(GLOBAL_ACTION_BACK, KeyEvent.KEYCODE_BACK), "back", "back")
+        is AgentAction.Home -> result(globalActionOrPrivileged(GLOBAL_ACTION_HOME, KeyEvent.KEYCODE_HOME), "home", "home")
         is AgentAction.Wait -> ActionExecutionResult(true, "waited", "wait")
         is AgentAction.Finish, is AgentAction.Fail -> ActionExecutionResult(true, "terminal", "terminal")
     }
@@ -227,22 +255,20 @@ class AgentAccessibilityService : AccessibilityService() {
     private fun result(success: Boolean, successStatus: String, detail: String): ActionExecutionResult =
         ActionExecutionResult(success, if (success) successStatus else "execution_failed", detail)
 
-    private fun launchApp(packageName: String): Boolean {
-        val intent = packageManager.getLaunchIntentForPackage(packageName) ?: return false
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-        startActivity(intent)
-        return true
+    private suspend fun launchApp(packageName: String): Boolean {
+        val standardLaunch = runCatching {
+            val intent = packageManager.getLaunchIntentForPackage(packageName) ?: return@runCatching false
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+            startActivity(intent)
+            true
+        }.getOrDefault(false)
+        return standardLaunch || PrivilegedDeviceBackend.launchPackage(packageName)
     }
 
     suspend fun recognizeScreenText(): String {
         val bitmap = captureScreen() ?: return ""
         return try {
-            val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
-            try {
-                recognizer.process(InputImage.fromBitmap(bitmap, 0)).await().text
-            } finally {
-                recognizer.close()
-            }
+            textRecognizer.process(InputImage.fromBitmap(bitmap, 0)).await().text
         } finally {
             bitmap.recycle()
         }
@@ -310,14 +336,24 @@ class AgentAccessibilityService : AccessibilityService() {
         }
     }
 
-    private suspend fun captureScreen(): Bitmap? {
+    private suspend fun captureScreen(): Bitmap? = screenshotMutex.withLock {
+        val sinceLast = SystemClock.elapsedRealtime() - lastScreenshotAtElapsedRealtime
+        if (sinceLast in 0 until SCREENSHOT_MIN_INTERVAL_MS) delay(SCREENSHOT_MIN_INTERVAL_MS - sinceLast)
         if (::overlayController.isInitialized) {
             withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(true) }
             delay(50)
         }
-        return try {
-            captureScreenRaw()
+        return@withLock try {
+            var bitmap = captureScreenRaw()
+            if (bitmap == null) {
+                // A throttled request is the common failure and it succeeds on a
+                // second try once the framework interval has elapsed.
+                delay(SCREENSHOT_MIN_INTERVAL_MS)
+                bitmap = captureScreenRaw()
+            }
+            bitmap
         } finally {
+            lastScreenshotAtElapsedRealtime = SystemClock.elapsedRealtime()
             if (::overlayController.isInitialized) {
                 withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(false) }
             }
@@ -391,9 +427,15 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private fun liveNodeMatchesSnapshot(node: AccessibilityNodeInfo, snapshot: UiNodeSnapshot): Boolean {
-        if (snapshot.packageName.isNotBlank() && node.packageName?.toString() != snapshot.packageName) return false
-        if (snapshot.className.isNotBlank() && node.className?.toString() != snapshot.className) return false
-        if (snapshot.viewId.isNotBlank() && node.viewIdResourceName != snapshot.viewId) return false
+        if (snapshot.packageName.isNotBlank() && node.packageName?.toString() != snapshot.packageName) {
+            return false
+        }
+        if (snapshot.className.isNotBlank() && node.className?.toString() != snapshot.className) {
+            return false
+        }
+        if (snapshot.viewId.isNotBlank() && node.viewIdResourceName != snapshot.viewId) {
+            return false
+        }
         return true
     }
 
@@ -442,7 +484,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 override fun onCompleted(gestureDescription: GestureDescription?) { result.complete(true) }
                 override fun onCancelled(gestureDescription: GestureDescription?) { result.complete(false) }
             }, null)
-            result.await()
+            result.await() || PrivilegedDeviceBackend.tap(x.toInt(), y.toInt())
         } finally {
             if (::overlayController.isInitialized) {
                 withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(false) }
@@ -545,7 +587,11 @@ class AgentAccessibilityService : AccessibilityService() {
                 }
             }
         }
-        return ActionExecutionResult(false, "submit_failed", "no safe IME submit action was accepted")
+        return if (PrivilegedDeviceBackend.keyEvent(KeyEvent.KEYCODE_ENTER)) {
+            ActionExecutionResult(true, "submitted", "privileged Enter key accepted")
+        } else {
+            ActionExecutionResult(false, "submit_failed", "no safe IME submit action was accepted")
+        }
     }
 
     private fun findInputMethodWindow(): AccessibilityWindowInfo? = windows
@@ -619,13 +665,24 @@ class AgentAccessibilityService : AccessibilityService() {
             override fun onCompleted(gestureDescription: GestureDescription?) { result.complete(true) }
             override fun onCancelled(gestureDescription: GestureDescription?) { result.complete(false) }
         }, null)
-        return result.await()
+        val gestureAccepted = result.await()
+        return gestureAccepted || PrivilegedDeviceBackend.swipe(
+            startX.toInt(),
+            startY.toInt(),
+            endX.toInt(),
+            endY.toInt(),
+            450,
+        )
     }
+
+    private suspend fun globalActionOrPrivileged(globalAction: Int, keyCode: Int): Boolean =
+        performGlobalAction(globalAction) || PrivilegedDeviceBackend.keyEvent(keyCode)
 
     companion object {
         private const val TAG = "AndroidAgent"
         private const val MAX_NODES = 250
         private const val MAX_DEPTH = 30
+        private const val SCREENSHOT_MIN_INTERVAL_MS = 1_000L
         @Volatile private var instance: AgentAccessibilityService? = null
         fun current(): AgentAccessibilityService? = instance
 
