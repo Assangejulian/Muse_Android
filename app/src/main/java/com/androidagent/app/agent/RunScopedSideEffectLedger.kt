@@ -23,6 +23,7 @@ enum class SideEffectFamily {
     NAVIGATE_HOME,
     SCROLL,
     POINT_ACTIVATION,
+    TERMINAL,
 }
 
 enum class SideEffectTargetKind { OTHER, BOOLEAN_CONTROL }
@@ -55,6 +56,7 @@ data class SideEffectIdentity(
             "HOME", "NAVIGATE_HOME" -> SideEffectFamily.NAVIGATE_HOME
             "SWIPE", "SCROLL" -> SideEffectFamily.SCROLL
             "TAP_POINT", "POINT_ACTIVATION" -> SideEffectFamily.POINT_ACTIVATION
+            "TERMINAL" -> SideEffectFamily.TERMINAL
             else -> SideEffectFamily.ACTIVATE_CONTROL
         }
     }
@@ -582,6 +584,15 @@ object SideEffectIdentityFactory {
                 targetCrossWindowStructureKey = null,
                 family = SideEffectFamily.NAVIGATE_HOME,
             )
+            is AgentAction.Terminal -> SideEffectIdentity(
+                actionType = SideEffectFamily.TERMINAL.name,
+                targetPackage = targetPackage,
+                targetCrossWindowStructureKey = null,
+                irreversiblePayloadDigest = TraceSanitizer.digest(
+                    "${action.command.length}|${TraceSanitizer.digest(action.command)}",
+                ),
+                family = SideEffectFamily.TERMINAL,
+            )
             is AgentAction.BindPredicate,
             is AgentAction.Wait,
             is AgentAction.Finish,
@@ -601,6 +612,7 @@ object SideEffectIdentityFactory {
         is AgentAction.EnsureToggle,
         AgentAction.Back,
         AgentAction.Home,
+        is AgentAction.Terminal,
         -> true
         is AgentAction.BindPredicate,
         is AgentAction.Wait,

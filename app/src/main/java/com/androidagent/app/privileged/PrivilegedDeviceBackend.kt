@@ -2,8 +2,8 @@ package com.androidagent.app.privileged
 
 object PrivilegedDeviceBackend {
     suspend fun foregroundPackage(): String? {
-        if (!ShizukuBridge.isReady()) return null
-        val result = ShizukuBridge.execute(PrivilegedCommandBuilder.foregroundPackage(), 3_000L)
+        if (!PrivilegedBackendRouter.isReady()) return null
+        val result = PrivilegedBackendRouter.execute(PrivilegedCommandBuilder.foregroundPackage(), 3_000L)
         if (!result.success) return null
         return result.stdout.lineSequence()
             .map(String::trim)
@@ -23,8 +23,8 @@ object PrivilegedDeviceBackend {
         execute(PrivilegedCommandBuilder.keyEvent(keyCode), 3_000L)
 
     private suspend fun execute(command: String?, timeoutMillis: Long): Boolean {
-        if (command == null || !ShizukuBridge.isReady()) return false
-        return ShizukuBridge.execute(command, timeoutMillis).success
+        if (command == null || !PrivilegedBackendRouter.isReady()) return false
+        return PrivilegedBackendRouter.execute(command, timeoutMillis).success
     }
 
     private val PACKAGE_NAME = Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+")

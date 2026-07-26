@@ -8,7 +8,7 @@ import com.androidagent.app.agent.RuntimeOutcome
 import com.androidagent.app.agent.RuntimeResult
 import com.androidagent.app.agent.SensitiveOperationPolicy
 import com.androidagent.app.data.SecureSettings
-import com.androidagent.app.privileged.ShizukuBridge
+import com.androidagent.app.privileged.PrivilegedBackendRouter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
@@ -124,7 +124,7 @@ object AgentController {
         }
 
         val applicationContext = context.applicationContext
-        ShizukuBridge.configure(applicationContext, settings.privilegedBackendEnabled)
+        PrivilegedBackendRouter.configure(applicationContext, settings.privilegedBackendEnabled)
         AgentForegroundService.start(applicationContext)
 
         val job = scope.launch(start = CoroutineStart.LAZY) {

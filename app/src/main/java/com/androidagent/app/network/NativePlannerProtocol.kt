@@ -32,7 +32,7 @@ internal class InvalidNativeToolCallException(message: String, cause: Throwable?
 internal object NativePlannerProtocol {
     const val TOOL_NAME = "android_action"
 
-    fun toolDefinition(): JSONObject = JSONObject()
+    fun toolDefinition(terminalAvailable: Boolean = false): JSONObject = JSONObject()
         .put("type", "function")
         .put(
             "function",
@@ -53,22 +53,31 @@ internal object NativePlannerProtocol {
                                         .put(
                                             "enum",
                                             JSONArray(
-                                                listOf(
-                                                    "launch_app",
-                                                    "click_text",
-                                                    "click_node",
-                                                    "tap_point",
-                                                    "swipe",
-                                                    "input_text",
-                                                    "submit_input",
-                                                    "ensure_toggle",
-                                                    "bind_predicate",
-                                                    "back",
-                                                    "home",
-                                                    "wait",
-                                                    "finish",
-                                                    "fail",
-                                                ),
+                                                buildList {
+                                                    addAll(
+                                                        listOf(
+                                                            "launch_app",
+                                                            "click_text",
+                                                            "click_node",
+                                                            "tap_point",
+                                                            "swipe",
+                                                            "input_text",
+                                                            "submit_input",
+                                                            "ensure_toggle",
+                                                            "bind_predicate",
+                                                        ),
+                                                    )
+                                                    if (terminalAvailable) add("terminal")
+                                                    addAll(
+                                                        listOf(
+                                                            "back",
+                                                            "home",
+                                                            "wait",
+                                                            "finish",
+                                                            "fail",
+                                                        ),
+                                                    )
+                                                },
                                             ),
                                         ),
                                 )
@@ -147,6 +156,21 @@ internal object NativePlannerProtocol {
                                     JSONObject()
                                         .put("type", "boolean")
                                         .put("description", "Optional input submission request."),
+                                )
+                                .put(
+                                    "command",
+                                    JSONObject()
+                                        .put("type", "string")
+                                        .put("maxLength", 16000)
+                                        .put("description", "Required only for terminal. One Android shell command."),
+                                )
+                                .put(
+                                    "timeoutMillis",
+                                    JSONObject()
+                                        .put("type", "integer")
+                                        .put("minimum", 250)
+                                        .put("maximum", 30000)
+                                        .put("description", "Optional terminal timeout."),
                                 )
                                 .put(
                                     "reason",

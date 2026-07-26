@@ -80,4 +80,18 @@ class ActionParserTest {
             ActionParser.parse("""{"action":"click_node","nodeId":3,"predicateId":"m1-p1"}"""),
         )
     }
+
+    @Test
+    fun parsesTerminalWithBoundedTimeout() {
+        assertEquals(
+            AgentAction.Terminal("pm list packages", 3_000L),
+            ActionParser.parse("""{"action":"terminal","command":"pm list packages","timeoutMillis":3000}"""),
+        )
+        assertTrue(runCatching {
+            ActionParser.parse("""{"action":"terminal","command":"","timeoutMillis":3000}""")
+        }.isFailure)
+        assertTrue(runCatching {
+            ActionParser.parse("""{"action":"terminal","command":"id","timeoutMillis":30001}""")
+        }.isFailure)
+    }
 }

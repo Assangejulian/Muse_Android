@@ -30,6 +30,7 @@ import com.androidagent.app.agent.NodeIdentityKeys
 import com.androidagent.app.agent.ResolvedActionTarget
 import com.androidagent.app.overlay.AgentOverlayController
 import com.androidagent.app.privileged.PrivilegedDeviceBackend
+import com.androidagent.app.privileged.PrivilegedBackendRouter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -246,6 +247,7 @@ class AgentAccessibilityService : AccessibilityService() {
         is AgentAction.SubmitInput -> submitInputDetailed(resolvedTarget)
         is AgentAction.EnsureToggle -> result(ensureToggle(action, resolvedTarget), "toggle_updated", "ensure_toggle")
         is AgentAction.BindPredicate -> ActionExecutionResult(false, "not_executable", "bind_predicate is runtime-only")
+        is AgentAction.Terminal -> executeTerminal(action)
         is AgentAction.Back -> result(globalActionOrPrivileged(GLOBAL_ACTION_BACK, KeyEvent.KEYCODE_BACK), "back", "back")
         is AgentAction.Home -> result(globalActionOrPrivileged(GLOBAL_ACTION_HOME, KeyEvent.KEYCODE_HOME), "home", "home")
         is AgentAction.Wait -> ActionExecutionResult(true, "waited", "wait")
@@ -254,6 +256,23 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private fun result(success: Boolean, successStatus: String, detail: String): ActionExecutionResult =
         ActionExecutionResult(success, if (success) successStatus else "execution_failed", detail)
+
+    private suspend fun executeTerminal(action: AgentAction.Terminal): ActionExecutionResult {
+        if (!PrivilegedBackendRouter.isReady()) {
+            return ActionExecutionResult(false, "terminal_unavailable", "Built-in terminal is not connected")
+        }
+        val commandResult = PrivilegedBackendRouter.execute(action.command, action.timeoutMillis)
+        val detail = buildString {
+            append("exitCode=${commandResult.exitCode}")
+            if (commandResult.stdout.isNotBlank()) append("\nstdout:\n").append(commandResult.stdout.take(8_000))
+            if (commandResult.stderr.isNotBlank()) append("\nstderr:\n").append(commandResult.stderr.take(4_000))
+        }
+        return ActionExecutionResult(
+            success = commandResult.success,
+            status = if (commandResult.success) "terminal_completed" else "terminal_failed",
+            detail = detail,
+        )
+    }
 
     private suspend fun launchApp(packageName: String): Boolean {
         val standardLaunch = runCatching {

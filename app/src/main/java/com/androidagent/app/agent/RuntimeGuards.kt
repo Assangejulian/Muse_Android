@@ -1578,6 +1578,7 @@ class RunLedger(private var plan: TaskPlan) {
             is AgentAction.BindPredicate -> action.predicateId
             is AgentAction.LaunchApp -> action.packageName
             is AgentAction.Swipe -> action.direction
+            is AgentAction.Terminal -> "${action.command.length}:${TraceSanitizer.digest(action.command)}:${action.timeoutMillis}"
             is AgentAction.Wait -> action.milliseconds.toString()
             is AgentAction.Finish -> action.reason.hashCode().toString()
             is AgentAction.Fail -> action.reason.hashCode().toString()

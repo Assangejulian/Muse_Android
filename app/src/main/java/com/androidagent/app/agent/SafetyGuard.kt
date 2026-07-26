@@ -38,6 +38,10 @@ object SafetyGuard {
                 Unit
             }
             is AgentAction.Swipe -> require(action.direction in setOf("up", "down", "left", "right")) { "Invalid direction" }
+            is AgentAction.Terminal -> {
+                require(action.command.isNotBlank() && action.command.length <= 16_000) { "Invalid terminal command" }
+                require(action.timeoutMillis in 250L..30_000L) { "Invalid terminal timeout" }
+            }
             is AgentAction.EnsureToggle -> require(action.nodeId > 0) { "Invalid toggle target" }
             else -> Unit
         }

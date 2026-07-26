@@ -1,4 +1,4 @@
-# Muse Android Agent 0.9.0
+# Muse Android Agent 0.10.0
 
 A private, sideloaded Android 13 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, executes it, and independently checks the result.
 
@@ -58,19 +58,22 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 - Neutral app selection that exposes only the goal and installed app catalog until a target package is locked
 - Explicit opt-in for screenshot sharing; vision is never enabled merely because a Qwen key exists
 - Race-safe run state updates across UI, WorkManager, and accessibility callbacks
-- Optional Shizuku 13.1.5 UserService backend with ADB-shell/root identity
+- Built-in wireless ADB pairing and shell terminal with an app-private persistent host key
+- Harness-controlled model terminal tool that is advertised only while ADB or Shizuku is connected
+- Automatic accessibility fallback when the privileged terminal is unavailable
+- Optional Shizuku 13.1.5 UserService fallback with ADB-shell/root identity
 - Privileged foreground-app detection plus launch, tap, swipe, Back, Home, and Enter fallbacks
 - Explicit user-only `/shell <command>` console with bounded command length, timeout, and output
 
 User-started runs are protected by a foreground service. Exact-alarm special access remains intentionally deferred; scheduled work uses WorkManager and may run later than the parsed time under Android battery optimization.
 
-## Optional privileged backend
+## Built-in ADB terminal
 
-Muse can connect to the separately installed Shizuku manager through its official API. When enabled and authorized, a Shizuku UserService runs as ADB shell (or root when Shizuku uses root) and acts as a fallback for the existing typed device actions. The autonomous model loop still receives only the constrained action schema; it does not receive arbitrary shell access.
+Muse includes an ADB client and Android NSD discovery. It pairs directly with Android Wireless debugging, stores the generated ADB host key in Muse's private data directory, and executes commands as Android's `shell` user. A separate Shizuku app is not required.
 
-The raw console is deliberately explicit: only text entered by the user as `/shell <command>` is passed to the privileged service. Commands are limited to 16,000 characters, run for at most 30 seconds, and return at most 64 KiB from each output stream.
+When the connection is live, the Harness exposes a bounded `terminal` action to the model and recommends it for deterministic inspection and manipulation. Terminal output is returned to the planning loop but does not bypass milestone predicates or the Stop Gate. If the connection drops, the action disappears from the model schema and execution falls back to accessibility. Commands are limited to 16,000 characters and 30 seconds; trace files store only command length and a short digest.
 
-Shizuku itself is not bundled into the APK. On Android 11 and newer it can be started from its manager using wireless debugging. A non-root Shizuku service must be started again after a device reboot.
+The existing Shizuku integration remains available as an optional fallback and can provide root identity when the separately installed Shizuku service runs as root.
 
 ## Build
 
@@ -84,13 +87,14 @@ Shizuku itself is not bundled into the APK. On Android 11 and newer it can be st
 
 1. Install the debug APK.
 2. Open Muse.
-3. Tap **Accessibility** and enable **Muse Control**.
-4. Optional: install and start Shizuku, enable **特权执行后端** in Muse, authorize it, and tap **测试特权连接**.
-5. Select DeepSeek or Qwen and enter that provider's API key. The Qwen text preset uses `qwen3.6-flash`; optional vision uses `qwen3-vl-flash`.
-6. Optionally set a default target package. Leave it blank for automatic app selection.
-7. Enter a narrow, low-risk task in the chat input and tap **发送**.
-8. Enter `/list` to inspect the launchable app catalog, or `/shell <command>` to run an explicit privileged command.
-9. To schedule an explicit task, enter `/schedule <future epoch millis>|<goal>`; scheduling is never inferred from business keywords.
+3. Enable **Developer options > Wireless debugging** on the device.
+4. In Muse's **内置 ADB 终端** section, tap **打开无线调试**, choose **使用配对码配对设备**, enter the shown port and six-digit code in Muse, then tap **配对并连接**.
+5. Tap **Accessibility** and enable **Muse Control**.
+6. Select DeepSeek or Qwen and enter that provider's API key. The Qwen text preset uses `qwen3.6-flash`; optional vision uses `qwen3-vl-flash`.
+7. Optionally set a default target package. Leave it blank for automatic app selection.
+8. Enter a narrow, low-risk task in the chat input and tap **发送**.
+9. Enter `/list` to inspect the launchable app catalog, or `/shell <command>` to run an explicit privileged command.
+10. To schedule an explicit task, enter `/schedule <future epoch millis>|<goal>`; scheduling is never inferred from business keywords.
 
 Do not use this MVP for payments, purchases, account security, verification codes, permission granting, or system settings.
 

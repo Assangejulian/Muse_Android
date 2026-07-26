@@ -8,6 +8,7 @@ import com.androidagent.app.network.DeepSeekClient
 import com.androidagent.app.network.PlannedAction
 import com.androidagent.app.network.PlannerTurn
 import com.androidagent.app.privileged.PrivilegedDeviceBackend
+import com.androidagent.app.privileged.PrivilegedBackendRouter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
@@ -555,6 +556,7 @@ class AgentRuntime(
                                 primaryPackage = packagePolicy.primaryPackage,
                                 currentPackage = before.packageName,
                                 allowedPackages = packagePolicy.allowedPackages,
+                                terminalAvailable = PrivilegedBackendRouter.isReady(),
                             ).also { planned = it }.action
                         } catch (cancelled: CancellationException) {
                             throw cancelled
@@ -738,6 +740,13 @@ class AgentRuntime(
                     // Planning may take time. The shared engine always receives
                     // a fresh execution snapshot and owns the full preflight.
                     val executionObservation = observeWithPackage(lockedPackage, includeOcr = false)
+
+                    if (proposed is AgentAction.Terminal && !PrivilegedBackendRouter.isReady()) {
+                        val reason = "Built-in terminal disconnected before dispatch; replan with accessibility actions"
+                        recordTurn(toolTurns, planned, toolResultJson(false, proposed, before, before, "terminal_unavailable", reason))
+                        history += "PRE_TOOL_BLOCKED: $reason"
+                        continue
+                    }
 
                     if (lockedPackage == null && proposed !is AgentAction.LaunchApp) {
                         val reason = "launch_app must select one installed target before any screen-dependent tool"
@@ -975,15 +984,26 @@ class AgentRuntime(
                         )
                     }
 
-                    val engineJudgement = when (engineResult.status) {
+                    val engineJudgement = when {
+                        stepAction is AgentAction.Terminal && engineResult.execution?.success == true ->
+                            TransitionJudgement.PROGRESS
+                        else -> when (engineResult.status) {
                         RuntimeStepStatus.MILESTONE_COMPLETE -> TransitionJudgement.MILESTONE_COMPLETE
                         RuntimeStepStatus.PROGRESS, RuntimeStepStatus.OBSERVATION_ONLY -> TransitionJudgement.PROGRESS
                         else -> TransitionJudgement.NO_PROGRESS
+                        }
                     }
                     var judgement = engineJudgement
-                    var evidence = engineResult.reason
+                    var evidence = if (stepAction is AgentAction.Terminal) {
+                        engineResult.execution?.detail.orEmpty().ifBlank { engineResult.reason }
+                    } else {
+                        engineResult.reason
+                    }
 
-                    if (judgement == TransitionJudgement.PROGRESS && needsSemanticCritic(milestone, plan, after)) {
+                    if (stepAction !is AgentAction.Terminal &&
+                        judgement == TransitionJudgement.PROGRESS &&
+                        needsSemanticCritic(milestone, plan, after)
+                    ) {
                         onPhase(step, "Critiquing")
                         val afterCapture = if (useVision && lockedPackage != null) {
                             captureBoundScreenshot(after, lockedPackage, packagePolicy)
@@ -1232,6 +1252,13 @@ class AgentRuntime(
         if (action is AgentAction.Wait) {
             val observation = (WaitEngine.waitForDuration(action.milliseconds, service::observe) as WaitResult.Satisfied).value
             return RuntimeStepSettleResult(DispatchResultState.CONFIRMED, observation, "wait duration completed")
+        }
+        if (action is AgentAction.Terminal) {
+            return RuntimeStepSettleResult(
+                DispatchResultState.CONFIRMED,
+                service.observe(),
+                "terminal command returned a definitive exit status",
+            )
         }
         val result = when (action) {
             is AgentAction.LaunchApp -> WaitEngine.waitForPackage(
@@ -1487,7 +1514,7 @@ class AgentRuntime(
         .put("afterObservationId", after.observationId)
         .put("changed", before.observationId != after.observationId)
         .put("package", after.packageName)
-        .put("detail", detail.take(800))
+        .put("detail", detail.take(if (action is AgentAction.Terminal) 8_000 else 800))
         .toString()
 
     private fun observationDelta(before: Observation, after: Observation): String {
@@ -1504,6 +1531,7 @@ class AgentRuntime(
         is AgentAction.SubmitInput -> "submit_input(#${action.nodeId ?: 0})"
         is AgentAction.EnsureToggle -> "ensure_toggle(#${action.nodeId}, ${action.desired})"
         is AgentAction.BindPredicate -> "bind_predicate(${action.predicateId})"
+        is AgentAction.Terminal -> "terminal(${action.command.length} chars, sha256=${TraceSanitizer.digest(action.command)})"
         is AgentAction.Wait -> "wait(${action.milliseconds}ms)"
         is AgentAction.Finish -> "finish"
         is AgentAction.Fail -> "fail"

@@ -69,6 +69,8 @@ import com.androidagent.app.chat.Conversation
 import com.androidagent.app.data.SecureSettings
 import com.androidagent.app.network.DeepSeekClient
 import com.androidagent.app.network.InteractionDecision
+import com.androidagent.app.privileged.EmbeddedAdbBridge
+import com.androidagent.app.privileged.PrivilegedBackendRouter
 import com.androidagent.app.privileged.ShizukuBridge
 import com.androidagent.app.update.GitHubUpdater
 import com.androidagent.app.update.UpdateInfo
@@ -88,6 +90,7 @@ private val Line = Color(0xFFDDE2DC)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        EmbeddedAdbBridge.initialize(applicationContext)
         ShizukuBridge.initialize(applicationContext)
         setContent {
             MaterialTheme {
@@ -140,7 +143,7 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
         if (!agentState.running) nextRunAt = settings.nextRunAt
     }
     LaunchedEffect(privilegedEnabled) {
-        ShizukuBridge.configure(context, privilegedEnabled)
+        PrivilegedBackendRouter.configure(context, privilegedEnabled)
     }
 
     fun persist(updated: List<Conversation>) {
@@ -315,8 +318,14 @@ private fun DrawerContent(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val privilegedState by ShizukuBridge.state.collectAsState()
+    val embeddedAdbState by EmbeddedAdbBridge.state.collectAsState()
     var pendingDelete by remember { mutableStateOf<String?>(null) }
     var privilegedFeedback by remember { mutableStateOf<String?>(null) }
+    var pairingCode by remember { mutableStateOf("") }
+    var pairingPort by remember { mutableStateOf("") }
+    LaunchedEffect(embeddedAdbState.pairEndpoints) {
+        embeddedAdbState.pairEndpoints.singleOrNull()?.let { pairingPort = it.port.toString() }
+    }
     Column(Modifier.fillMaxHeight().padding(18.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column {
@@ -359,23 +368,20 @@ private fun DrawerContent(
             Text(if (connected) "● 无障碍已连接" else "○ 无障碍未连接", color = if (connected) Color(0xFF80DDA8) else Color(0xFFFFC36A))
             Text("已发现 $appCount 个可启动应用", color = Color(0xFFB9C2BC), style = MaterialTheme.typography.bodySmall)
             HorizontalDivider(color = Color(0xFF354139))
-            Text("特权执行后端", color = Color.White, fontWeight = FontWeight.SemiBold)
+            Text("Muse 内置 ADB 终端", color = Color.White, fontWeight = FontWeight.SemiBold)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(
                         when {
-                            privilegedState.connected -> "● Shizuku 已连接"
-                            privilegedState.connecting -> "○ Shizuku 正在连接"
-                            privilegedState.permissionGranted -> "○ Shizuku 已授权"
-                            privilegedState.binderAvailable -> "○ Shizuku 等待授权"
-                            else -> "○ Shizuku 未启动"
+                            embeddedAdbState.connected -> "● 终端已连接"
+                            embeddedAdbState.pairing -> "○ 正在配对"
+                            embeddedAdbState.connecting -> "○ 正在连接"
+                            embeddedAdbState.discovering -> "○ 正在发现无线调试"
+                            else -> "○ 等待无线调试"
                         },
-                        color = if (privilegedState.connected) Color(0xFF80DDA8) else Color(0xFFFFC36A),
+                        color = if (embeddedAdbState.connected) Color(0xFF80DDA8) else Color(0xFFFFC36A),
                     )
-                    val identity = privilegedState.serverUid?.let { uid ->
-                        val mode = if (uid == 0) "Root" else "ADB shell"
-                        "$mode · UID $uid"
-                    } ?: privilegedState.detail
+                    val identity = embeddedAdbState.identity.ifBlank { embeddedAdbState.detail }
                     Text(identity, color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
                 }
                 Switch(checked = privilegedEnabled, onCheckedChange = onPrivilegedEnabled)
@@ -383,13 +389,80 @@ private fun DrawerContent(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = {
+                        privilegedFeedback = if (EmbeddedAdbBridge.openWirelessDebugging(context)) {
+                            "请点“使用配对码配对设备”，再回 Muse 输入配对码"
+                        } else "无法打开无线调试设置"
+                    },
+                    enabled = privilegedEnabled,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("打开无线调试", color = Color.White)
+                }
+                OutlinedButton(
+                    onClick = EmbeddedAdbBridge::refreshDiscovery,
+                    enabled = privilegedEnabled,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("重新发现", color = Color.White)
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = pairingPort,
+                    onValueChange = { pairingPort = it.filter(Char::isDigit).take(5) },
+                    label = { Text("配对端口") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = pairingCode,
+                    onValueChange = { pairingCode = it.filter(Char::isDigit).take(6) },
+                    label = { Text("6 位配对码") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        privilegedFeedback = EmbeddedAdbBridge.pair(
+                            pairingCode,
+                            pairingPort.toIntOrNull(),
+                        ).displayText()
+                    }
+                },
+                enabled = privilegedEnabled && pairingCode.length == 6,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("配对并连接", color = Color.White)
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { scope.launch { privilegedFeedback = EmbeddedAdbBridge.connect().displayText() } },
+                    enabled = privilegedEnabled,
+                    modifier = Modifier.weight(1f),
+                ) { Text("重新连接", color = Color.White) }
+                OutlinedButton(
+                    onClick = { scope.launch { privilegedFeedback = PrivilegedBackendRouter.testConnection().displayText() } },
+                    enabled = PrivilegedBackendRouter.isReady(),
+                    modifier = Modifier.weight(1f),
+                ) { Text("测试终端", color = Color.White) }
+            }
+            privilegedFeedback?.let {
+                Text(it.take(500), color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
+            }
+            Text(
+                "配对密钥保存在 Muse 私有目录。终端在线时模型优先使用；离线时自动回退无障碍。",
+                color = Color(0xFFB9C2BC),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Text("外部 Shizuku（可选兜底）", color = Color.White, fontWeight = FontWeight.SemiBold)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = {
                         when {
                             !privilegedState.binderAvailable -> {
-                                privilegedFeedback = if (ShizukuBridge.openManager(context)) {
-                                    "请在 Shizuku 中启动服务后返回 Muse"
-                                } else {
-                                    "未安装 Shizuku，请先安装 Shizuku 管理器"
-                                }
+                                privilegedFeedback = if (ShizukuBridge.openManager(context)) "请启动 Shizuku 后返回 Muse" else "未安装 Shizuku"
                             }
                             !privilegedState.permissionGranted -> ShizukuBridge.requestPermission()
                             else -> ShizukuBridge.connect()
@@ -397,48 +470,13 @@ private fun DrawerContent(
                     },
                     enabled = privilegedEnabled,
                     modifier = Modifier.weight(1f),
-                ) {
-                    Text(
-                        when {
-                            !privilegedState.binderAvailable -> "启动 Shizuku"
-                            !privilegedState.permissionGranted -> "授权"
-                            else -> "连接"
-                        },
-                        color = Color.White,
-                    )
-                }
-                OutlinedButton(
-                    onClick = {
-                        privilegedFeedback = if (ShizukuBridge.openManager(context)) {
-                            "已打开 Shizuku"
-                        } else {
-                            "未安装 Shizuku"
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("打开 Shizuku", color = Color.White)
-                }
+                ) { Text(if (privilegedState.permissionGranted) "连接 Shizuku" else "授权 Shizuku", color = Color.White) }
+                Text(
+                    if (privilegedState.connected) "● 已连接" else "○ 未连接",
+                    color = if (privilegedState.connected) Color(0xFF80DDA8) else Color(0xFFB9C2BC),
+                    modifier = Modifier.align(Alignment.CenterVertically),
+                )
             }
-            OutlinedButton(
-                onClick = {
-                    scope.launch {
-                        privilegedFeedback = ShizukuBridge.testConnection().displayText()
-                    }
-                },
-                enabled = privilegedState.connected,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("测试特权连接", color = Color.White)
-            }
-            privilegedFeedback?.let {
-                Text(it.take(500), color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
-            }
-            Text(
-                "Agent 只把 Shizuku 用作现有动作的兜底；原始命令仅响应你输入的 /shell。",
-                color = Color(0xFFB9C2BC),
-                style = MaterialTheme.typography.labelSmall,
-            )
             HorizontalDivider(color = Color(0xFF354139))
             if (nextRunAt > System.currentTimeMillis()) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -650,12 +688,12 @@ private fun ChatWorkspace(
                                     updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "用法：/shell <command>")))
                                 }
                                 !settings.privilegedBackendEnabled -> {
-                                    updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先在侧栏启用并连接 Shizuku 特权后端。")))
+                                    updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先在侧栏启用并连接 Muse 内置 ADB 终端或 Shizuku。")))
                                 }
                                 else -> {
                                     sending = true
                                     interactionScope.launch {
-                                        val response = ShizukuBridge.execute(command).displayText()
+                                        val response = PrivilegedBackendRouter.execute(command).displayText()
                                         updateConversation(
                                             withUser.copy(
                                                 updatedAt = System.currentTimeMillis(),

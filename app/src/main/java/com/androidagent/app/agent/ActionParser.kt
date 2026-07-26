@@ -53,6 +53,10 @@ object ActionParser {
                 nodeId = json.optInt("nodeId").takeIf { json.has("nodeId") }?.also { require(it > 0) },
                 selector = parseSelector(json.optJSONObject("selector")),
             )
+            "terminal" -> AgentAction.Terminal(
+                command = json.getString("command").also { require(it.isNotBlank() && it.length <= 16_000) },
+                timeoutMillis = json.optLong("timeoutMillis", 5_000L).also { require(it in 250L..30_000L) },
+            )
             "back" -> AgentAction.Back
             "home" -> AgentAction.Home
             "wait" -> AgentAction.Wait(json.optLong("milliseconds", 1000).also { require(it in 250L..5000L) })

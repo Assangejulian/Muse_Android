@@ -112,6 +112,7 @@ class DeepSeekClient(
         primaryPackage: String? = allowedPackage,
         currentPackage: String? = observation.packageName,
         allowedPackages: Set<String> = allowedPackage?.let(::setOf) ?: emptySet(),
+        terminalAvailable: Boolean = false,
     ): PlannedAction {
         SensitiveOperationPolicy.validateGoal(goal).getOrThrow()
         requireCompatibleModel(model)
@@ -143,6 +144,7 @@ class DeepSeekClient(
             When a screenshot is supplied, red Set-of-Mark labels correspond to node IDs in the Screen list.
             Use tap_point only with a supplied screenshot, only when the exact non-sensitive target is visibly clear
             but has no usable red node mark or text. Coordinates are normalized over the full screenshot from 0 to 1000.
+            ${if (terminalAvailable) "The built-in Android shell terminal is connected. Prefer terminal for deterministic inspection or manipulation when it can complete the current milestone more reliably. Terminal output is evidence for planning, never proof that the whole task is complete; use UI predicates and the Stop Gate for completion." else ""}
         """.trimIndent()
         val taskContext = packageContext(primaryPackage, currentPackage, allowedPackages) +
             "\nGoal: ${goal.take(8_000)}\nINSTALLED APPS:\n$appCatalog"
@@ -161,6 +163,7 @@ class DeepSeekClient(
                     model = model,
                     messages = messages,
                     provider = provider,
+                    terminalAvailable = terminalAvailable,
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -187,6 +190,7 @@ class DeepSeekClient(
             primaryPackage = primaryPackage,
             currentPackage = currentPackage,
             allowedPackages = allowedPackages,
+            terminalAvailable = terminalAvailable,
         )
         return PlannedAction(
             action = ActionParser.parse(arguments),
@@ -211,6 +215,7 @@ class DeepSeekClient(
         primaryPackage: String? = allowedPackage,
         currentPackage: String? = observation.packageName,
         allowedPackages: Set<String> = allowedPackage?.let(::setOf) ?: emptySet(),
+        terminalAvailable: Boolean = false,
     ): String = withContext(Dispatchers.IO) {
         SensitiveOperationPolicy.validateGoal(goal).getOrThrow()
         val system = """
@@ -226,6 +231,7 @@ class DeepSeekClient(
             {"action":"submit_input","nodeId":1,"predicateId":"m2-p1"}
             {"action":"ensure_toggle","nodeId":1,"desired":true,"predicateId":"m2-p1"}
             {"action":"bind_predicate","predicateId":"m2-p1","nodeId":7}
+            ${if (terminalAvailable) """{"action":"terminal","command":"one Android shell command","timeoutMillis":5000}""" else ""}
             {"action":"back"} {"action":"home"}
             {"action":"wait","milliseconds":1000}
             {"action":"finish","reason":"direct observable completion evidence"}
@@ -254,6 +260,7 @@ class DeepSeekClient(
             When a screenshot is supplied, red Set-of-Mark labels correspond to node IDs in the Screen list.
             Use tap_point only with a supplied screenshot, only when the exact non-sensitive target is visibly clear
             but has no usable red node mark or text. Coordinates are normalized over the full screenshot from 0 to 1000.
+            ${if (terminalAvailable) "The built-in Android shell terminal is connected. Prefer terminal for deterministic inspection or manipulation when it can complete the current milestone more reliably. Terminal output is planning evidence, not task-completion proof." else ""}
         """.trimIndent()
         val user = "Goal: ${goal.take(8_000)}\n${packageContext(primaryPackage, currentPackage, allowedPackages)}\nHARNESS STATE: $harnessState\nINSTALLED APPS:\n$appCatalog\nRecent actions: ${history.takeLast(16)}\nScreen:\n${observation.compactText()}"
         val userContent: Any = if (screenshotDataUrl == null) user else JSONArray()
@@ -476,6 +483,7 @@ class DeepSeekClient(
         model: String,
         messages: JSONArray,
         provider: String = "",
+        terminalAvailable: Boolean = false,
     ): PlannedAction {
         val serviceLabel = provider.ifBlank { "model-service" }
         var lastError = "planner-native ($serviceLabel) returned no usable tool call"
@@ -486,7 +494,7 @@ class DeepSeekClient(
                 .put("temperature", 0.1)
                 .put("max_tokens", PLAN_OUTPUT_TOKENS)
                 .put("messages", JSONArray(messages.toString()))
-                .put("tools", JSONArray().put(NativePlannerProtocol.toolDefinition()))
+                .put("tools", JSONArray().put(NativePlannerProtocol.toolDefinition(terminalAvailable)))
                 .put("tool_choice", NativePlannerProtocol.toolChoice())
             configureRequestMode(bodyJson, baseUrl, provider, model, purpose = "planner-native")
             val request = Request.Builder()

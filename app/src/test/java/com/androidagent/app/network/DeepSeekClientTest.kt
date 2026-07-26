@@ -160,6 +160,7 @@ class DeepSeekClientTest {
         assertFalse(parameters.getBoolean("additionalProperties"))
         assertTrue((0 until actionEnum.length()).any { actionEnum.getString(it) == "ensure_toggle" })
         assertTrue((0 until actionEnum.length()).any { actionEnum.getString(it) == "finish" })
+        assertFalse((0 until actionEnum.length()).any { actionEnum.getString(it) == "terminal" })
         assertEquals("string", parameters.getJSONObject("properties").getJSONObject("reason").getString("type"))
         assertEquals(
             "android_action",
@@ -167,6 +168,14 @@ class DeepSeekClientTest {
         )
         val selector = parameters.getJSONObject("properties").getJSONObject("selector")
         assertTrue(selector.getJSONArray("anyOf").length() >= 5)
+
+        val terminalEnum = NativePlannerProtocol.toolDefinition(terminalAvailable = true)
+            .getJSONObject("function")
+            .getJSONObject("parameters")
+            .getJSONObject("properties")
+            .getJSONObject("action")
+            .getJSONArray("enum")
+        assertTrue((0 until terminalEnum.length()).any { terminalEnum.getString(it) == "terminal" })
     }
 
     @Test

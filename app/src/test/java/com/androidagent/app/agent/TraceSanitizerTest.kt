@@ -16,6 +16,15 @@ class TraceSanitizerTest {
     }
 
     @Test
+    fun terminalTraceNeverStoresCommandText() {
+        val trace = TraceSanitizer.action(AgentAction.Terminal("settings put system private_value 1"))
+        assertTrue(trace.contains("command_chars="))
+        assertTrue(trace.contains("command_sha256="))
+        assertFalse(trace.contains("private_value"))
+        assertEquals("TERMINAL", TraceSanitizer.actionType(AgentAction.Terminal("id")))
+    }
+
+    @Test
     fun goalsAndApiKeysAreNotStoredAsPlainText() {
         val payload = TraceSanitizer.payload(
             mapOf("goal" to "send to 13800138000", "apiKey" to "sk-secret", "plan" to "raw screen"),

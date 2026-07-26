@@ -809,6 +809,7 @@ sealed interface AgentAction {
     data class SubmitInput(val nodeId: Int? = null, val target: ElementSelector? = null, val predicateId: String? = null) : AgentAction
     data class EnsureToggle(val nodeId: Int, val desired: Boolean, val selector: ElementSelector? = null, val predicateId: String? = null) : AgentAction
     data class BindPredicate(val predicateId: String, val nodeId: Int? = null, val selector: ElementSelector? = null) : AgentAction
+    data class Terminal(val command: String, val timeoutMillis: Long = 5_000L) : AgentAction
     data class Wait(val milliseconds: Long) : AgentAction
     data object Back : AgentAction
     data object Home : AgentAction
