@@ -321,10 +321,22 @@ private fun DrawerContent(
     val embeddedAdbState by EmbeddedAdbBridge.state.collectAsState()
     var pendingDelete by remember { mutableStateOf<String?>(null) }
     var privilegedFeedback by remember { mutableStateOf<String?>(null) }
+    var adbHost by remember { mutableStateOf("") }
     var pairingCode by remember { mutableStateOf("") }
     var pairingPort by remember { mutableStateOf("") }
+    var connectionPort by remember { mutableStateOf("") }
+    LaunchedEffect(embeddedAdbState.suggestedHost) {
+        if (adbHost.isBlank()) adbHost = embeddedAdbState.suggestedHost
+    }
     LaunchedEffect(embeddedAdbState.pairEndpoints) {
-        embeddedAdbState.pairEndpoints.singleOrNull()?.let { pairingPort = it.port.toString() }
+        if (pairingPort.isBlank()) {
+            embeddedAdbState.pairEndpoints.singleOrNull()?.let { pairingPort = it.port.toString() }
+        }
+    }
+    LaunchedEffect(embeddedAdbState.connectEndpoints) {
+        if (connectionPort.isBlank()) {
+            embeddedAdbState.connectEndpoints.singleOrNull()?.let { connectionPort = it.port.toString() }
+        }
     }
     Column(Modifier.fillMaxHeight().padding(18.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -406,6 +418,13 @@ private fun DrawerContent(
                     Text("重新发现", color = Color.White)
                 }
             }
+            OutlinedTextField(
+                value = adbHost,
+                onValueChange = { adbHost = it.trim().take(253) },
+                label = { Text("WLAN 主机地址，例如 172.19.0.1") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
                     value = pairingPort,
@@ -422,23 +441,47 @@ private fun DrawerContent(
                     modifier = Modifier.weight(1f),
                 )
             }
+            OutlinedTextField(
+                value = connectionPort,
+                onValueChange = { connectionPort = it.filter(Char::isDigit).take(5) },
+                label = { Text("连接端口（无线调试主页显示）") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "配对端口来自六位码弹窗；连接端口来自无线调试主页，两者通常不同。",
+                color = Color(0xFFB9C2BC),
+                style = MaterialTheme.typography.labelSmall,
+            )
             OutlinedButton(
                 onClick = {
                     scope.launch {
                         privilegedFeedback = EmbeddedAdbBridge.pair(
-                            pairingCode,
-                            pairingPort.toIntOrNull(),
+                            pairingCode = pairingCode,
+                            manualHost = adbHost,
+                            manualPairPort = pairingPort.toIntOrNull(),
+                            manualConnectPort = connectionPort.toIntOrNull(),
                         ).displayText()
                     }
                 },
-                enabled = privilegedEnabled && pairingCode.length == 6,
+                enabled = privilegedEnabled &&
+                    adbHost.isNotBlank() &&
+                    (pairingPort.toIntOrNull() ?: 0) in 1..65_535 &&
+                    pairingCode.length == 6,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("配对并连接", color = Color.White)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
-                    onClick = { scope.launch { privilegedFeedback = EmbeddedAdbBridge.connect().displayText() } },
+                    onClick = {
+                        scope.launch {
+                            privilegedFeedback = EmbeddedAdbBridge.connectManual(
+                                adbHost,
+                                connectionPort.toIntOrNull(),
+                            ).displayText()
+                        }
+                    },
                     enabled = privilegedEnabled,
                     modifier = Modifier.weight(1f),
                 ) { Text("重新连接", color = Color.White) }

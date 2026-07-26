@@ -1,4 +1,4 @@
-# Muse Android Agent 0.10.0
+# Muse Android Agent 0.10.1
 
 A private, sideloaded Android 13 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, executes it, and independently checks the result.
 
@@ -71,6 +71,8 @@ User-started runs are protected by a foreground service. Exact-alarm special acc
 
 Muse includes an ADB client and Android NSD discovery. It pairs directly with Android Wireless debugging, stores the generated ADB host key in Muse's private data directory, and executes commands as Android's `shell` user. A separate Shizuku app is not required.
 
+Muse automatically suggests the active WLAN IPv4 address and keeps the pairing port separate from the normal ADB connection port. If NSD discovery is unavailable, enter the host and both ports shown by Android; Muse never substitutes the loopback address for a WLAN endpoint.
+
 When the connection is live, the Harness exposes a bounded `terminal` action to the model and recommends it for deterministic inspection and manipulation. Terminal output is returned to the planning loop but does not bypass milestone predicates or the Stop Gate. If the connection drops, the action disappears from the model schema and execution falls back to accessibility. Commands are limited to 16,000 characters and 30 seconds; trace files store only command length and a short digest.
 
 The existing Shizuku integration remains available as an optional fallback and can provide root identity when the separately installed Shizuku service runs as root.
@@ -88,13 +90,14 @@ The existing Shizuku integration remains available as an optional fallback and c
 1. Install the debug APK.
 2. Open Muse.
 3. Enable **Developer options > Wireless debugging** on the device.
-4. In Muse's **内置 ADB 终端** section, tap **打开无线调试**, choose **使用配对码配对设备**, enter the shown port and six-digit code in Muse, then tap **配对并连接**.
-5. Tap **Accessibility** and enable **Muse Control**.
-6. Select DeepSeek or Qwen and enter that provider's API key. The Qwen text preset uses `qwen3.6-flash`; optional vision uses `qwen3-vl-flash`.
-7. Optionally set a default target package. Leave it blank for automatic app selection.
-8. Enter a narrow, low-risk task in the chat input and tap **发送**.
-9. Enter `/list` to inspect the launchable app catalog, or `/shell <command>` to run an explicit privileged command.
-10. To schedule an explicit task, enter `/schedule <future epoch millis>|<goal>`; scheduling is never inferred from business keywords.
+4. Note the host and connection port shown on the Wireless debugging home page.
+5. In Muse's **内置 ADB 终端** section, tap **打开无线调试**, choose **使用配对码配对设备**, then enter the WLAN host, pairing port, connection port, and six-digit code before tapping **配对并连接**.
+6. Tap **Accessibility** and enable **Muse Control**.
+7. Select DeepSeek or Qwen and enter that provider's API key. The Qwen text preset uses `qwen3.6-flash`; optional vision uses `qwen3-vl-flash`.
+8. Optionally set a default target package. Leave it blank for automatic app selection.
+9. Enter a narrow, low-risk task in the chat input and tap **发送**.
+10. Enter `/list` to inspect the launchable app catalog, or `/shell <command>` to run an explicit privileged command.
+11. To schedule an explicit task, enter `/schedule <future epoch millis>|<goal>`; scheduling is never inferred from business keywords.
 
 Do not use this MVP for payments, purchases, account security, verification codes, permission granting, or system settings.
 

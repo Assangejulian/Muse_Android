@@ -2,6 +2,8 @@ package com.androidagent.app.privileged
 
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import com.flyfishxu.kadb.Kadb
 import com.flyfishxu.kadb.cert.KadbCert
 import kotlinx.coroutines.CoroutineScope
@@ -38,6 +40,7 @@ data class EmbeddedAdbState(
     val pairEndpoints: List<AdbEndpoint> = emptyList(),
     val connectEndpoints: List<AdbEndpoint> = emptyList(),
     val activeEndpoint: AdbEndpoint? = null,
+    val suggestedHost: String = "",
     val identity: String = "",
     val detail: String = "Built-in ADB is disabled",
 )
@@ -92,6 +95,9 @@ object EmbeddedAdbBridge {
                         discovering = discovered.running,
                         pairEndpoints = discovered.pairEndpoints,
                         connectEndpoints = discovered.connectEndpoints,
+                        suggestedHost = discovered.pairEndpoints.firstOrNull()?.host
+                            ?: discovered.connectEndpoints.firstOrNull()?.host
+                            ?: currentWifiIpv4().orEmpty(),
                     )
                 }
             }
@@ -118,17 +124,32 @@ object EmbeddedAdbBridge {
         if (!initialized || !enabled) return
         discovery.stop()
         discovery.start()
-        mutableState.update { it.copy(discovering = true, detail = "Discovering wireless debugging endpoints") }
+        mutableState.update {
+            it.copy(
+                discovering = true,
+                suggestedHost = currentWifiIpv4().orEmpty().ifBlank { it.suggestedHost },
+                detail = "Discovering wireless debugging endpoints",
+            )
+        }
     }
 
-    suspend fun pair(pairingCode: String, manualPort: Int? = null): PrivilegedCommandResult {
+    suspend fun pair(
+        pairingCode: String,
+        manualHost: String? = null,
+        manualPairPort: Int? = null,
+        manualConnectPort: Int? = null,
+    ): PrivilegedCommandResult {
         if (!initialized || !enabled) return PrivilegedCommandResult.failure("Built-in ADB is disabled")
         val code = pairingCode.trim()
         if (!code.matches(Regex("\\d{6}"))) return PrivilegedCommandResult.failure("Pairing code must contain 6 digits")
         val endpoint = EmbeddedAdbEndpointPolicy.pairEndpoint(
             discovered = mutableState.value.pairEndpoints,
-            manualPort = manualPort,
-        ) ?: return PrivilegedCommandResult.failure("No pairing endpoint found; enter the pairing port shown by Android")
+            manualHost = manualHost,
+            manualPort = manualPairPort,
+            localWifiHost = currentWifiIpv4(),
+        ) ?: return PrivilegedCommandResult.failure(
+            "No pairing endpoint found; enter the WLAN host and pairing port shown by Android",
+        )
 
         mutableState.update { it.copy(pairing = true, detail = "Pairing with ${endpoint.label}") }
         return runCatching {
@@ -138,9 +159,14 @@ object EmbeddedAdbBridge {
             prefs().edit().putBoolean(KEY_PAIRED, true).apply()
             mutableState.update { it.copy(pairing = false, paired = true, detail = "Pairing succeeded; discovering ADB connection") }
             refreshDiscovery()
-            val connectEndpoint = withTimeoutOrNull(15_000L) {
-                discovery.state.first { it.connectEndpoints.isNotEmpty() }
-                    .connectEndpoints.first()
+            val explicitConnectEndpoint = EmbeddedAdbEndpointPolicy.connectEndpoint(
+                discovered = mutableState.value.connectEndpoints,
+                manualHost = manualHost,
+                manualPort = manualConnectPort,
+                localWifiHost = currentWifiIpv4(),
+            )
+            val connectEndpoint = explicitConnectEndpoint ?: withTimeoutOrNull(15_000L) {
+                discovery.state.first { it.connectEndpoints.isNotEmpty() }.connectEndpoints.first()
             }
             if (connectEndpoint != null) {
                 connect(connectEndpoint)
@@ -215,6 +241,18 @@ object EmbeddedAdbBridge {
                 PrivilegedCommandResult.failure(error.message ?: error::class.java.simpleName)
             }
         }
+    }
+
+    suspend fun connectManual(host: String?, port: Int?): PrivilegedCommandResult {
+        val endpoint = EmbeddedAdbEndpointPolicy.connectEndpoint(
+            discovered = mutableState.value.connectEndpoints,
+            manualHost = host,
+            manualPort = port,
+            localWifiHost = currentWifiIpv4(),
+        ) ?: return PrivilegedCommandResult.failure(
+            "No ADB connection endpoint found; enter the WLAN host and connection port shown by Android",
+        )
+        return connect(endpoint)
     }
 
     suspend fun execute(command: String, timeoutMillis: Long = 5_000L): PrivilegedCommandResult {
@@ -304,16 +342,63 @@ object EmbeddedAdbBridge {
         keyFile.writeBytes(key)
     }
 
+    @Suppress("DEPRECATION")
+    private fun currentWifiIpv4(): String? {
+        val manager = applicationContext.getSystemService(ConnectivityManager::class.java)
+        return manager.allNetworks.asSequence()
+            .filter { network ->
+                manager.getNetworkCapabilities(network)
+                    ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            }
+            .flatMap { network ->
+                manager.getLinkProperties(network)?.linkAddresses.orEmpty().asSequence()
+            }
+            .map { it.address }
+            .firstOrNull { address ->
+                address.address.size == 4 && !address.isLoopbackAddress && !address.isAnyLocalAddress
+            }
+            ?.hostAddress
+    }
+
     private fun prefs() = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 }
 
 internal object EmbeddedAdbEndpointPolicy {
-    fun pairEndpoint(discovered: List<AdbEndpoint>, manualPort: Int?): AdbEndpoint? {
+    fun pairEndpoint(
+        discovered: List<AdbEndpoint>,
+        manualHost: String?,
+        manualPort: Int?,
+        localWifiHost: String?,
+    ): AdbEndpoint? {
+        return endpoint(discovered, manualHost, manualPort, localWifiHost)
+    }
+
+    fun connectEndpoint(
+        discovered: List<AdbEndpoint>,
+        manualHost: String?,
+        manualPort: Int?,
+        localWifiHost: String?,
+    ): AdbEndpoint? {
+        if (manualPort == null) return discovered.singleOrNull()
+        return endpoint(discovered, manualHost, manualPort, localWifiHost)
+    }
+
+    private fun endpoint(
+        discovered: List<AdbEndpoint>,
+        manualHost: String?,
+        manualPort: Int?,
+        localWifiHost: String?,
+    ): AdbEndpoint? {
         if (manualPort != null && manualPort !in 1..65_535) return null
         if (manualPort != null) {
-            return discovered.firstOrNull { it.port == manualPort }
-                ?: AdbEndpoint("127.0.0.1", manualPort)
+            return validHost(manualHost)?.let { AdbEndpoint(it, manualPort) }
+                ?: discovered.firstOrNull { it.port == manualPort }
+                ?: validHost(localWifiHost)?.let { AdbEndpoint(it, manualPort) }
         }
         return discovered.singleOrNull()
     }
+
+    private fun validHost(value: String?): String? = value
+        ?.trim()
+        ?.takeIf { it.isNotBlank() && it.length <= 253 && it.none(Char::isWhitespace) }
 }
