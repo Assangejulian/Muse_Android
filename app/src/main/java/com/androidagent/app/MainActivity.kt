@@ -200,16 +200,17 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                     },
                     onModelPreset = { preset ->
                         val values = when (preset) {
-                            "qwen" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "qwen3.6-flash"
-                            "mimo" -> "https://dashscope.aliyuncs.com/compatible-mode/v1" to "mimo-v2.5-pro"
-                            else -> "https://api.deepseek.com" to "deepseek-v4-pro"
+                            "qwen" -> Triple("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.6-flash")
+                            "mimo" -> Triple("mimo", "https://dashscope.aliyuncs.com/compatible-mode/v1", "mimo-v2.5-pro")
+                            "deepseek-flash" -> Triple("deepseek", "https://api.deepseek.com", "deepseek-v4-flash")
+                            else -> Triple("deepseek", "https://api.deepseek.com", "deepseek-v4-pro")
                         }
-                        settings.currentProvider = preset
-                        activeProvider = preset
-                        modelBaseUrl = values.first
-                        modelName = values.second
-                        settings.modelBaseUrl = values.first
-                        settings.modelName = values.second
+                        settings.currentProvider = values.first
+                        activeProvider = values.first
+                        modelBaseUrl = values.second
+                        modelName = values.third
+                        settings.modelBaseUrl = values.second
+                        settings.modelName = values.third
                         apiKey = settings.apiKey
                     },
                     onCancelSchedule = {
@@ -539,7 +540,18 @@ private fun DrawerContent(
                 modifier = Modifier.fillMaxWidth(),
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { onModelPreset("deepseek") }) { Text("DeepSeek", color = providerColor(activeProvider == "deepseek")) }
+                TextButton(onClick = { onModelPreset("deepseek") }) {
+                    Text(
+                        "DS Pro",
+                        color = providerColor(activeProvider == "deepseek" && modelName.contains("pro", true)),
+                    )
+                }
+                TextButton(onClick = { onModelPreset("deepseek-flash") }) {
+                    Text(
+                        "DS Flash",
+                        color = providerColor(activeProvider == "deepseek" && modelName.contains("flash", true)),
+                    )
+                }
                 TextButton(onClick = { onModelPreset("qwen") }) { Text("Qwen", color = providerColor(activeProvider == "qwen")) }
                 TextButton(onClick = { onModelPreset("mimo") }) { Text("MiMo", color = providerColor(activeProvider == "mimo")) }
             }
@@ -547,9 +559,23 @@ private fun DrawerContent(
                 value = modelName,
                 onValueChange = onModelName,
                 label = { Text("模型名称") },
+                placeholder = { Text("deepseek-v4-pro 或 deepseek-v4-flash") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            if (activeProvider == "deepseek" && modelName.contains("flash", true)) {
+                Text(
+                    "Flash：关闭 thinking，开局更快；复杂长任务可切回 DS Pro",
+                    color = Color(0xFFB9C2BC),
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            } else if (activeProvider == "deepseek" && modelName.contains("pro", true)) {
+                Text(
+                    "Pro：仅 Manager 规划阶段可开 thinking，Actor 步仍关闭",
+                    color = Color(0xFFB9C2BC),
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
             OutlinedTextField(
                 value = modelBaseUrl,
                 onValueChange = onModelBaseUrl,

@@ -141,6 +141,8 @@ class DeepSeekClient(
             Never click IME character keys. After exact text is entered and read back, use submit_input instead of
             typing it again. Select only controls whose own text, description, or nearby row context directly advances
             the current milestone; otherwise inspect, scroll, go Back, or use a relevant filter.
+            input_text must use only values the user explicitly provided or that already appear as the intended field
+            content. Never type residual goal wording, ordinals, or action tails into a search/edit box.
             When a screenshot is supplied, red Set-of-Mark labels correspond to node IDs in the Screen list.
             Use tap_point only with a supplied screenshot, only when the exact non-sensitive target is visibly clear
             but has no usable red node mark or text. Coordinates are normalized over the full screenshot from 0 to 1000.
@@ -257,6 +259,8 @@ class DeepSeekClient(
             Never click IME character keys. After exact text is entered and read back, use submit_input instead of
             typing it again. Select only controls whose own text, description, or nearby row context directly advances
             the current milestone; otherwise inspect, scroll, go Back, or use a relevant filter.
+            input_text must use only values the user explicitly provided or that already appear as the intended field
+            content. Never type residual goal wording, ordinals, or action tails into a search/edit box.
             When a screenshot is supplied, red Set-of-Mark labels correspond to node IDs in the Screen list.
             Use tap_point only with a supplied screenshot, only when the exact non-sensitive target is visibly clear
             but has no usable red node mark or text. Coordinates are normalized over the full screenshot from 0 to 1000.
@@ -330,6 +334,12 @@ class DeepSeekClient(
             Never return a semantic-only milestone. SEMANTIC_CLAIM is only auxiliary evidence alongside a deterministic predicate.
             Use literal values only when the user explicitly supplied them or the current observation supplies them.
             Preserve IDs and already proven milestones when revising a plan; add explicit repair milestones for gaps.
+            Model-first planning rules (app-agnostic):
+            - Decompose the full multi-step goal into ordered UI milestones; do not collapse a whole workflow into one invented text field.
+            - Use INPUT + EDITABLE_EQUALS only when the user explicitly provided a value or keyword to type. Never invent typed text by rewriting the rest of the goal sentence.
+            - Ranked lists, feeds, tabs, comments, and ordinals ("first item", "第 N 条") are navigation/interaction milestones against on-screen controls — not search-box queries.
+            - Resolve target apps from the installed app catalog (label or package). Prefer allowedPackages with exact package ids from that catalog.
+            - Keep milestones app-agnostic in wording; concrete view IDs and bounds are bound later from live observations.
 
             Immutable goal: ${goal.originalGoal.take(8_000)}
             Target app hint: $targetAppHint
@@ -673,8 +683,10 @@ class DeepSeekClient(
         model: String,
         purpose: String,
     ) {
-        // Manager planning benefits most from DeepSeek V4 Pro thinking mode.
-        val allowThinking = purpose == "manager" || purpose.startsWith("manager-")
+        // Manager planning may use DeepSeek V4 Pro thinking mode only.
+        // Flash and all non-manager paths always disable thinking for latency.
+        val allowThinking = (purpose == "manager" || purpose.startsWith("manager-")) &&
+            model.contains("deepseek-v4-pro", ignoreCase = true)
         ProviderRequestPolicy.configure(
             body = body,
             baseUrl = baseUrl,

@@ -105,13 +105,17 @@ internal fun resolveTargetPackage(
             ?: apps.firstOrNull { it.first.isNotBlank() && configured.contains(it.first, true) }?.second
         if (direct != null) return direct
     }
+    // Catalog-only resolution: match installed labels / package ids from the goal or
+    // configured hint. No app-specific alias tables — the Manager sees the full catalog
+    // and chooses packages when the user uses a nickname the label does not contain.
     apps.firstOrNull { (label, _) -> label.isNotBlank() && goal.contains(label, true) }?.second?.let { return it }
-    val combinedHint = "$configured $goal".lowercase()
-    val aliasesByPackage = mapOf(
-        TaskRecipeRegistry.BILIBILI_PACKAGE to listOf("b站", "哔哩哔哩", "bilibili"),
-    )
-    return apps.firstOrNull { (_, packageName) ->
-        aliasesByPackage[packageName].orEmpty().any(combinedHint::contains)
+    apps.firstOrNull { (_, packageName) ->
+        packageName.isNotBlank() && goal.contains(packageName, true)
+    }?.second?.let { return it }
+    val combined = "$configured $goal"
+    return apps.firstOrNull { (label, packageName) ->
+        (label.isNotBlank() && combined.contains(label, true)) ||
+            (packageName.isNotBlank() && combined.contains(packageName, true))
     }?.second
 }
 
@@ -152,7 +156,6 @@ class AgentRuntime(
         val appCatalog = apps.joinToString("\n") { "${it.label} | ${it.packageName}" }.take(16_000)
         var lockedPackage = resolveTargetPackage(settings.targetPackage, immutableGoal, apps.map { it.label to it.packageName })
         val goalContext = GoalContract.interpret(immutableGoal)
-        var recipe = TaskRecipeRegistry.select(goalContext, lockedPackage)
         var targetHint = apps.firstOrNull { it.packageName == lockedPackage }?.label
             ?: settings.targetPackage.ifBlank { immutableGoal.take(80) }
         var packagePolicy = PackagePolicy(
@@ -225,9 +228,7 @@ class AgentRuntime(
                         )
                     }
                 }
-                recipe = TaskRecipeRegistry.select(goalContext, lockedPackage)
                 plan = normalizePrimaryLaunchContract(plan, lockedPackage)
-                plan = recipe?.normalizePlan(plan) ?: plan
                 packagePolicy = mergePlanPackages(packagePolicy, plan, launchablePackages)
 
                 var ledger = RunLedger(plan)
@@ -531,8 +532,7 @@ class AgentRuntime(
                     }
                     val screenshot = screenshotCapture.dataUrl
                     val screenshotFingerprint = screenshot?.let(TraceSanitizer::digest)
-                    val workflowAction = recipe?.requiredAction(before, milestone)
-                        ?: guard.requiredWorkflowAction(before, milestone)
+                    val workflowAction = guard.requiredWorkflowAction(before, milestone)
                     var planned: PlannedAction? = null
                     val proposed = if (workflowAction != null) {
                         onLog("Local workflow tool: ${describeAction(workflowAction)}")
@@ -713,29 +713,6 @@ class AgentRuntime(
                         continue
                     }
 
-                    val recipeRejection = recipe?.rejectAction(proposed, before, milestone)
-                    if (recipeRejection != null) {
-                        val feedback = toolResultJson(false, proposed, before, before, "recipe_rejected", recipeRejection)
-                        recordTurn(toolTurns, planned, feedback)
-                        history += "RECIPE_REJECTED: $recipeRejection"
-                        ledger.record(
-                            StepTrace(
-                                milestone.id,
-                                before.observationId,
-                                TraceSanitizer.action(proposed),
-                                before.observationId,
-                                TransitionJudgement.NO_PROGRESS,
-                                recipeRejection,
-                            ),
-                        )
-                        traceStore.event(
-                            runId,
-                            "RECIPE_REJECTED",
-                            mapOf("actionType" to TraceSanitizer.actionType(proposed), "reasonCode" to "RECIPE_REJECTED"),
-                        )
-                        onLog("Recipe rejected unsafe or unrelated action")
-                        continue
-                    }
 
                     // Planning may take time. The shared engine always receives
                     // a fresh execution snapshot and owns the full preflight.
@@ -858,7 +835,6 @@ class AgentRuntime(
                         )
                     ) {
                         lockedPackage = stepAction.packageName
-                        recipe = TaskRecipeRegistry.select(goalContext, lockedPackage)
                         packagePolicy = packagePolicy.copy(
                             allowedPackages = (packagePolicy.allowedPackages + stepAction.packageName).toMutableSet(),
                             primaryPackage = stepAction.packageName,
@@ -1239,7 +1215,7 @@ class AgentRuntime(
             ),
             targetPackage,
         )
-        return TaskRecipeRegistry.select(goal, targetPackage)?.normalizePlan(normalized) ?: normalized
+        return normalized
     }
 
     private suspend fun awaitStableObservation(before: Observation, action: AgentAction): Observation =

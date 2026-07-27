@@ -1,12 +1,12 @@
-# Muse Android Agent 0.10.1
+# Muse Android Agent 0.10.3
 
-A private, sideloaded Android 13 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, executes it, and independently checks the result.
+A private, sideloaded Android 11–17 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, and independently checks the result. Workflow decomposition is model-first: the runtime does not inject app-specific search/NLP recipes.
 
 ## MVP capabilities
 
 - Accessibility node observation
 - DeepSeek, Qwen, or MiMo planning through OpenAI-compatible APIs
-- Default DeepSeek model preset: `deepseek-v4-pro` (Manager may use thinking mode)
+- Default DeepSeek model preset: `deepseek-v4-pro` (Manager may use thinking mode); UI also offers `deepseek-v4-flash` without remapping
 - Native `tools` / `tool_calls` planning for DeepSeek and Qwen, with a cached compatibility fallback
 - One strictly validated action per model response, with unknown action fields ignored
 - Target package allowlist
@@ -49,7 +49,8 @@ A private, sideloaded Android 13 automation agent. It observes the active UI thr
 - Typed milestone contracts with deterministic local predicates and IME submission verification
 - Input-method windows excluded from Actor observations and Set-of-Mark screenshots
 - Generic task plans without app-specific creator, profile, or latest-video routing in the core runtime
-- A task-recipe registry with deterministic generic search submission and bounded Bilibili safety guards
+- Empty task-recipe registry (optional hook only); no app-specific search/NLP recipes hijack planning
+- Manager/Actor prompts stay app-agnostic: typed INPUT only for user-supplied values; lists/feeds/ordinals are navigation
 - Pre-tool target proof plus idempotent state-transition controls
 - App-private SQLite run traces available through `/trace`
 - A run console showing the current phase, action, progress, outcome, and full trace

@@ -1,42 +1,53 @@
 package com.androidagent.app.agent
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/**
+ * Behavioral search/app recipes were removed in favor of model-first planning.
+ * These tests lock that policy and keep catalog-only package resolution.
+ */
 class TaskRecipesTest {
     @Test
-    fun extractsCreatorFromLatestBilibiliGoal() {
-        assertEquals("老番茄", SearchGoalParser.extract("打开B站给老番茄的最新视频点赞"))
-        assertTrue(SearchGoalParser.referencesBilibili("在哔哩哔哩查找内容"))
+    fun registryNeverSelectsHardcodedWorkflowRecipes() {
+        val goals = listOf(
+            "打开B站给热搜的第一的视频下面的第一个评论点赞",
+            "打开B站给老番茄的最新视频点赞",
+            "在B站搜索老番茄并点赞",
+            "搜索猫咪视频，然后播放第一个结果",
+            "open settings and enable wifi",
+        )
+        goals.forEach { goal ->
+            assertNull(
+                "recipe must stay disabled for: $goal",
+                TaskRecipeRegistry.select(GoalContext(goal), "tv.danmaku.bili"),
+            )
+            assertNull(TaskRecipeRegistry.select(GoalContext(goal), null))
+        }
     }
 
     @Test
-    fun excludesFollowUpActionFromSearchQuery() {
-        assertEquals("老番茄", SearchGoalParser.extract("在B站搜索老番茄并点赞"))
-        assertEquals("猫咪视频", SearchGoalParser.extract("搜索猫咪视频，然后播放第一个结果"))
+    fun resolveTargetPackageUsesInstalledCatalogOnly() {
+        val apps = listOf(
+            "哔哩哔哩" to "tv.danmaku.bili",
+            "设置" to "com.android.settings",
+        )
+
+        assertEquals("tv.danmaku.bili", resolveTargetPackage("tv.danmaku.bili", "打开它", apps))
+        assertEquals("tv.danmaku.bili", resolveTargetPackage("", "打开哔哩哔哩", apps))
+        assertEquals("com.android.settings", resolveTargetPackage("", "打开设置", apps))
+        // Nickname that does not appear in the label is left for Manager + catalog, not hard aliases.
+        assertNull(resolveTargetPackage("", "打开B站", apps))
     }
 
     @Test
-    fun resolvesBilibiliFromCommonAliasEvenWhenConfiguredHintIsNotTheLabel() {
-        val apps = listOf("哔哩哔哩" to TaskRecipeRegistry.BILIBILI_PACKAGE)
-
-        assertEquals(TaskRecipeRegistry.BILIBILI_PACKAGE, resolveTargetPackage("B站", "打开它", apps))
-        assertEquals(TaskRecipeRegistry.BILIBILI_PACKAGE, resolveTargetPackage("", "打开B站", apps))
-    }
-
-    @Test
-    fun recipeAddsStableInputAndSubmitContractsOnce() {
-        val recipe = TaskRecipeRegistry.select(
-            GoalContext("在B站搜索老番茄"),
-            TaskRecipeRegistry.BILIBILI_PACKAGE,
-        )!!
-        val original = TaskPlan(
-            summary = "search",
-            targetAppHint = "Bilibili",
-            goal = GoalContext("在B站搜索老番茄"),
+    fun toolGuardStillForcesLaunchOnlyForLaunchMilestones() {
+        val plan = TaskPlan(
+            summary = "launch",
+            targetAppHint = "example",
+            goal = GoalContext("open example"),
             milestones = listOf(
                 TaskMilestone(
                     id = "launch",
@@ -44,7 +55,7 @@ class TaskRecipesTest {
                     successPredicates = listOf(
                         UiPredicate(
                             UiPredicateKind.PACKAGE_FOREGROUND,
-                            targetPackage = TaskRecipeRegistry.BILIBILI_PACKAGE,
+                            targetPackage = "example.app",
                             description = "foreground",
                             predicateId = "launch-p1",
                         ),
@@ -53,151 +64,10 @@ class TaskRecipesTest {
                 ),
             ),
         )
-
-        val once = recipe.normalizePlan(original)
-        val twice = recipe.normalizePlan(once)
-
-        assertEquals(3, once.milestones.size)
-        assertEquals(once, twice)
-        assertEquals("recipe_search_input", once.milestones[1].id)
-        assertEquals("recipe_search_submit", once.milestones[2].id)
+        val guard = ToolGuard(plan, "example.app")
+        val action = guard.requiredWorkflowAction(Observation("com.android.launcher3", emptyList()), plan.milestones.single())
+        assertTrue(action is AgentAction.LaunchApp)
+        assertEquals("example.app", (action as AgentAction.LaunchApp).packageName)
+        assertNull(guard.requiredWorkflowAction(Observation("example.app", emptyList()), plan.milestones.single()))
     }
-
-    @Test
-    fun recipeUsesExactInputThenOneShotSubmit() {
-        val recipe = TaskRecipeRegistry.select(
-            GoalContext("在B站搜索老番茄"),
-            TaskRecipeRegistry.BILIBILI_PACKAGE,
-        )!!
-        val plan = recipe.normalizePlan(basePlan())
-        val inputMilestone = plan.milestones.first { it.id == "recipe_search_input" }
-        val submitMilestone = plan.milestones.first { it.id == "recipe_search_submit" }
-        val field = node(1, text = "", description = "搜索", viewId = "search_text", editable = true)
-
-        val input = recipe.requiredAction(Observation("tv.danmaku.bili", listOf(field), imeVisible = true), inputMilestone)
-        assertTrue(input is AgentAction.InputText)
-        assertEquals("老番茄", (input as AgentAction.InputText).text)
-        assertEquals("recipe_search_input-p1", input.predicateId)
-
-        val exact = field.copy(text = "老番茄")
-        val submit = recipe.requiredAction(Observation("tv.danmaku.bili", listOf(exact), imeVisible = true), submitMilestone)
-        assertTrue(submit is AgentAction.SubmitInput)
-        assertNull(recipe.requiredAction(Observation("tv.danmaku.bili", listOf(exact), imeVisible = false), submitMilestone))
-    }
-
-    @Test
-    fun bilibiliRecipeRejectsUnrelatedHotSearchAndWrongToggle() {
-        val recipe = TaskRecipeRegistry.select(
-            GoalContext("打开B站给老番茄的最新视频点赞"),
-            TaskRecipeRegistry.BILIBILI_PACKAGE,
-        )!!
-        val milestone = basePlan().milestones.single()
-        val hot = node(1, text = "英国史", description = "热搜", viewId = "hot_search", clickable = true)
-        val wrongToggle = node(2, text = "自动播放", description = "", viewId = "autoplay_switch", clickable = true, checked = false)
-        val observation = Observation("tv.danmaku.bili", listOf(hot, wrongToggle))
-
-        assertNotNull(recipe.rejectAction(AgentAction.ClickNode(1), observation, milestone))
-        assertNotNull(recipe.rejectAction(AgentAction.EnsureToggle(2, true), observation, milestone))
-    }
-
-    @Test
-    fun deterministicSearchPreludeCanAdvanceFromLaunchThroughSubmission() {
-        val recipe = TaskRecipeRegistry.select(
-            GoalContext("在B站搜索老番茄"),
-            TaskRecipeRegistry.BILIBILI_PACKAGE,
-        )!!
-        val plan = recipe.normalizePlan(basePlan())
-        val ledger = RunLedger(plan)
-        val bindings = PredicateBindingStore()
-        val launchObservation = Observation(TaskRecipeRegistry.BILIBILI_PACKAGE, emptyList())
-        assertTrue(
-            MilestoneEvaluator.evaluate(
-                ledger.currentMilestone!!,
-                plan,
-                launchObservation,
-                TaskRecipeRegistry.BILIBILI_PACKAGE,
-                bindings,
-            ).proven,
-        )
-        ledger.advance("foreground")
-
-        val emptyField = node(1, text = "", description = "搜索", viewId = "search_text", editable = true)
-        val beforeInput = Observation(TaskRecipeRegistry.BILIBILI_PACKAGE, listOf(emptyField), imeVisible = true)
-        val inputAction = recipe.requiredAction(beforeInput, ledger.currentMilestone!!) as AgentAction.InputText
-        val preparation = bindings.prepareActionBinding(ledger.currentMilestone!!, inputAction, beforeInput, "run-1")
-        assertTrue(preparation.prepared)
-        assertTrue(bindings.commitObservation(preparation, BindingOrigin.OBSERVATION_ONLY))
-        val afterInput = Observation(
-            TaskRecipeRegistry.BILIBILI_PACKAGE,
-            listOf(emptyField.copy(text = "老番茄")),
-            imeVisible = true,
-        )
-        assertTrue(
-            MilestoneEvaluator.evaluate(
-                ledger.currentMilestone!!,
-                plan,
-                afterInput,
-                TaskRecipeRegistry.BILIBILI_PACKAGE,
-                bindings,
-                runId = "run-1",
-            ).proven,
-        )
-        ledger.advance("exact query")
-
-        val submitted = afterInput.copy(imeVisible = false)
-        assertTrue(
-            MilestoneEvaluator.evaluate(
-                ledger.currentMilestone!!,
-                plan,
-                submitted,
-                TaskRecipeRegistry.BILIBILI_PACKAGE,
-                bindings,
-                runId = "run-1",
-            ).proven,
-        )
-    }
-
-    private fun basePlan() = TaskPlan(
-        summary = "search",
-        targetAppHint = "Bilibili",
-        goal = GoalContext("在B站搜索老番茄"),
-        milestones = listOf(
-            TaskMilestone(
-                id = "launch",
-                objective = "launch",
-                successPredicates = listOf(
-                    UiPredicate(
-                        UiPredicateKind.PACKAGE_FOREGROUND,
-                        targetPackage = TaskRecipeRegistry.BILIBILI_PACKAGE,
-                        description = "foreground",
-                        predicateId = "launch-p1",
-                    ),
-                ),
-                kind = TaskMilestoneKind.LAUNCH_APP,
-            ),
-        ),
-    )
-
-    private fun node(
-        id: Int,
-        text: String,
-        description: String,
-        viewId: String,
-        editable: Boolean = false,
-        clickable: Boolean = false,
-        checked: Boolean? = null,
-    ) = UiNodeSnapshot(
-        id = id,
-        text = text,
-        description = description,
-        className = if (editable) "android.widget.EditText" else "android.widget.TextView",
-        clickable = clickable,
-        editable = editable,
-        bounds = "0,0,100,40",
-        viewId = viewId,
-        packageName = TaskRecipeRegistry.BILIBILI_PACKAGE,
-        windowId = 1,
-        treePath = listOf(0, id),
-        checked = checked,
-    )
 }
