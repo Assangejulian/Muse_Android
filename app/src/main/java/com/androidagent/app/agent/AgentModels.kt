@@ -540,6 +540,37 @@ data class Observation(
         return "$packageName:$digest"
     }
 
+    /**
+     * Topology + actionability only. Ignores bounds and volatile text so settle
+     * on animated feeds does not spin until timeout.
+     */
+    fun structureFingerprint(): String {
+        val structure = nodes.asSequence()
+            .filter { it.visible && !it.isInputMethod }
+            .joinToString("|") { node ->
+                val key = node.withinWindowStableKey.ifBlank {
+                    node.windowId?.let { windowId ->
+                        NodeIdentityKeys.withinWindowStableKey(
+                            node.packageName,
+                            windowId,
+                            node.viewId,
+                            node.className,
+                            node.treePath.orEmpty(),
+                        )
+                    }.orEmpty()
+                }
+                "${node.packageName}:${node.windowId}:$key:${node.className}:" +
+                    "${node.clickable}:${node.editable}:${node.enabled}:${node.focused}:" +
+                    "${node.checked}:${node.selected}:${node.scrollable}"
+            }
+        val topology = "windowIds=${windowIds.sorted().joinToString(",")}"
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest("$packageName:$imeVisible:$topology:$structure".toByteArray())
+            .take(12)
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return "$packageName:struct:$digest"
+    }
+
     fun visibleText(): String = nodes.asSequence()
         .filter { it.visible && !it.password && !it.isInputMethod }
         .joinToString(" ") { "${it.text} ${it.description}" }
@@ -827,6 +858,8 @@ data class AgentUiState(
     val status: String = "Idle",
     val goal: String = "",
     val currentAction: String = "",
+    /** User-facing execution summaries only; never raw model reasoning. */
+    val progressSummaries: List<String> = emptyList(),
     val outcome: String = "",
     val currentPackage: String = "",
     val logs: List<String> = emptyList(),

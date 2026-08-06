@@ -270,10 +270,12 @@ object TaskPlanParser {
 
     fun fallback(goal: GoalContext, targetAppHint: String): TaskPlan {
         val packageName = resolveFallbackPackage(targetAppHint)
+        // Scaffold only: the runtime immediately observation-replans so the model
+        // owns the real multi-step plan. Do not invent search/input content here.
         val launchMilestone = packageName?.let { pkg ->
             TaskMilestone(
                 id = "launch",
-                objective = "Launch the requested target app",
+                objective = "Launch the requested target app when needed",
                 successPredicates = listOf(
                     UiPredicate(
                         kind = UiPredicateKind.PACKAGE_FOREGROUND,
@@ -285,28 +287,23 @@ object TaskPlanParser {
                 kind = TaskMilestoneKind.LAUNCH_APP,
             )
         }
-        // Keep fallback deliberately narrow: launch only when a package is known.
-        // Never invent input/search/content milestones that cannot be proven.
-        val milestones = listOfNotNull(launchMilestone).ifEmpty {
-            listOf(
-                TaskMilestone(
-                    id = "reach",
-                    objective = "Bring a relevant installed app into the foreground",
-                    successPredicates = listOf(
-                        UiPredicate(
-                            kind = UiPredicateKind.TEXT_PRESENT,
-                            literal = firstFallbackLiteral(goal.originalGoal),
-                            description = "Goal-related visible text is present",
-                            predicateId = "reach-p1",
-                        ),
-                    ),
-                    kind = TaskMilestoneKind.GENERIC,
+        val completeMilestone = TaskMilestone(
+            id = "complete",
+            objective = "Complete the full user goal via live Actor decisions",
+            successPredicates = listOf(
+                UiPredicate(
+                    kind = UiPredicateKind.TEXT_PRESENT,
+                    literal = firstFallbackLiteral(goal.originalGoal),
+                    description = "Goal-related visible evidence is present",
+                    predicateId = "complete-p1",
                 ),
-            )
-        }
+            ),
+            kind = TaskMilestoneKind.GENERIC,
+        )
+        val milestones = listOfNotNull(launchMilestone, completeMilestone)
         return TaskPlanValidator.requireValid(
             TaskPlan(
-                summary = "Deterministic fallback for: ${goal.originalGoal.take(120)}",
+                summary = "Scaffold fallback for: ${goal.originalGoal.take(120)}",
                 targetAppHint = targetAppHint.ifBlank { packageName.orEmpty() },
                 goal = goal,
                 milestones = milestones,

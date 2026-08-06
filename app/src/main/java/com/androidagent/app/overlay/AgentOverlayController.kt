@@ -6,8 +6,10 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -25,6 +27,8 @@ class AgentOverlayController(private val service: AccessibilityService) {
     private var borderView: IntelligenceBorderView? = null
     private var controlBar: View? = null
     private var statusText: TextView? = null
+    private var summaryText: TextView? = null
+    private var lastSummary = ""
 
     fun render(state: AgentUiState) {
         if (!state.running) {
@@ -33,6 +37,21 @@ class AgentOverlayController(private val service: AccessibilityService) {
         }
         if (borderView == null) show()
         statusText?.text = service.getString(R.string.agent_overlay_status, state.step, statusLabel(state.status))
+        val summary = state.progressSummaries.takeLast(2).joinToString("\n")
+        if (summary.isNotBlank() && summary != lastSummary) {
+            lastSummary = summary
+            summaryText?.animate()?.cancel()
+            summaryText?.animate()
+                ?.alpha(0f)
+                ?.translationY(-8 * service.resources.displayMetrics.density)
+                ?.setDuration(110L)
+                ?.withEndAction {
+                    summaryText?.text = summary
+                    summaryText?.translationY = 8 * service.resources.displayMetrics.density
+                    summaryText?.animate()?.alpha(1f)?.translationY(0f)?.setDuration(180L)?.start()
+                }
+                ?.start()
+        }
     }
 
     fun hide() {
@@ -41,6 +60,8 @@ class AgentOverlayController(private val service: AccessibilityService) {
         borderView = null
         controlBar = null
         statusText = null
+        summaryText = null
+        lastSummary = ""
     }
 
     fun setCaptureHidden(hidden: Boolean) {
@@ -75,20 +96,35 @@ class AgentOverlayController(private val service: AccessibilityService) {
         val bar = LinearLayout(service).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding((18 * density).toInt(), 0, (8 * density).toInt(), 0)
+            setPadding((18 * density).toInt(), (10 * density).toInt(), (8 * density).toInt(), (10 * density).toInt())
             background = GradientDrawable().apply {
-                cornerRadius = 24 * density
-                setColor(Color.argb(235, 18, 25, 22))
-                setStroke((1 * density).toInt(), Color.argb(90, 145, 255, 203))
+                cornerRadius = 22 * density
+                setColor(Color.argb(246, 11, 19, 18))
+                setStroke((1 * density).toInt(), Color.argb(115, 94, 244, 202))
             }
+        }
+        val progressColumn = LinearLayout(service).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         statusText = TextView(service).apply {
             setText(R.string.agent_overlay_operating)
-            setTextColor(Color.WHITE)
-            textSize = 15f
+            setTextColor(Color.rgb(102, 246, 204))
+            textSize = 12f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            maxLines = 1
         }
+        summaryText = TextView(service).apply {
+            text = "正在准备任务环境"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            setLineSpacing(0f, 1.08f)
+        }
+        progressColumn.addView(statusText)
+        progressColumn.addView(summaryText)
         val stop = Button(service).apply {
             setText(R.string.agent_overlay_stop)
             isAllCaps = false
@@ -99,37 +135,40 @@ class AgentOverlayController(private val service: AccessibilityService) {
             }
             setOnClickListener { AgentController.stop() }
         }
-        bar.addView(statusText)
+        bar.addView(progressColumn)
         bar.addView(stop, LinearLayout.LayoutParams((84 * density).toInt(), (44 * density).toInt()))
-        container.addView(bar, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, (56 * density).toInt()))
+        container.addView(bar, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, (88 * density).toInt()))
         controlBar = container
         windowManager.addView(container, WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
-            (76 * density).toInt(),
+            (108 * density).toInt(),
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             android.graphics.PixelFormat.TRANSLUCENT,
-        ).apply { gravity = Gravity.TOP })
+        ).apply { gravity = Gravity.BOTTOM })
     }
 
     private fun statusLabel(status: String): String = when (status) {
         "Preparing" -> "正在准备"
-        "Compiling" -> "正在拆解任务"
-        "Observing" -> "正在读取屏幕"
-        "Planning" -> "正在思考下一步"
-        "Acting" -> "正在执行操作"
-        "Critiquing" -> "正在检查结果"
-        "Verifying" -> "正在最终验收"
-        "Replanning" -> "正在更换策略"
+        "Compiling" -> "快速拆解任务"
+        "Observing" -> "读取页面"
+        "Planning" -> "选择下一步"
+        "Acting" -> "执行操作"
+        "Critiquing" -> "检查结果"
+        "Verifying" -> "最终验收"
+        "Replanning" -> "切换策略"
         else -> status.substringBefore(':')
     }
 }
 
 private class IntelligenceBorderView(context: android.content.Context) : View(context) {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val framePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 7 * resources.displayMetrics.density
+        strokeWidth = 3 * resources.displayMetrics.density
     }
+    private val ambientPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val scanPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeWidth = resources.displayMetrics.density }
+    private val frame = RectF()
     private var phase = 0f
     private var gradient: LinearGradient? = null
     private val animator = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -146,27 +185,39 @@ private class IntelligenceBorderView(context: android.content.Context) : View(co
     override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
         super.onSizeChanged(width, height, oldWidth, oldHeight)
         gradient = LinearGradient(
-            0f,
-            0f,
-            width.toFloat(),
-            height.toFloat(),
+            0f, 0f, width.toFloat(), height.toFloat(),
             intArrayOf(
-                Color.rgb(72, 210, 255),
-                Color.rgb(152, 92, 255),
-                Color.rgb(72, 255, 181),
-                Color.rgb(72, 210, 255),
+                Color.argb(30, 70, 255, 211),
+                Color.rgb(73, 218, 255),
+                Color.rgb(94, 255, 204),
+                Color.argb(30, 70, 255, 211),
             ),
-            floatArrayOf(0f, .34f, .68f, 1f),
+            floatArrayOf(0f, .38f, .7f, 1f),
             Shader.TileMode.CLAMP,
         )
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        paint.alpha = (150 + phase * 95).toInt()
-        paint.strokeWidth = (5 + phase * 3) * resources.displayMetrics.density
-        paint.shader = gradient
-        val inset = paint.strokeWidth / 2
-        canvas.drawRoundRect(inset, inset, width - inset, height - inset, 24 * resources.displayMetrics.density, 24 * resources.displayMetrics.density, paint)
+        val density = resources.displayMetrics.density
+        canvas.drawColor(Color.argb((5 + phase * 5).toInt(), 5, 20, 17))
+        frame.set(5 * density, 5 * density, width - 5 * density, height - 5 * density)
+
+        ambientPaint.color = Color.argb((24 + phase * 18).toInt(), 78, 244, 204)
+        ambientPaint.strokeWidth = (14 + phase * 8) * density
+        canvas.drawRoundRect(frame, 28 * density, 28 * density, ambientPaint)
+
+        framePaint.alpha = (175 + phase * 70).toInt()
+        framePaint.shader = gradient
+        framePaint.strokeWidth = (2.4f + phase * 1.4f) * density
+        canvas.drawRoundRect(frame, 26 * density, 26 * density, framePaint)
+
+        val scanY = height * phase
+        scanPaint.shader = LinearGradient(
+            0f, scanY, width.toFloat(), scanY,
+            intArrayOf(Color.TRANSPARENT, Color.argb(90, 92, 255, 211), Color.TRANSPARENT),
+            floatArrayOf(0f, .5f, 1f), Shader.TileMode.CLAMP,
+        )
+        canvas.drawLine(24 * density, scanY, width - 24 * density, scanY, scanPaint)
     }
 }

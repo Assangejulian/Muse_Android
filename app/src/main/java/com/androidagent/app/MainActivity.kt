@@ -6,7 +6,16 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -20,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -51,11 +61,20 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.androidagent.app.accessibility.AgentController
 import com.androidagent.app.agent.AgentTraceStore
 import com.androidagent.app.agent.AgentUiState
@@ -69,13 +88,13 @@ import com.androidagent.app.chat.Conversation
 import com.androidagent.app.data.SecureSettings
 import com.androidagent.app.network.DeepSeekClient
 import com.androidagent.app.network.InteractionDecision
-import com.androidagent.app.privileged.EmbeddedAdbBridge
 import com.androidagent.app.privileged.PrivilegedBackendRouter
 import com.androidagent.app.privileged.ShizukuBridge
 import com.androidagent.app.update.GitHubUpdater
 import com.androidagent.app.update.UpdateInfo
 import com.androidagent.app.update.DownloadProgress
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -86,16 +105,184 @@ private val Canvas = Color(0xFFF7F7F2)
 private val Accent = Color(0xFF16724B)
 private val Muted = Color(0xFF68736C)
 private val Line = Color(0xFFDDE2DC)
+private val IntelVoid = Color(0xFF061210)
+private val IntelCyan = Color(0xFF5EF4CA)
+private val IntelBlue = Color(0xFF49DAFF)
+private val IntelGlow = Color(0xFF80DDA8)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        EmbeddedAdbBridge.initialize(applicationContext)
         ShizukuBridge.initialize(applicationContext)
         setContent {
             MaterialTheme {
-                AgentChatApp(openAccessibilitySettings = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+                var showSplash by remember { mutableStateOf(true) }
+                Box(Modifier.fillMaxSize()) {
+                    AgentChatApp(openAccessibilitySettings = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+                    AnimatedVisibility(
+                        visible = showSplash,
+                        exit = fadeOut(animationSpec = tween(520)),
+                    ) {
+                        AppIntelligenceSplash(onFinished = { showSplash = false })
+                    }
+                }
             }
+        }
+    }
+}
+
+/**
+ * Cold-start gate inspired by App Intelligence aesthetics: dark field, scanning
+ * frame, cyan accent, then fade into the chat workspace.
+ */
+@Composable
+private fun AppIntelligenceSplash(onFinished: () -> Unit) {
+    val transition = rememberInfiniteTransition(label = "intel-splash")
+    val scan by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1800, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "scan",
+    )
+    val pulse by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1100, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "pulse",
+    )
+    var contentAlpha by remember { mutableStateOf(0f) }
+    val alpha by animateFloatAsState(
+        targetValue = contentAlpha,
+        animationSpec = tween(600),
+        label = "splash-alpha",
+    )
+
+    LaunchedEffect(Unit) {
+        contentAlpha = 1f
+        delay(2_050)
+        contentAlpha = 0f
+        delay(420)
+        onFinished()
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(IntelVoid)
+            .alpha(alpha.coerceAtLeast(0.02f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.fillMaxSize().padding(28.dp)) {
+            val stroke = 3.5.dp.toPx()
+            val corner = 28.dp.toPx()
+            val inset = 6.dp.toPx()
+            val frame = androidx.compose.ui.geometry.Rect(
+                inset,
+                inset,
+                size.width - inset,
+                size.height - inset,
+            )
+            drawRoundRect(
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        IntelCyan.copy(alpha = 0.15f + 0.35f * pulse),
+                        IntelBlue.copy(alpha = 0.55f),
+                        IntelCyan.copy(alpha = 0.2f + 0.4f * pulse),
+                    ),
+                ),
+                topLeft = Offset(frame.left, frame.top),
+                size = Size(frame.width, frame.height),
+                cornerRadius = CornerRadius(corner, corner),
+                style = Stroke(width = stroke),
+            )
+            // Ambient outer glow
+            drawRoundRect(
+                color = IntelCyan.copy(alpha = 0.08f * pulse),
+                topLeft = Offset(frame.left - 8.dp.toPx(), frame.top - 8.dp.toPx()),
+                size = Size(frame.width + 16.dp.toPx(), frame.height + 16.dp.toPx()),
+                cornerRadius = CornerRadius(corner + 8.dp.toPx()),
+                style = Stroke(width = 10.dp.toPx()),
+            )
+            // Horizontal scan beam
+            val y = frame.top + frame.height * scan
+            drawLine(
+                brush = Brush.horizontalGradient(
+                    listOf(Color.Transparent, IntelCyan.copy(alpha = 0.85f), IntelBlue, Color.Transparent),
+                ),
+                start = Offset(frame.left + 12.dp.toPx(), y),
+                end = Offset(frame.right - 12.dp.toPx(), y),
+                strokeWidth = 2.5.dp.toPx(),
+                cap = StrokeCap.Round,
+            )
+            // Corner ticks
+            val tick = 22.dp.toPx()
+            val tickPaint = IntelGlow.copy(alpha = 0.9f)
+            fun cornerTick(x: Float, y0: Float, dx: Float, dy: Float) {
+                drawLine(tickPaint, Offset(x, y0), Offset(x + dx, y0), strokeWidth = stroke, cap = StrokeCap.Round)
+                drawLine(tickPaint, Offset(x, y0), Offset(x, y0 + dy), strokeWidth = stroke, cap = StrokeCap.Round)
+            }
+            cornerTick(frame.left, frame.top, tick, tick)
+            cornerTick(frame.right, frame.top, -tick, tick)
+            cornerTick(frame.left, frame.bottom, tick, -tick)
+            cornerTick(frame.right, frame.bottom, -tick, -tick)
+        }
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.padding(horizontal = 40.dp),
+        ) {
+            Box(
+                Modifier
+                    .size(72.dp)
+                    .background(
+                        Brush.radialGradient(listOf(IntelCyan.copy(alpha = 0.35f * pulse), Color.Transparent)),
+                        RoundedCornerShape(36.dp),
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "M",
+                    color = IntelCyan,
+                    fontSize = 34.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Text(
+                "MUSE",
+                color = Color.White,
+                fontSize = 34.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 6.sp,
+            )
+            Text(
+                "App Intelligence",
+                color = IntelCyan.copy(alpha = 0.55f + 0.45f * pulse),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                letterSpacing = 2.sp,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "模型决策 · Shizuku 控制终端",
+                color = Color(0xFF9BB5AB),
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(16.dp))
+            LinearProgressIndicator(
+                progress = { (scan * 0.85f + 0.12f).coerceIn(0f, 1f) },
+                modifier = Modifier
+                    .width(160.dp)
+                    .height(3.dp),
+                color = IntelCyan,
+                trackColor = Color(0xFF1A2E28),
+            )
         }
     }
 }
@@ -319,26 +506,8 @@ private fun DrawerContent(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val privilegedState by ShizukuBridge.state.collectAsState()
-    val embeddedAdbState by EmbeddedAdbBridge.state.collectAsState()
     var pendingDelete by remember { mutableStateOf<String?>(null) }
     var privilegedFeedback by remember { mutableStateOf<String?>(null) }
-    var adbHost by remember { mutableStateOf("") }
-    var pairingCode by remember { mutableStateOf("") }
-    var pairingPort by remember { mutableStateOf("") }
-    var connectionPort by remember { mutableStateOf("") }
-    LaunchedEffect(embeddedAdbState.suggestedHost) {
-        if (adbHost.isBlank()) adbHost = embeddedAdbState.suggestedHost
-    }
-    LaunchedEffect(embeddedAdbState.pairEndpoints) {
-        if (pairingPort.isBlank()) {
-            embeddedAdbState.pairEndpoints.singleOrNull()?.let { pairingPort = it.port.toString() }
-        }
-    }
-    LaunchedEffect(embeddedAdbState.connectEndpoints) {
-        if (connectionPort.isBlank()) {
-            embeddedAdbState.connectEndpoints.singleOrNull()?.let { connectionPort = it.port.toString() }
-        }
-    }
     Column(Modifier.fillMaxHeight().padding(18.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column {
@@ -381,126 +550,22 @@ private fun DrawerContent(
             Text(if (connected) "● 无障碍已连接" else "○ 无障碍未连接", color = if (connected) Color(0xFF80DDA8) else Color(0xFFFFC36A))
             Text("已发现 $appCount 个可启动应用", color = Color(0xFFB9C2BC), style = MaterialTheme.typography.bodySmall)
             HorizontalDivider(color = Color(0xFF354139))
-            Text("Muse 内置 ADB 终端", color = Color.White, fontWeight = FontWeight.SemiBold)
+            Text("Shizuku 控制终端", color = Color.White, fontWeight = FontWeight.SemiBold)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(
                         when {
-                            embeddedAdbState.connected -> "● 终端已连接"
-                            embeddedAdbState.pairing -> "○ 正在配对"
-                            embeddedAdbState.connecting -> "○ 正在连接"
-                            embeddedAdbState.discovering -> "○ 正在发现无线调试"
-                            else -> "○ 等待无线调试"
+                            privilegedState.connected -> "● 控制终端已连接"
+                            privilegedState.permissionGranted -> "○ 等待连接 Shizuku"
+                            privilegedState.binderAvailable -> "○ 等待 Shizuku 授权"
+                            else -> "○ 请安装并启动 Shizuku"
                         },
-                        color = if (embeddedAdbState.connected) Color(0xFF80DDA8) else Color(0xFFFFC36A),
+                        color = if (privilegedState.connected) Color(0xFF80DDA8) else Color(0xFFFFC36A),
                     )
-                    val identity = embeddedAdbState.identity.ifBlank { embeddedAdbState.detail }
-                    Text(identity, color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
+                    Text(privilegedState.detail, color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
                 }
                 Switch(checked = privilegedEnabled, onCheckedChange = onPrivilegedEnabled)
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = {
-                        privilegedFeedback = if (EmbeddedAdbBridge.openWirelessDebugging(context)) {
-                            "请点“使用配对码配对设备”，再回 Muse 输入配对码"
-                        } else "无法打开无线调试设置"
-                    },
-                    enabled = privilegedEnabled,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("打开无线调试", color = Color.White)
-                }
-                OutlinedButton(
-                    onClick = EmbeddedAdbBridge::refreshDiscovery,
-                    enabled = privilegedEnabled,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("重新发现", color = Color.White)
-                }
-            }
-            OutlinedTextField(
-                value = adbHost,
-                onValueChange = { adbHost = it.trim().take(253) },
-                label = { Text("WLAN 主机地址，例如 172.19.0.1") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = pairingPort,
-                    onValueChange = { pairingPort = it.filter(Char::isDigit).take(5) },
-                    label = { Text("配对端口") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-                OutlinedTextField(
-                    value = pairingCode,
-                    onValueChange = { pairingCode = it.filter(Char::isDigit).take(6) },
-                    label = { Text("6 位配对码") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            OutlinedTextField(
-                value = connectionPort,
-                onValueChange = { connectionPort = it.filter(Char::isDigit).take(5) },
-                label = { Text("连接端口（无线调试主页显示）") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Text(
-                "配对端口来自六位码弹窗；连接端口来自无线调试主页，两者通常不同。",
-                color = Color(0xFFB9C2BC),
-                style = MaterialTheme.typography.labelSmall,
-            )
-            OutlinedButton(
-                onClick = {
-                    scope.launch {
-                        privilegedFeedback = EmbeddedAdbBridge.pair(
-                            pairingCode = pairingCode,
-                            manualHost = adbHost,
-                            manualPairPort = pairingPort.toIntOrNull(),
-                            manualConnectPort = connectionPort.toIntOrNull(),
-                        ).displayText()
-                    }
-                },
-                enabled = privilegedEnabled &&
-                    adbHost.isNotBlank() &&
-                    (pairingPort.toIntOrNull() ?: 0) in 1..65_535 &&
-                    pairingCode.length == 6,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("配对并连接", color = Color.White)
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = {
-                        scope.launch {
-                            privilegedFeedback = EmbeddedAdbBridge.connectManual(
-                                adbHost,
-                                connectionPort.toIntOrNull(),
-                            ).displayText()
-                        }
-                    },
-                    enabled = privilegedEnabled,
-                    modifier = Modifier.weight(1f),
-                ) { Text("重新连接", color = Color.White) }
-                OutlinedButton(
-                    onClick = { scope.launch { privilegedFeedback = PrivilegedBackendRouter.testConnection().displayText() } },
-                    enabled = PrivilegedBackendRouter.isReady(),
-                    modifier = Modifier.weight(1f),
-                ) { Text("测试终端", color = Color.White) }
-            }
-            privilegedFeedback?.let {
-                Text(it.take(500), color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
-            }
-            Text(
-                "配对密钥保存在 Muse 私有目录。终端在线时模型优先使用；离线时自动回退无障碍。",
-                color = Color(0xFFB9C2BC),
-                style = MaterialTheme.typography.labelSmall,
-            )
-            Text("外部 Shizuku（可选兜底）", color = Color.White, fontWeight = FontWeight.SemiBold)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = {
@@ -515,12 +580,20 @@ private fun DrawerContent(
                     enabled = privilegedEnabled,
                     modifier = Modifier.weight(1f),
                 ) { Text(if (privilegedState.permissionGranted) "连接 Shizuku" else "授权 Shizuku", color = Color.White) }
-                Text(
-                    if (privilegedState.connected) "● 已连接" else "○ 未连接",
-                    color = if (privilegedState.connected) Color(0xFF80DDA8) else Color(0xFFB9C2BC),
-                    modifier = Modifier.align(Alignment.CenterVertically),
-                )
+                OutlinedButton(
+                    onClick = { scope.launch { privilegedFeedback = PrivilegedBackendRouter.testConnection().displayText() } },
+                    enabled = PrivilegedBackendRouter.isReady(),
+                    modifier = Modifier.weight(1f),
+                ) { Text("测试终端", color = Color.White) }
             }
+            privilegedFeedback?.let {
+                Text(it.take(500), color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
+            }
+            Text(
+                "Shizuku 是任务首选控制终端；无障碍仅保留页面观察、结果验证与终端不可用时的操作兜底。",
+                color = Color(0xFFB9C2BC),
+                style = MaterialTheme.typography.labelSmall,
+            )
             HorizontalDivider(color = Color(0xFF354139))
             if (nextRunAt > System.currentTimeMillis()) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -571,7 +644,7 @@ private fun DrawerContent(
                 )
             } else if (activeProvider == "deepseek" && modelName.contains("pro", true)) {
                 Text(
-                    "Pro：仅 Manager 规划阶段可开 thinking，Actor 步仍关闭",
+                    "Pro：任务执行全程关闭 thinking，以紧凑计划快速开局",
                     color = Color(0xFFB9C2BC),
                     style = MaterialTheme.typography.labelSmall,
                 )
@@ -659,6 +732,7 @@ private fun ChatWorkspace(
 ) {
     val context = LocalContext.current
     val state by AgentController.state.collectAsState()
+    val shizukuState by ShizukuBridge.state.collectAsState()
     var input by remember(conversation.id) { mutableStateOf("") }
     var sending by remember(conversation.id) { mutableStateOf(false) }
     var showTrace by remember(conversation.id) { mutableStateOf(false) }
@@ -696,7 +770,11 @@ private fun ChatWorkspace(
                 TextButton(onClick = openDrawer) { Text("☰", color = Ink, style = MaterialTheme.typography.headlineSmall) }
                 Column {
                     Text(conversation.title, color = Ink, fontWeight = FontWeight.Bold)
-                    Text("${if (state.accessibilityConnected) "● 已连接" else "○ 未连接"} · ${translateStatus(state.status)}", color = if (state.accessibilityConnected) Accent else Muted, style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "${if (shizukuState.connected) "● Shizuku" else "○ Shizuku"} · ${translateStatus(state.status)}",
+                        color = if (shizukuState.connected) Accent else Muted,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
             AnimatedVisibility(state.running) {
@@ -716,7 +794,7 @@ private fun ChatWorkspace(
             if (conversation.messages.isEmpty()) {
                 Spacer(Modifier.height(60.dp))
                 Text("想让平板做什么？", style = MaterialTheme.typography.headlineMedium, color = Ink, fontWeight = FontWeight.Bold)
-                Text("直接说出应用名称和任务。输入 /list 查看应用，/shell 执行特权命令。", color = Muted)
+                Text("直接说出应用名称和任务。模型自主决策；Shizuku 优先作为控制终端。/list 应用 · /shell 命令 · /run 强制执行。", color = Muted)
             }
             conversation.messages.forEach { message -> MessageBubble(message) }
         }
@@ -757,7 +835,7 @@ private fun ChatWorkspace(
                                     updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "用法：/shell <command>")))
                                 }
                                 !settings.privilegedBackendEnabled -> {
-                                    updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先在侧栏启用并连接 Muse 内置 ADB 终端或 Shizuku。")))
+                                    updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先安装并启动 Shizuku，然后在侧栏授权 Muse。")))
                                 }
                                 else -> {
                                     sending = true
@@ -791,6 +869,28 @@ private fun ChatWorkspace(
                             updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "安全策略已拦截敏感操作目标。请勿让 Muse 执行支付、验证码、密码或权限变更。")))
                         } else if (settings.apiKey.isBlank()) {
                             updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先在侧栏配置当前模型的 API Key。")))
+                        } else if (text.startsWith("/run ", ignoreCase = true)) {
+                            val directGoal = text.substringAfter(' ').trim()
+                            val response = if (!state.accessibilityConnected) {
+                                "这个请求需要操作设备，请先在侧栏开启 Muse 无障碍服务。"
+                            } else {
+                                settings.taskGoal = directGoal
+                                when (val started = AgentController.start(context, settings)) {
+                                    is com.androidagent.app.accessibility.AgentStartResult.Started -> {
+                                        ownsActiveRun = true
+                                        if (ShizukuBridge.isReady()) "任务已启动，优先使用 Shizuku 控制终端。" else "任务已启动；Shizuku 未连接，将使用无障碍兜底。"
+                                    }
+                                    is com.androidagent.app.accessibility.AgentStartResult.Busy ->
+                                        "已有任务正在运行（${started.activeRunId.take(8)}）"
+                                    is com.androidagent.app.accessibility.AgentStartResult.SafetyBlocked ->
+                                        "任务被本地安全策略拦截，未启动执行"
+                                    com.androidagent.app.accessibility.AgentStartResult.InvalidGoal ->
+                                        "任务目标或模型配置无效，未启动执行"
+                                    com.androidagent.app.accessibility.AgentStartResult.AccessibilityDisconnected ->
+                                        "无障碍服务未连接，未启动执行"
+                                }
+                            }
+                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
                         } else {
                             sending = true
                             interactionScope.launch {
@@ -889,9 +989,8 @@ private fun RunStatusPanel(state: AgentUiState, onShowTrace: () -> Unit) {
                     LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(), color = Accent)
                 }
                 if (state.goal.isNotBlank()) Text(state.goal, color = Ink, fontWeight = FontWeight.SemiBold, maxLines = 2)
-                if (state.currentAction.isNotBlank()) Text("→ ${state.currentAction}", color = Accent)
-                state.logs.take(3).reversed().forEach { log ->
-                    Text(log, color = Muted, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                state.progressSummaries.takeLast(2).forEach { summary ->
+                    Text(summary, color = Accent, style = MaterialTheme.typography.bodySmall, maxLines = 1)
                 }
                 if (!state.running && state.outcome.isNotBlank()) {
                     Text(state.outcome, color = if (state.status.substringBefore(':') == "Succeeded") Accent else Color(0xFF9B2C2C), maxLines = 3)

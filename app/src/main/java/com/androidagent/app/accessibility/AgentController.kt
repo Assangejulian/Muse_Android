@@ -114,10 +114,11 @@ object AgentController {
             copy(
                 running = false,
                 step = 0,
-                maxSteps = 80,
+                maxSteps = 120,
                 status = "Preparing",
                 goal = effectiveGoal,
                 currentAction = "",
+                progressSummaries = listOf("正在准备任务环境"),
                 outcome = "",
                 logs = emptyList(),
             )
@@ -128,15 +129,26 @@ object AgentController {
         AgentForegroundService.start(applicationContext)
 
         val job = scope.launch(start = CoroutineStart.LAZY) {
-            updateFor(generation) { copy(running = true, step = 0, status = "Compiling") }
+            updateFor(generation) {
+                copy(running = true, step = 0, status = "Compiling")
+                    .withProgress(progressForPhase("Compiling"))
+            }
             try {
                 val result = AgentRuntime(
                     context = context.applicationContext,
                     settings = settings,
                     service = service,
-                    onPhase = { step, phase -> updateFor(generation) { copy(step = step, status = phase) } },
+                    onPhase = { step, phase ->
+                        updateFor(generation) {
+                            copy(step = step, status = phase).withProgress(progressForPhase(phase))
+                        }
+                    },
                     onLog = { message -> logFor(generation, message) },
-                    onAction = { action -> updateFor(generation) { copy(currentAction = action) } },
+                    onAction = { action ->
+                        updateFor(generation) {
+                            copy(currentAction = action).withProgress(progressForAction(action))
+                        }
+                    },
                     goalOverride = goalOverride,
                     runIdOverride = runId,
                     cancellationOutcomeProvider = { runResults.stopCauseFor(runId)?.runtimeOutcome() },
@@ -241,6 +253,40 @@ object AgentController {
         mutableState.update { state -> if (generation == runGeneration) state.block() else state }
     }
 
+}
+
+private fun AgentUiState.withProgress(message: String): AgentUiState {
+    val clean = message.trim().replace(Regex("\\s+"), " ").take(96)
+    if (clean.isBlank() || progressSummaries.lastOrNull() == clean) return this
+    return copy(progressSummaries = (progressSummaries + clean).takeLast(2))
+}
+
+private fun progressForPhase(phase: String): String = when (phase) {
+    "Preparing" -> "正在准备任务环境"
+    "Compiling" -> "正在快速拆解目标"
+    "Observing" -> "正在读取当前页面"
+    "Planning" -> "正在选择下一步工具"
+    "Acting" -> "正在执行已确认的操作"
+    "Critiquing" -> "正在检查页面变化"
+    "Verifying" -> "正在核验任务结果"
+    "Replanning" -> "当前路径受阻，正在切换策略"
+    else -> phase.substringBefore(':').take(64)
+}
+
+private fun progressForAction(action: String): String = when {
+    action.startsWith("terminal(") -> "Shizuku 正在执行终端操作"
+    action.startsWith("launch_app(") -> "正在启动目标应用"
+    action.startsWith("click_") || action.startsWith("tap_point(") -> "已定位目标，正在点击"
+    action.startsWith("input_text(") -> "正在填写目标内容"
+    action.startsWith("submit_input(") -> "正在提交已核对的内容"
+    action.startsWith("swipe(") -> "正在浏览页面中的更多内容"
+    action.startsWith("ensure_toggle(") -> "正在核对并调整开关状态"
+    action.startsWith("bind_predicate(") -> "正在绑定可验证的页面目标"
+    action.startsWith("wait(") -> "正在等待页面稳定"
+    action == "back" -> "正在返回上一层"
+    action == "home" -> "正在返回桌面"
+    action == "finish" -> "证据已齐，正在完成验收"
+    else -> "正在执行下一步操作"
 }
 
 object AgentStopCausePolicy {

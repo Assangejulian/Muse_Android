@@ -1376,10 +1376,13 @@ class ToolGuard(
         return GuardResult(action, resolvedTarget = resolvedTarget)
     }
 
-    fun requiredWorkflowAction(observation: Observation, milestone: TaskMilestone? = null): AgentAction? =
-        if (milestone?.kind == TaskMilestoneKind.LAUNCH_APP) {
-            launchPackage(milestone)?.takeIf { observation.packageName != it }?.let(AgentAction::LaunchApp)
-        } else null
+    /**
+     * Intentionally empty: Muse is model-first with Shizuku as the preferred
+     * control terminal. Hardcoded launch/workflow recipes used to bypass the
+     * Actor and are no longer registered.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun requiredWorkflowAction(observation: Observation, milestone: TaskMilestone? = null): AgentAction? = null
 
     fun recordDispatch(@Suppress("UNUSED_PARAMETER") action: AgentAction) = Unit
 
@@ -1602,5 +1605,5 @@ class RunLedger(private var plan: TaskPlan) {
         ).joinToString("|")
     }
 
-    private companion object { const val MAX_ATTEMPTS_PER_SCREEN = 4 }
+    private companion object { const val MAX_ATTEMPTS_PER_SCREEN = 6 }
 }

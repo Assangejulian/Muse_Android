@@ -52,13 +52,14 @@ private data class RecoveryExecution(
 )
 
 /**
- * A LAUNCH_APP milestone has one locally observable meaning: its target
- * package is foreground. Manager-proposed element hints are not stable launch
- * evidence and must not keep an already launched app permanently incomplete.
+ * When the Manager already emitted a LAUNCH_APP milestone, canonicalize its
+ * success contract to PACKAGE_FOREGROUND. Do not inject a synthetic launch step —
+ * route selection (terminal vs accessibility, launch timing, dismiss dialogs
+ * first, …) belongs to the model Actor.
  */
 internal fun normalizePrimaryLaunchContract(plan: TaskPlan, targetPackage: String?): TaskPlan {
     val packageName = targetPackage?.trim().orEmpty()
-    if (packageName.isBlank()) return plan
+    if (packageName.isBlank() || plan.milestones.isEmpty()) return plan
 
     fun packagePredicate(milestoneId: String, predicateId: String? = null) = UiPredicate(
         kind = UiPredicateKind.PACKAGE_FOREGROUND,
@@ -68,30 +69,18 @@ internal fun normalizePrimaryLaunchContract(plan: TaskPlan, targetPackage: Strin
     )
 
     val first = plan.milestones.first()
-    if (first.kind == TaskMilestoneKind.LAUNCH_APP) {
-        val existingPackagePredicate = first.successPredicates.firstOrNull {
-            it.kind == UiPredicateKind.PACKAGE_FOREGROUND &&
-                (it.targetPackage ?: it.target?.packageName) == packageName
-        }
-        val normalized = first.copy(
-            successPredicates = listOf(
-                packagePredicate(first.id, existingPackagePredicate?.predicateId),
-            ),
-        )
-        return TaskPlanValidator.requireValid(plan.copy(milestones = listOf(normalized) + plan.milestones.drop(1)))
-    }
+    if (first.kind != TaskMilestoneKind.LAUNCH_APP) return plan
 
-    val usedIds = plan.milestones.mapTo(mutableSetOf()) { it.id }
-    var launchId = "launch"
-    var suffix = 2
-    while (launchId in usedIds) launchId = "launch_${suffix++}"
-    val launch = TaskMilestone(
-        id = launchId,
-        objective = "Launch the requested target app",
-        successPredicates = listOf(packagePredicate(launchId)),
-        kind = TaskMilestoneKind.LAUNCH_APP,
+    val existingPackagePredicate = first.successPredicates.firstOrNull {
+        it.kind == UiPredicateKind.PACKAGE_FOREGROUND &&
+            (it.targetPackage ?: it.target?.packageName) == packageName
+    }
+    val normalized = first.copy(
+        successPredicates = listOf(
+            packagePredicate(first.id, existingPackagePredicate?.predicateId),
+        ),
     )
-    return TaskPlanValidator.requireValid(plan.copy(milestones = listOf(launch) + plan.milestones))
+    return TaskPlanValidator.requireValid(plan.copy(milestones = listOf(normalized) + plan.milestones.drop(1)))
 }
 
 internal fun resolveTargetPackage(
@@ -203,6 +192,7 @@ class AgentRuntime(
                     return@withTimeout finish(RuntimeOutcome.SAFETY_BLOCKED, "SAFETY_BLOCKED: ${goalSafetyFailure.message.orEmpty()}")
                 }
 
+                var usedFallbackPlan = false
                 var plan = try {
                     client.createTaskPlan(
                         apiKey,
@@ -214,7 +204,8 @@ class AgentRuntime(
                         provider = settings.currentProvider,
                     )
                 } catch (failure: TaskPlanException) {
-                    onLog("Manager plan failed; using deterministic fallback: ${failure.message.orEmpty()}")
+                    usedFallbackPlan = true
+                    onLog("Manager plan failed; using scaffold fallback then observation replan: ${failure.message.orEmpty()}")
                     TaskPlanParser.fallback(goalContext, lockedPackage ?: targetHint)
                 }
                 validatePlanPackages(plan, launchablePackages)
@@ -247,68 +238,60 @@ class AgentRuntime(
                 var modelFailures = 0
                 val evidenceCounters = StopGateEvidenceCounters()
                 var pendingReplanReason: String? = null
+                // After a scaffold fallback, force one Manager replan with a live screen
+                // so the Actor is not stuck on a launch-only plan.
+                var forceObservationReplan = usedFallbackPlan
 
-                traceStore.event(runId, "PLAN_CREATED", mapOf("plan" to plan.compactText(0)))
-                onLog("Plan ready: ${plan.milestones.size} milestones")
+                traceStore.event(runId, "PLAN_CREATED", mapOf("plan" to plan.compactText(0), "fallback" to usedFallbackPlan))
+                onLog("Plan ready: ${plan.milestones.size} milestones" + if (usedFallbackPlan) " (fallback scaffold)" else "")
 
                 for (step in 1..MAX_TOOL_CALLS) {
                     onPhase(step, "Observing")
                     onAction("")
                     val rawBefore = observeWithPackage(lockedPackage)
-                    if (step == 1 && !lockedPackage.isNullOrBlank() && rawBefore.packageName != lockedPackage) {
-                        val launch = AgentAction.LaunchApp(lockedPackage!!)
-                        val launchSafetyFailure = SafetyGuard.validate(
-                            launch,
-                            rawBefore,
-                            packagePolicy,
-                            launchablePackages,
-                            goalContext,
-                        ).exceptionOrNull()
-                        if (launchSafetyFailure != null) {
-                            return@withTimeout finish(RuntimeOutcome.SAFETY_BLOCKED, "SAFETY_BLOCKED: ${launchSafetyFailure.message.orEmpty()}")
+                    // Model-first: never hard-code a first-step launch. The Actor (and
+                    // optional Shizuku terminal) chooses how and when to enter the app.
+                    if (forceObservationReplan && replans < MAX_REPLANS) {
+                        forceObservationReplan = false
+                        onPhase(step, "Replanning")
+                        val screenGap = buildString {
+                            append("Initial Manager plan was a local scaffold. Rebuild milestones from the live screen.")
+                            append("\nCurrent package: ").append(rawBefore.packageName.ifBlank { "unknown" })
+                            append("\nScreen:\n").append(rawBefore.compactText().take(6_000))
                         }
-                        val launchIdentity = SideEffectIdentityFactory.create(launch, rawBefore)
-                        val launchSequence = launchIdentity?.let { sideEffects.nextDispatchSequence() }
-                        val launchSnapshot = launchIdentity?.let { identity ->
-                            preDispatchSnapshots.capture(rawBefore, identity, launchSequence ?: 0L)
-                        }
-                        onPhase(step, "Acting")
-                        onAction(describeAction(launch))
-                        if (!service.execute(launch, rawBefore)) {
-                            preDispatchSnapshots.remove(launchSnapshot?.snapshotId)
-                            val recovery = recoveryPolicy.decide(
-                                RecoveryContext(
-                                    expectedPackage = lockedPackage,
-                                    currentPackage = rawBefore.packageName,
-                                    currentMilestoneId = "launch",
-                                    reason = RecoveryReason.APP_NOT_RESPONDING,
-                                    failedAction = launch,
-                                ),
+                        try {
+                            val revised = replan(
+                                plan,
+                                ledger,
+                                goalContext,
+                                appCatalog,
+                                targetHint,
+                                apiKey,
+                                settings.modelBaseUrl,
+                                settings.modelName,
+                                lockedPackage,
+                                screenGap,
                             )
-                            val recovered = executeRecovery(recovery, step, rawBefore, lockedPackage, executionHistory, lockedPackage, ledger.currentMilestone, launch, packagePolicy, launchablePackages, goalContext)
-                            traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
-                            if (!recovered.success) return@withTimeout finish(RuntimeOutcome.ACCESSIBILITY_DISCONNECTED, "Unable to launch the locked target app: ${recovered.detail}")
+                            validateRevisedPlan(plan, revised, launchablePackages)
+                            val completed = ledger.currentMilestoneIndex
+                            val prepared = prepareRevisedPlan(revised, plan, completed, lockedPackage)
+                            predicateBindings.retainCompleted(
+                                plan,
+                                prepared.first,
+                                plan.milestones.take(completed).mapTo(mutableSetOf()) { it.id },
+                            )
+                            plan = prepared.first
+                            packagePolicy = mergePlanPackages(packagePolicy, plan, launchablePackages)
+                            ledger.replacePlan(plan, prepared.second)
+                            guard = ToolGuard(plan, packagePolicy)
+                            replans += 1
+                            history += "FALLBACK_OBSERVATION_REPLAN:\n${plan.compactText(0)}"
+                            onLog("Observation replan ready: ${plan.milestones.size} milestones")
                             continue
+                        } catch (failure: TaskPlanException) {
+                            onLog("Observation replan failed; Actor continues with scaffold: ${failure.message.orEmpty()}")
+                            history += "FALLBACK_REPLAN_FAILED: ${failure.message.orEmpty()}"
                         }
-                        launchIdentity?.let { identity ->
-                            sideEffects.markUnknown(
-                                identity = identity,
-                                dispatchObservationId = rawBefore.observationId,
-                                dispatchSequence = launchSequence ?: sideEffects.nextDispatchSequence(),
-                                preDispatchSnapshotId = launchSnapshot?.snapshotId,
-                            )
-                        }
-                        val launchSettle = awaitStableObservationDetailed(rawBefore, launch)
-                        val launched = launchSettle.observation
-                        if (launched.packageName != lockedPackage) {
-                            return@withTimeout finish(RuntimeOutcome.TIMEOUT, "Target app did not become ready before the launch deadline")
-                        }
-                        if (launchSettle.state == DispatchResultState.CONFIRMED) {
-                            launchIdentity?.let(sideEffects::markConfirmed)
-                        }
-                        evidenceCounters.successfulMutatingActions += 1
-                        history += "LOCAL_TOOL_RESULT: launched locked package $lockedPackage without exposing the previous app"
-                        continue
                     }
                     val packageFailure = packageBoundaryFailure(rawBefore, lockedPackage, packagePolicy)
                     if (packageFailure != null) {
@@ -532,74 +515,72 @@ class AgentRuntime(
                     }
                     val screenshot = screenshotCapture.dataUrl
                     val screenshotFingerprint = screenshot?.let(TraceSanitizer::digest)
-                    val workflowAction = guard.requiredWorkflowAction(before, milestone)
+                    // Always ask the model (or Shizuku-aware planner). Local recipes
+                    // no longer hijack the action path.
                     var planned: PlannedAction? = null
-                    val proposed = if (workflowAction != null) {
-                        onLog("Local workflow tool: ${describeAction(workflowAction)}")
-                        workflowAction
-                    } else {
-                        try {
-                            client.planAction(
-                                apiKey = actorKey,
-                                baseUrl = actorBaseUrl,
-                                model = actorModel,
-                                goal = immutableGoal,
-                                allowedPackage = lockedPackage,
-                                appCatalog = appCatalog,
-                                observation = before,
-                                history = (history + executionHistory.promptLines()).takeLast(24),
-                                screenshotDataUrl = screenshot,
-                                harnessState = "CURRENT MILESTONE: ${milestone.id} ${milestone.objective}\n" +
-                                    "SUCCESS CONTRACT: ${milestone.successEvidence}\n${ledger.planText(predicateBindings)}",
-                                toolTurns = toolTurns.takeLast(MAX_MODEL_TOOL_TURNS),
-                                provider = settings.currentProvider,
-                                primaryPackage = packagePolicy.primaryPackage,
-                                currentPackage = before.packageName,
-                                allowedPackages = packagePolicy.allowedPackages,
-                                terminalAvailable = PrivilegedBackendRouter.isReady(),
-                            ).also { planned = it }.action
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (error: Throwable) {
-                            modelFailures += 1
-                            val reason = "planner error: ${error.message.orEmpty()}"
-                            history += "MODEL_ERROR: $reason"
-                            onLog(reason)
-                            traceStore.event(runId, "MODEL_ERROR", mapOf("reason" to reason))
-                            if (modelFailures >= MAX_MODEL_FAILURES || isFatalModelError(error)) {
-                                val outcome = if (isFatalModelError(error)) {
-                                    RuntimeOutcome.PERMANENT_PLAN_ERROR
-                                } else {
-                                    RuntimeOutcome.TRANSIENT_NETWORK_ERROR
-                                }
-                                return@withTimeout finish(outcome, reason)
+                    val proposed = try {
+                        client.planAction(
+                            apiKey = actorKey,
+                            baseUrl = actorBaseUrl,
+                            model = actorModel,
+                            goal = immutableGoal,
+                            allowedPackage = lockedPackage,
+                            appCatalog = appCatalog,
+                            observation = before,
+                            history = (history + executionHistory.promptLines()).takeLast(24),
+                            screenshotDataUrl = screenshot,
+                            harnessState = "CURRENT MILESTONE: ${milestone.id} ${milestone.objective}\n" +
+                                "SUCCESS CONTRACT: ${milestone.successEvidence}\n${ledger.planText(predicateBindings)}\n" +
+                                "loopDetected=${ledger.cyclePeriod() != null || ledger.noProgressCount >= 2}\n" +
+                                "terminalReady=${PrivilegedBackendRouter.isReady()}",
+                            toolTurns = toolTurns.takeLast(MAX_MODEL_TOOL_TURNS),
+                            provider = settings.currentProvider,
+                            primaryPackage = packagePolicy.primaryPackage,
+                            currentPackage = before.packageName,
+                            allowedPackages = packagePolicy.allowedPackages,
+                            terminalAvailable = PrivilegedBackendRouter.isReady(),
+                        ).also { planned = it }.action
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Throwable) {
+                        modelFailures += 1
+                        val reason = "planner error: ${error.message.orEmpty()}"
+                        history += "MODEL_ERROR: $reason"
+                        onLog(reason)
+                        traceStore.event(runId, "MODEL_ERROR", mapOf("reason" to reason))
+                        if (modelFailures >= MAX_MODEL_FAILURES || isFatalModelError(error)) {
+                            val outcome = if (isFatalModelError(error)) {
+                                RuntimeOutcome.PERMANENT_PLAN_ERROR
+                            } else {
+                                RuntimeOutcome.TRANSIENT_NETWORK_ERROR
                             }
-                            val recovery = recoveryPolicy.decide(
-                                RecoveryContext(
-                                    expectedPackage = expectedRecoveryPackage(milestone),
-                                    currentPackage = before.packageName,
-                                    currentMilestoneId = milestone.id,
-                                    currentMilestoneKind = milestone.kind,
-                                    failedAction = null,
-                                    reason = RecoveryReason.NETWORK_ERROR,
-                                ),
-                            )
-                            val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, packagePolicy = packagePolicy, launchablePackages = launchablePackages, goal = goalContext)
-                            traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
-                            if (!recovered.success) return@withTimeout finish(RuntimeOutcome.TRANSIENT_NETWORK_ERROR, recovered.detail)
-                            if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = reason
-                            ledger.record(
-                                StepTrace(
-                                    milestone.id,
-                                    before.observationId,
-                                    "invalid_model_output",
-                                    before.observationId,
-                                    TransitionJudgement.NO_PROGRESS,
-                                    reason,
-                                ),
-                            )
-                            continue
+                            return@withTimeout finish(outcome, reason)
                         }
+                        val recovery = recoveryPolicy.decide(
+                            RecoveryContext(
+                                expectedPackage = expectedRecoveryPackage(milestone),
+                                currentPackage = before.packageName,
+                                currentMilestoneId = milestone.id,
+                                currentMilestoneKind = milestone.kind,
+                                failedAction = null,
+                                reason = RecoveryReason.NETWORK_ERROR,
+                            ),
+                        )
+                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, packagePolicy = packagePolicy, launchablePackages = launchablePackages, goal = goalContext)
+                        traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
+                        if (!recovered.success) return@withTimeout finish(RuntimeOutcome.TRANSIENT_NETWORK_ERROR, recovered.detail)
+                        if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = reason
+                        ledger.record(
+                            StepTrace(
+                                milestone.id,
+                                before.observationId,
+                                "invalid_model_output",
+                                before.observationId,
+                                TransitionJudgement.NO_PROGRESS,
+                                reason,
+                            ),
+                        )
+                        continue
                     }
                     modelFailures = 0
                     onAction(describeAction(proposed))
@@ -719,7 +700,7 @@ class AgentRuntime(
                     val executionObservation = observeWithPackage(lockedPackage, includeOcr = false)
 
                     if (proposed is AgentAction.Terminal && !PrivilegedBackendRouter.isReady()) {
-                        val reason = "Built-in terminal disconnected before dispatch; replan with accessibility actions"
+                        val reason = "Shizuku terminal disconnected before dispatch; replan with accessibility actions"
                         recordTurn(toolTurns, planned, toolResultJson(false, proposed, before, before, "terminal_unavailable", reason))
                         history += "PRE_TOOL_BLOCKED: $reason"
                         continue
@@ -1247,7 +1228,10 @@ class AgentRuntime(
                 timeoutMillis = MAX_SETTLE_MS,
                 pollMillis = STABILITY_POLL_MS,
                 requiredSamples = REQUIRED_STABLE_SAMPLES,
+                // Structure fingerprint ignores feed/video text churn so settle
+                // does not spin until timeout on animated pages.
                 observe = service::observe,
+                stabilityKey = { it.structureFingerprint() },
             )
         }
         return when (result) {
@@ -1594,15 +1578,15 @@ class AgentRuntime(
     }
 
     private companion object {
-        const val MAX_TOOL_CALLS = 80
-        const val MAX_REPLANS = 8
-        const val MAX_NO_PROGRESS = 5
+        const val MAX_TOOL_CALLS = 120
+        const val MAX_REPLANS = 12
+        const val MAX_NO_PROGRESS = 6
         const val MAX_MODEL_FAILURES = 5
         const val MAX_MODEL_TOOL_TURNS = 16
         const val MAX_STORED_TOOL_TURNS = 20
         const val RUN_TIMEOUT_MS = 20 * 60 * 1_000L
         const val STABILITY_POLL_MS = 250L
-        const val MAX_SETTLE_MS = 3_000L
+        const val MAX_SETTLE_MS = 2_500L
         const val LAUNCH_SETTLE_MS = 12_000L
         const val REQUIRED_STABLE_SAMPLES = 2
         const val PACKAGE_OBSERVATION_RETRIES = 4

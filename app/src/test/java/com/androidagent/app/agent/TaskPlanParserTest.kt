@@ -17,9 +17,9 @@ class TaskPlanParserTest {
     @Test
     fun deterministicFallbackLaunchesKnownPackageWithoutInventingContentSteps() {
         val plan = TaskPlanParser.fallback("open and complete", "example.app")
-        assertEquals(1, plan.milestones.size)
-        assertEquals(TaskMilestoneKind.LAUNCH_APP, plan.milestones.single().kind)
+        assertEquals(TaskMilestoneKind.LAUNCH_APP, plan.milestones.first().kind)
         assertEquals("example.app", plan.allowedPackages.single())
+        assertTrue(plan.milestones.none { it.kind == TaskMilestoneKind.INPUT })
     }
 
     @Test

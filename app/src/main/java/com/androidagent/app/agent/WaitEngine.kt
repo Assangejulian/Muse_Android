@@ -57,17 +57,23 @@ object WaitEngine {
         pollMillis: Long = 120L,
         requiredSamples: Int = 2,
         observe: suspend () -> Observation,
+        stabilityKey: (Observation) -> String = { it.observationId },
     ): WaitResult<Observation> {
         val started = System.currentTimeMillis()
         var latest = observe()
+        var lastKey = stabilityKey(latest)
         var stable = 0
         while (System.currentTimeMillis() - started <= timeoutMillis) {
             kotlinx.coroutines.delay(pollMillis)
             val next = observe()
-            if (next.observationId == latest.observationId) stable++ else stable = 0
+            val nextKey = stabilityKey(next)
+            if (nextKey == lastKey) stable++ else stable = 0
             latest = next
+            lastKey = nextKey
             if (stable >= requiredSamples) return WaitResult.Satisfied(next, System.currentTimeMillis() - started)
         }
+        // Animated surfaces may never fully freeze. Prefer returning the latest
+        // observation as RESULT_UNKNOWN rather than hanging the agent loop.
         return WaitResult.TimedOut(System.currentTimeMillis() - started, "screen did not stabilize")
     }
 

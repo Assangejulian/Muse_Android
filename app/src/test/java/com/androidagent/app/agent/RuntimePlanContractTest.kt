@@ -90,9 +90,10 @@ class RuntimePlanContractTest {
 
         val normalized = normalizePrimaryLaunchContract(managerPlan, "primary.app")
 
-        assertEquals(3, normalized.milestones.size)
-        assertEquals(TaskMilestoneKind.LAUNCH_APP, normalized.milestones.first().kind)
-        assertEquals("primary.app", normalized.milestones.first().successPredicates.single().targetPackage)
+        // Model-first: do not inject a synthetic primary launch when the Manager
+        // did not plan one. Only canonicalize existing LAUNCH_APP milestones.
+        assertEquals(2, normalized.milestones.size)
+        assertEquals(TaskMilestoneKind.GENERIC, normalized.milestones.first().kind)
         assertEquals("secondary.app", normalized.milestones.last().successPredicates.single().targetPackage)
     }
 

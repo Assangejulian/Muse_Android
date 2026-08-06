@@ -60,7 +60,7 @@ class RuntimeGuardsTest {
         assertNull(ledger.blockRepeated(action, screen))
         assertNull(ledger.blockRepeated(action, screen))
         // Budget is charged only by recordDispatch. Exhaust the per-screen attempt budget.
-        repeat(4) {
+        repeat(6) {
             assertNull(ledger.blockRepeated(action, screen))
             ledger.recordDispatch(action, screen)
         }

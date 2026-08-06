@@ -65,9 +65,8 @@ class TaskRecipesTest {
             ),
         )
         val guard = ToolGuard(plan, "example.app")
-        val action = guard.requiredWorkflowAction(Observation("com.android.launcher3", emptyList()), plan.milestones.single())
-        assertTrue(action is AgentAction.LaunchApp)
-        assertEquals("example.app", (action as AgentAction.LaunchApp).packageName)
+        // Model-first: local workflow never hijacks launch; Actor decides.
+        assertNull(guard.requiredWorkflowAction(Observation("com.android.launcher3", emptyList()), plan.milestones.single()))
         assertNull(guard.requiredWorkflowAction(Observation("example.app", emptyList()), plan.milestones.single()))
     }
 }

@@ -44,8 +44,11 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicInteger
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
@@ -259,7 +262,7 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private suspend fun executeTerminal(action: AgentAction.Terminal): ActionExecutionResult {
         if (!PrivilegedBackendRouter.isReady()) {
-            return ActionExecutionResult(false, "terminal_unavailable", "Built-in terminal is not connected")
+            return ActionExecutionResult(false, "terminal_unavailable", "Shizuku terminal is not connected")
         }
         val commandResult = PrivilegedBackendRouter.execute(action.command, action.timeoutMillis)
         val detail = buildString {
@@ -379,25 +382,28 @@ class AgentAccessibilityService : AccessibilityService() {
         }
     }
 
-    private suspend fun captureScreenRaw(): Bitmap? = kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
-        takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
-            override fun onSuccess(screenshot: ScreenshotResult) {
-                val hardwareBuffer = screenshot.hardwareBuffer
-                val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, screenshot.colorSpace)?.copy(Bitmap.Config.ARGB_8888, false)
-                hardwareBuffer.close()
-                if (continuation.isActive) {
-                    continuation.resume(bitmap)
-                } else {
-                    bitmap?.recycle()
+    private suspend fun captureScreenRaw(): Bitmap? = withTimeoutOrNull(SCREENSHOT_TIMEOUT_MS) {
+        kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+            takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                override fun onSuccess(screenshot: ScreenshotResult) {
+                    val hardwareBuffer = screenshot.hardwareBuffer
+                    val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, screenshot.colorSpace)
+                        ?.copy(Bitmap.Config.ARGB_8888, false)
+                    hardwareBuffer.close()
+                    if (continuation.isActive) {
+                        continuation.resume(bitmap)
+                    } else {
+                        bitmap?.recycle()
+                    }
                 }
-            }
 
-            override fun onFailure(errorCode: Int) {
-                Log.w(TAG, "Screenshot failed errorCode=$errorCode")
-                if (continuation.isActive) continuation.resume(null)
-            }
-        })
-    }
+                override fun onFailure(errorCode: Int) {
+                    Log.w(TAG, "Screenshot failed errorCode=$errorCode")
+                    if (continuation.isActive) continuation.resume(null)
+                }
+            })
+        }
+    }.also { if (it == null) Log.w(TAG, "Screenshot timed out after ${SCREENSHOT_TIMEOUT_MS}ms") }
 
     private suspend fun clickResolvedTarget(resolvedTarget: ResolvedActionTarget?): Boolean {
         if (resolvedTarget?.dispatchMode != ActionDispatchMode.ACCESSIBILITY_CLICK) return false
@@ -498,16 +504,40 @@ class AgentAccessibilityService : AccessibilityService() {
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
                 .build()
-            val result = CompletableDeferred<Boolean>()
-            dispatchGesture(gesture, object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) { result.complete(true) }
-                override fun onCancelled(gestureDescription: GestureDescription?) { result.complete(false) }
-            }, null)
-            result.await() || PrivilegedDeviceBackend.tap(x.toInt(), y.toInt())
+            val accepted = dispatchGestureAwait(gesture, GESTURE_TIMEOUT_MS)
+            accepted || PrivilegedDeviceBackend.tap(x.toInt(), y.toInt())
         } finally {
             if (::overlayController.isInitialized) {
                 withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(false) }
             }
+        }
+    }
+
+    /**
+     * Gesture callbacks can stall on some OEMs when the display sleeps or the
+     * window hierarchy is mid-transition. Never await forever — fall through to
+     * privileged backends or report failure so the agent loop stays live.
+     */
+    private suspend fun dispatchGestureAwait(
+        gesture: GestureDescription,
+        timeoutMs: Long,
+    ): Boolean {
+        val result = CompletableDeferred<Boolean>()
+        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                result.complete(true)
+            }
+
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                result.complete(false)
+            }
+        }, null)
+        if (!dispatched) return false
+        return try {
+            withTimeout(timeoutMs) { result.await() }
+        } catch (_: TimeoutCancellationException) {
+            Log.w(TAG, "Gesture callback timed out after ${timeoutMs}ms")
+            false
         }
     }
 
@@ -679,12 +709,7 @@ class AgentAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 450))
             .build()
-        val result = CompletableDeferred<Boolean>()
-        dispatchGesture(gesture, object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) { result.complete(true) }
-            override fun onCancelled(gestureDescription: GestureDescription?) { result.complete(false) }
-        }, null)
-        val gestureAccepted = result.await()
+        val gestureAccepted = dispatchGestureAwait(gesture, SWIPE_TIMEOUT_MS)
         return gestureAccepted || PrivilegedDeviceBackend.swipe(
             startX.toInt(),
             startY.toInt(),
@@ -702,6 +727,9 @@ class AgentAccessibilityService : AccessibilityService() {
         private const val MAX_NODES = 250
         private const val MAX_DEPTH = 30
         private const val SCREENSHOT_MIN_INTERVAL_MS = 1_000L
+        private const val SCREENSHOT_TIMEOUT_MS = 4_000L
+        private const val GESTURE_TIMEOUT_MS = 2_500L
+        private const val SWIPE_TIMEOUT_MS = 3_500L
         @Volatile private var instance: AgentAccessibilityService? = null
         fun current(): AgentAccessibilityService? = instance
 

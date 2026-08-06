@@ -1,12 +1,12 @@
-# Muse Android Agent 0.10.3
+# Muse Android Agent 0.12.0
 
-A private, sideloaded Android 11–17 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, and independently checks the result. Workflow decomposition is model-first: the runtime does not inject app-specific search/NLP recipes.
+A private, sideloaded Android 11–17 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, and independently checks the result. Workflow decomposition is model-first: the Actor owns routing (including launch timing); Shizuku is the preferred control terminal; the runtime does not inject app-specific search/NLP recipes or hard-coded first-step launches.
 
 ## MVP capabilities
 
 - Accessibility node observation
 - DeepSeek, Qwen, or MiMo planning through OpenAI-compatible APIs
-- Default DeepSeek model preset: `deepseek-v4-pro` (Manager may use thinking mode); UI also offers `deepseek-v4-flash` without remapping
+- Default DeepSeek model preset: `deepseek-v4-pro`; runtime thinking is disabled for a fast initial plan, and the Actor retains screen-level autonomy
 - Native `tools` / `tool_calls` planning for DeepSeek and Qwen, with a cached compatibility fallback
 - One strictly validated action per model response, with unknown action fields ignored
 - Target package allowlist
@@ -16,7 +16,7 @@ A private, sideloaded Android 11–17 automation agent. It observes the active U
 - Focused text input
 - Back, app launch, exact text replacement, submit, wait, scroll, and idempotent toggle tools
 - Encrypted local API key storage
-- Manual stop, cancellable HTTP calls, a twenty-minute deadline, and a bounded 80-tool run budget
+- Manual stop, cancellable HTTP calls, gesture/screenshot hard timeouts, a twenty-minute deadline, and a bounded 120-tool run budget
 - Chinese chat workspace with a configuration drawer
 - Persistent conversations with create, pin, and delete actions
 - Launchable app catalog exposed through `/list`
@@ -24,8 +24,8 @@ A private, sideloaded Android 11–17 automation agent. It observes the active U
 - GitHub Release update checks on app launch
 - User-confirmed APK download and installation
 - Live node-ID clicking with clickable-parent and safe center-tap fallbacks
-- Full-screen animated AI-operation border using an accessibility overlay
-- Top operation status bar with an always-available stop action
+- Full-screen animated execution field using an accessibility overlay
+- Bottom task bar with an always-available stop action and at most two sliding progress-summary lines
 - Final-action completion hints and repeated-toggle protection
 - Observation filtering that prevents the agent from acting on its own overlay controls
 - Natural conversation and device-action intent routing
@@ -59,24 +59,20 @@ A private, sideloaded Android 11–17 automation agent. It observes the active U
 - Neutral app selection that exposes only the goal and installed app catalog until a target package is locked
 - Explicit opt-in for screenshot sharing; vision is never enabled merely because a Qwen key exists
 - Race-safe run state updates across UI, WorkManager, and accessibility callbacks
-- Built-in wireless ADB pairing and shell terminal with an app-private persistent host key
-- Harness-controlled model terminal tool that is advertised only while ADB or Shizuku is connected
+- External Shizuku 13.1.5 UserService as the primary model control terminal
+- Harness-controlled model terminal tool that is advertised only while Shizuku is connected
 - Automatic accessibility fallback when the privileged terminal is unavailable
-- Optional Shizuku 13.1.5 UserService fallback with ADB-shell/root identity
+- Accessibility observation, verification, and action fallback when Shizuku cannot perform a step
 - Privileged foreground-app detection plus launch, tap, swipe, Back, Home, and Enter fallbacks
 - Explicit user-only `/shell <command>` console with bounded command length, timeout, and output
 
 User-started runs are protected by a foreground service. Exact-alarm special access remains intentionally deferred; scheduled work uses WorkManager and may run later than the parsed time under Android battery optimization.
 
-## Built-in ADB terminal
+## Shizuku control terminal
 
-Muse includes an ADB client and Android NSD discovery. It pairs directly with Android Wireless debugging, stores the generated ADB host key in Muse's private data directory, and executes commands as Android's `shell` user. A separate Shizuku app is not required.
+Muse intentionally does not bundle an ADB client. Install and start the separate Shizuku app, then grant Muse access. Shizuku runs Muse's bounded UserService with Android `shell` identity, or root identity only when the user's own Shizuku environment supplies it.
 
-Muse automatically suggests the active WLAN IPv4 address and keeps the pairing port separate from the normal ADB connection port. If NSD discovery is unavailable, enter the host and both ports shown by Android; Muse never substitutes the loopback address for a WLAN endpoint.
-
-When the connection is live, the Harness exposes a bounded `terminal` action to the model and recommends it for deterministic inspection and manipulation. Terminal output is returned to the planning loop but does not bypass milestone predicates or the Stop Gate. If the connection drops, the action disappears from the model schema and execution falls back to accessibility. Commands are limited to 16,000 characters and 30 seconds; trace files store only command length and a short digest.
-
-The existing Shizuku integration remains available as an optional fallback and can provide root identity when the separately installed Shizuku service runs as root.
+When Shizuku is live, the Harness exposes a bounded `terminal` action and directs the Actor to use it first for deterministic inspection and manipulation. Terminal output is returned to the planning loop but does not bypass milestone predicates or the Stop Gate. If Shizuku drops, the action disappears from the model schema and execution falls back to accessibility. Commands are limited to 16,000 characters and 30 seconds; trace files store only command length and a short digest.
 
 ## Build
 
@@ -90,15 +86,14 @@ The existing Shizuku integration remains available as an optional fallback and c
 
 1. Install the debug APK.
 2. Open Muse.
-3. Enable **Developer options > Wireless debugging** on the device.
-4. Note the host and connection port shown on the Wireless debugging home page.
-5. In Muse's **内置 ADB 终端** section, tap **打开无线调试**, choose **使用配对码配对设备**, then enter the WLAN host, pairing port, connection port, and six-digit code before tapping **配对并连接**.
-6. Tap **Accessibility** and enable **Muse Control**.
-7. Select DeepSeek or Qwen and enter that provider's API key. The Qwen text preset uses `qwen3.6-flash`; optional vision uses `qwen3-vl-flash`.
-8. Optionally set a default target package. Leave it blank for automatic app selection.
-9. Enter a narrow, low-risk task in the chat input and tap **发送**.
-10. Enter `/list` to inspect the launchable app catalog, or `/shell <command>` to run an explicit privileged command.
-11. To schedule an explicit task, enter `/schedule <future epoch millis>|<goal>`; scheduling is never inferred from business keywords.
+3. Install and start the separate **Shizuku** app using its documented setup method.
+4. In Muse's **Shizuku 控制终端** section, grant access and connect.
+5. Tap **Accessibility** and enable **Muse Control** for observation, verification, overlays, and fallback actions.
+6. Select DeepSeek or Qwen and enter that provider's API key. The Qwen text preset uses `qwen3.6-flash`; optional vision uses `qwen3-vl-flash`.
+7. Optionally set a default target package. Leave it blank for automatic app selection.
+8. Enter a narrow, low-risk task in the chat input and tap **发送**.
+9. Enter `/list` to inspect the launchable app catalog, or `/shell <command>` to run an explicit Shizuku command.
+10. To schedule an explicit task, enter `/schedule <future epoch millis>|<goal>`; scheduling is never inferred from business keywords.
 
 Do not use this MVP for payments, purchases, account security, verification codes, permission granting, or system settings.
 
