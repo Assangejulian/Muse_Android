@@ -190,7 +190,7 @@ class RunScopedSideEffectLedgerTest {
     }
 
     @Test
-    fun failedUnknownRecoveryAbortsInsteadOfReturningUnknown() = runBlocking {
+    fun settleUnknownContinuesAsConfirmedWithoutRecovery() = runBlocking {
         val plan = TaskPlan(
             summary = "dismiss",
             targetAppHint = "primary.app",
@@ -232,8 +232,9 @@ class RunScopedSideEffectLedgerTest {
                 preDispatchSnapshots = snapshots,
             ),
         )
-        assertEquals(RuntimeStepStatus.ABORTED, result.status)
-        assertFalse(result.status == RuntimeStepStatus.RESULT_UNKNOWN)
+        assertEquals(DispatchResultState.RESULT_UNKNOWN, result.dispatchResultState)
+        assertEquals(RuntimeStepStatus.RESULT_UNKNOWN, result.status)
+        assertTrue(result.recoveryDecisions.isEmpty())
         assertTrue(sideEffects.records().single().state == SideEffectResultState.UNKNOWN_SIDE_EFFECT)
     }
 

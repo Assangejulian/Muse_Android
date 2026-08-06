@@ -414,16 +414,11 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         request.evidenceCounters.successfulMutatingActions++
 
         val rawSettled = driver.settle(request.executionObservation, action)
-        val settled = if (execution.partialMutation) {
-            rawSettled.copy(
-                state = DispatchResultState.RESULT_UNKNOWN,
-                detail = "partial mutation (${execution.status}); ${rawSettled.detail}",
-            )
-        } else {
-            rawSettled
-        }
-        events += RuntimeStepEngineEvent("wait", "${settled.state}:${settled.detail}")
-        return if (settled.state != DispatchResultState.CONFIRMED) {
+        events += RuntimeStepEngineEvent("wait", "${rawSettled.state}:${rawSettled.detail}")
+        // Critical: never run a multi-step recovery burn loop on settle uncertainty.
+        // Keep unknown side-effect identity for retry protection, return RESULT_UNKNOWN
+        // to the outer Actor loop so it can choose a different route.
+        if (execution.partialMutation || rawSettled.state != DispatchResultState.CONFIRMED) {
             request.bindings.markResultUnknown(preparation, actionKey)
             request.ledger.recordDispatch(
                 action,
@@ -432,123 +427,85 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
                 preflight.resolvedTarget,
                 sideEffectIdentity,
             )
-            resolveUnknown(
-                request,
-                preparation,
-                action,
-                actionKey,
-                execution,
-                settled,
-                sideEffectIdentity,
-                preflight.resolvedTarget,
-                inputGeneration,
-                events,
-                recoveryDecisions,
+            request.recoveryPolicy.noteSuccessfulDispatch()
+            val evidence = evaluate(request, rawSettled.observation)
+            events += RuntimeStepEngineEvent(
+                "evaluate",
+                if (evidence.proven) "proven" else "uncertain_no_recovery",
             )
-        } else {
-            sideEffectIdentity?.let { request.sideEffects.markConfirmed(it) }
-            request.bindings.markResultObserved(preparation, actionKey)
-            request.ledger.recordDispatch(
-                action,
-                request.executionObservation,
-                DispatchResultState.CONFIRMED,
-                preflight.resolvedTarget,
-                sideEffectIdentity,
-            )
-            evaluateConfirmed(
-                request,
-                action,
-                execution,
-                settled.observation,
-                preflight.resolvedTarget,
-                inputGeneration,
-                events,
-                recoveryDecisions,
-            )
-        }
-    }
-
-    private suspend fun resolveUnknown(
-        request: RuntimeStepRequest,
-        preparation: BindingPreparation,
-        action: AgentAction,
-        actionKey: String,
-        execution: ActionExecutionResult,
-        settled: RuntimeStepSettleResult,
-        sideEffectIdentity: SideEffectIdentity?,
-        resolvedTarget: ResolvedActionTarget?,
-        inputGeneration: Int?,
-        events: MutableList<RuntimeStepEngineEvent>,
-        recoveryDecisions: MutableList<RecoveryDecision>,
-    ): RuntimeStepEngineResult {
-        var observation = settled.observation
-        fun result(status: RuntimeStepStatus, reason: String): RuntimeStepEngineResult = RuntimeStepEngineResult(
-            status = status,
-            action = action,
-            before = request.executionObservation,
-            after = observation,
-            execution = execution,
-            reason = reason,
-            dispatchResultState = DispatchResultState.RESULT_UNKNOWN,
-            recoveryDecisions = recoveryDecisions,
-            events = events,
-            resolvedTarget = resolvedTarget,
-            inputGeneration = inputGeneration,
-        )
-
-        if (request.recoveryPolicy.budgetExhausted()) {
-            return result(RuntimeStepStatus.ABORTED, "recovery budget exhausted while resolving unknown dispatch")
-        }
-        var evidence: PredicateEvidence
-        for (attempt in 0 until 3) {
-            if (request.recoveryPolicy.budgetExhausted()) {
-                return result(RuntimeStepStatus.ABORTED, "recovery budget exhausted while resolving unknown dispatch")
-            }
-            val decision = request.recoveryPolicy.decide(
-                RecoveryContext(
-                    expectedPackage = request.targetPackage,
-                    currentPackage = observation.packageName,
-                    currentMilestoneId = request.milestone.id,
-                    currentMilestoneKind = request.milestone.kind,
-                    failedAction = action,
-                    reason = RecoveryReason.RESULT_UNKNOWN,
-                ),
-            )
-            recoveryDecisions += decision
-            if (decision.action == RecoveryAction.ABORT) {
-                return result(RuntimeStepStatus.ABORTED, decision.detail)
-            }
-            val recovery = driver.executeRecovery(decision, observation)
-            events += RuntimeStepEngineEvent("recover", "${decision.action}:${recovery.detail}")
-            observation = recovery.observation
-            evidence = evaluate(request, observation)
-            events += RuntimeStepEngineEvent("evaluate", "result_unknown:${if (evidence.proven) "proven" else "unknown"}")
             if (evidence.proven) {
                 sideEffectIdentity?.let { request.sideEffects.markConfirmed(it) }
                 request.bindings.markResultObserved(preparation, actionKey)
-                completeMilestone(request, evidence, observation, action, events)
-                return result(RuntimeStepStatus.MILESTONE_COMPLETE, evidence.details.joinToString(" | "))
+                completeMilestone(request, evidence, rawSettled.observation, action, events)
+                return RuntimeStepEngineResult(
+                    status = RuntimeStepStatus.MILESTONE_COMPLETE,
+                    action = action,
+                    before = request.executionObservation,
+                    after = rawSettled.observation,
+                    execution = execution,
+                    evidence = evidence,
+                    reason = evidence.details.joinToString(" | "),
+                    dispatchResultState = DispatchResultState.RESULT_UNKNOWN,
+                    recoveryDecisions = recoveryDecisions,
+                    events = events,
+                    resolvedTarget = preflight.resolvedTarget,
+                    inputGeneration = inputGeneration,
+                )
             }
-            if (evidence.replanRequired) {
-                return result(RuntimeStepStatus.REPLAN_REQUIRED, MilestoneEvaluator.BOUND_WINDOW_GONE_REPLAN_REASON)
-            }
-            if (decision.action == RecoveryAction.REPLAN) {
-                return result(RuntimeStepStatus.REPLAN_REQUIRED, "dispatch result remains unknown; replan required")
-            }
-            if (!recovery.success) {
-                if (decision.action == RecoveryAction.WAIT) {
-                    if (request.recoveryPolicy.budgetExhausted()) {
-                        return result(RuntimeStepStatus.ABORTED, "recovery budget exhausted while resolving unknown dispatch")
-                    }
-                    continue
-                }
-                return result(RuntimeStepStatus.ABORTED, "${decision.action.name.lowercase()} recovery failed: ${recovery.detail}")
-            }
-            if (request.recoveryPolicy.budgetExhausted()) {
-                return result(RuntimeStepStatus.ABORTED, "recovery budget exhausted while resolving unknown dispatch")
-            }
+            request.ledger.record(
+                StepTrace(
+                    request.milestone.id,
+                    request.executionObservation.observationId,
+                    TraceSanitizer.action(action),
+                    rawSettled.observation.observationId,
+                    TransitionJudgement.PROGRESS,
+                    if (execution.partialMutation) {
+                        "partial mutation; Actor continues without recovery burn"
+                    } else {
+                        "settle uncertain; Actor continues without recovery burn"
+                    },
+                ),
+            )
+            return RuntimeStepEngineResult(
+                status = RuntimeStepStatus.RESULT_UNKNOWN,
+                action = action,
+                before = request.executionObservation,
+                after = rawSettled.observation,
+                execution = execution,
+                evidence = evidence,
+                reason = if (execution.partialMutation) {
+                    "partial mutation; Actor continues without recovery burn"
+                } else {
+                    "settle uncertain; Actor continues without recovery burn"
+                },
+                dispatchResultState = DispatchResultState.RESULT_UNKNOWN,
+                recoveryDecisions = recoveryDecisions,
+                events = events,
+                resolvedTarget = preflight.resolvedTarget,
+                inputGeneration = inputGeneration,
+            )
         }
-        return result(RuntimeStepStatus.ABORTED, "unknown dispatch recovery attempts exhausted")
+
+        sideEffectIdentity?.let { request.sideEffects.markConfirmed(it) }
+        request.bindings.markResultObserved(preparation, actionKey)
+        request.ledger.recordDispatch(
+            action,
+            request.executionObservation,
+            DispatchResultState.CONFIRMED,
+            preflight.resolvedTarget,
+            sideEffectIdentity,
+        )
+        request.recoveryPolicy.noteSuccessfulDispatch()
+        return evaluateConfirmed(
+            request,
+            action,
+            execution,
+            rawSettled.observation,
+            preflight.resolvedTarget,
+            inputGeneration,
+            events,
+            recoveryDecisions,
+        )
     }
 
     private fun evaluateConfirmed(
@@ -564,7 +521,8 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         request.ledger.observe(after)
         val evidence = evaluate(request, after)
         events += RuntimeStepEngineEvent("evaluate", if (evidence.proven) "proven" else "unknown")
-        val changed = request.executionObservation.observationId != after.observationId
+        val changed = request.executionObservation.observationId != after.observationId ||
+            request.executionObservation.structureFingerprint() != after.structureFingerprint()
         val status = if (evidence.proven) {
             completeMilestone(request, evidence, after, action, events)
             RuntimeStepStatus.MILESTONE_COMPLETE
@@ -574,6 +532,9 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
             request.recoveryPolicy.resetFailures(request.milestone.id)
             RuntimeStepStatus.PROGRESS
         } else {
+            // Mutation was accepted; decay recovery debt so multi-step tasks survive
+            // screens that do not change the accessibility fingerprint (toggles, likes).
+            request.recoveryPolicy.noteSuccessfulDispatch()
             RuntimeStepStatus.NO_PROGRESS
         }
         val reason = when {
@@ -700,7 +661,14 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         events += RuntimeStepEngineEvent("recover", "${decision.action}:${recovery.detail}")
         val status = when {
             decision.action == RecoveryAction.REPLAN -> RuntimeStepStatus.REPLAN_REQUIRED
-            decision.action == RecoveryAction.ABORT || !recovery.success -> RuntimeStepStatus.ABORTED
+            // Policy almost never emits ABORT; if it does, surface as replan so the
+            // outer Actor loop continues instead of budget-suiciding the run.
+            decision.action == RecoveryAction.ABORT -> RuntimeStepStatus.REPLAN_REQUIRED
+            !recovery.success -> if (decision.action == RecoveryAction.REOBSERVE || decision.action == RecoveryAction.WAIT) {
+                fallbackStatus
+            } else {
+                RuntimeStepStatus.REPLAN_REQUIRED
+            }
             else -> fallbackStatus
         }
         request.ledger.record(

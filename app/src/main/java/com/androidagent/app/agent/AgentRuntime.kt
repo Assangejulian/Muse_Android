@@ -83,6 +83,12 @@ internal fun normalizePrimaryLaunchContract(plan: TaskPlan, targetPackage: Strin
     return TaskPlanValidator.requireValid(plan.copy(milestones = listOf(normalized) + plan.milestones.drop(1)))
 }
 
+/**
+ * Catalog-only package resolution. Match installed launcher labels and package
+ * ids that literally appear in the configured hint or goal text.
+ * Spoken nicknames the label does not contain are left to the Manager (full
+ * catalog in the prompt) — never hardcoded alias tables.
+ */
 internal fun resolveTargetPackage(
     configured: String,
     goal: String,
@@ -94,9 +100,6 @@ internal fun resolveTargetPackage(
             ?: apps.firstOrNull { it.first.isNotBlank() && configured.contains(it.first, true) }?.second
         if (direct != null) return direct
     }
-    // Catalog-only resolution: match installed labels / package ids from the goal or
-    // configured hint. No app-specific alias tables — the Manager sees the full catalog
-    // and chooses packages when the user uses a nickname the label does not contain.
     apps.firstOrNull { (label, _) -> label.isNotBlank() && goal.contains(label, true) }?.second?.let { return it }
     apps.firstOrNull { (_, packageName) ->
         packageName.isNotBlank() && goal.contains(packageName, true)
@@ -482,20 +485,21 @@ class AgentRuntime(
 
                     val cycle = ledger.cyclePeriod()
                     if (ledger.noProgressCount >= MAX_NO_PROGRESS || (cycle != null && ledger.noProgressCount >= 2)) {
-                        val recovery = recoveryPolicy.decide(
-                            RecoveryContext(
-                                expectedPackage = expectedRecoveryPackage(milestone),
-                                currentPackage = before.packageName,
-                                currentMilestoneId = milestone.id,
-                                currentMilestoneKind = milestone.kind,
-                                reason = if (cycle != null) RecoveryReason.ABAB_LOOP else RecoveryReason.SCREEN_UNCHANGED,
+                        // Model-first: stuck loops replan; do not abort the run here.
+                        val reason = if (cycle != null) "ABAB_LOOP" else "SCREEN_UNCHANGED"
+                        history += "STUCK_SIGNAL: $reason (noProgress=${ledger.noProgressCount}); requesting Actor replan"
+                        recoveryPolicy.noteSuccessfulDispatch()
+                        pendingReplanReason = reason
+                        ledger.record(
+                            StepTrace(
+                                milestone.id,
+                                before.observationId,
+                                "stuck_signal",
+                                before.observationId,
+                                TransitionJudgement.NO_PROGRESS,
+                                reason,
                             ),
                         )
-                        history += "RECOVERY: ${recovery.reason} -> ${recovery.action} (${recovery.detail})"
-                        val recovered = executeRecovery(recovery, step, before, lockedPackage, executionHistory, expectedRecoveryPackage(milestone), milestone, packagePolicy = packagePolicy, launchablePackages = launchablePackages, goal = goalContext)
-                        traceStore.event(runId, "RECOVERY", mapOf("reason" to recovery.reason.name, "action" to recovery.action.name, "result" to recovered.detail))
-                        if (!recovered.success) return@withTimeout finish(classifyOperationalFailure(recovered.detail), recovered.detail)
-                        if (recovery.action == RecoveryAction.REPLAN) pendingReplanReason = recovery.reason.name
                         continue
                     }
 
@@ -825,7 +829,16 @@ class AgentRuntime(
                     }
 
                     if (engineResult.status == RuntimeStepStatus.ABORTED) {
-                        return@withTimeout finish(classifyOperationalFailure(engineResult.reason), engineResult.reason)
+                        // Prefer replan over killing long multi-step tasks on soft faults.
+                        val fatal = engineResult.reason.contains("accessibility", true) ||
+                            engineResult.reason.contains("SAFETY", true) ||
+                            engineResult.reason.contains("side effect identity", true)
+                        if (fatal) {
+                            return@withTimeout finish(classifyOperationalFailure(engineResult.reason), engineResult.reason)
+                        }
+                        pendingReplanReason = engineResult.reason
+                        history += "SOFT_ABORT_REPLAN: ${engineResult.reason}"
+                        continue
                     }
                     if (engineResult.needsReplan) {
                         pendingReplanReason = engineResult.reason
@@ -1052,7 +1065,7 @@ class AgentRuntime(
                     }
                 }
 
-                finish(RuntimeOutcome.PERMANENT_PLAN_ERROR, "80-step tool budget exhausted without verified completion")
+                finish(RuntimeOutcome.PERMANENT_PLAN_ERROR, "tool-call budget exhausted without verified completion")
         }
         } catch (timeout: TimeoutCancellationException) {
             activeBindings?.rollbackRun(runId)
@@ -1241,11 +1254,16 @@ class AgentRuntime(
                 "screen settle condition satisfied",
             )
             is WaitResult.TimedOut -> {
-                onLog("Wait timeout: ${result.reason}")
+                // Feeds, video players, and live counters almost never freeze.
+                // Treating settle timeout as RESULT_UNKNOWN used to burn the
+                // recovery budget (reobserve/wait/replan × N steps) and abort
+                // long Bilibili-style tasks with "consecutive recovery budget exhausted".
+                // Accept the latest observation as settled; Critic + predicates judge progress.
+                onLog("Settle timeout accepted as confirmed: ${result.reason}")
                 RuntimeStepSettleResult(
-                    DispatchResultState.RESULT_UNKNOWN,
+                    DispatchResultState.CONFIRMED,
                     service.observe(),
-                    result.reason,
+                    "settle timed out on a dynamic screen; using latest observation",
                 )
             }
         }

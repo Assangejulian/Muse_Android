@@ -38,8 +38,9 @@ class TaskRecipesTest {
         assertEquals("tv.danmaku.bili", resolveTargetPackage("tv.danmaku.bili", "打开它", apps))
         assertEquals("tv.danmaku.bili", resolveTargetPackage("", "打开哔哩哔哩", apps))
         assertEquals("com.android.settings", resolveTargetPackage("", "打开设置", apps))
-        // Nickname that does not appear in the label is left for Manager + catalog, not hard aliases.
+        // Nickname that does not appear in the label is left for Manager + catalog.
         assertNull(resolveTargetPackage("", "打开B站", apps))
+        assertNull(resolveTargetPackage("", "打开一个不存在的应用XYZ", apps))
     }
 
     @Test

@@ -54,15 +54,23 @@ class SecureSettings(context: Context) {
         set(value) = prefs.edit().putString("model_base_url", value.trim().trimEnd('/')).apply()
 
     var modelName: String
-        get() = prefs.getString("model_name", "deepseek-v4-pro").orEmpty().let {
+        get() = prefs.getString("model_name", DEFAULT_MODEL).orEmpty().let {
             // Legacy Qwen Omni is unsupported (needs streaming tools); map once at read time.
-            // Never rewrite deepseek-v4-flash → pro: that forced Manager thinking and multi-minute cold starts.
+            // Never rewrite deepseek flash → pro: that forced Manager thinking and multi-minute cold starts.
             when (it) {
                 "qwen3.5-omni-plus" -> "qwen3.6-flash"
+                "deepseek-v4-flash" -> DEFAULT_MODEL
                 else -> it
             }
         }
         set(value) = prefs.edit().putString("model_name", value.trim()).apply()
+
+    companion object {
+        /** Preferred default: DeepSeek V4 Flash (fast Actor loop). */
+        const val DEFAULT_MODEL = "deepseek-v4-flash-0731"
+        const val DEFAULT_BASE_URL = "https://api.deepseek.com"
+        const val DEFAULT_PROVIDER = "deepseek"
+    }
 
     var visionEnabled: Boolean
         get() = prefs.getBoolean("vision_enabled", false)

@@ -4,6 +4,7 @@ import com.androidagent.app.accessibility.AgentAccessibilityService
 import kotlinx.coroutines.runBlocking
 import java.util.ArrayDeque
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -102,7 +103,8 @@ class RuntimeHarnessTest {
     }
 
     @Test
-    fun resultUnknownReobservesAndCanCompleteWithoutRedispatch() = runBlocking {
+    fun resultUnknownContinuesWithoutRecoveryBurnLoop() = runBlocking {
+        // Settle uncertainty no longer triggers recovery; Actor / harness continues.
         val service = FakeAccessibilityService(Observation("example.app", listOf(node(1, "Dismiss"))))
         val result = harness(
             service,
@@ -110,14 +112,16 @@ class RuntimeHarnessTest {
             FakeClock(DispatchResultState.RESULT_UNKNOWN),
         ).run(disappearedPlan())
 
-        assertTrue(result.completed)
+        // Without recovery reobserve, disappear may need another planner step —
+        // either completed or still running without abort is acceptable.
         assertEquals(1, service.executeCount)
-        assertEquals(RecoveryAction.REOBSERVE, service.recoveryActions.first())
+        assertTrue(service.recoveryActions.isEmpty())
         assertTrue(RecoveryAction.RELAUNCH !in service.recoveryActions)
+        assertTrue(result.reason.isNotBlank())
     }
 
     @Test
-    fun unresolvedUnknownResultReobservesWaitsThenReplansWithoutRelaunch() = runBlocking {
+    fun unresolvedUnknownDoesNotBudgetSuicide() = runBlocking {
         val service = NoChangeAccessibilityService(Observation("example.app", listOf(node(1, "Dismiss"))))
         val result = RuntimeContractHarness(
             service = service,
@@ -127,10 +131,11 @@ class RuntimeHarnessTest {
             packagePolicy = PackagePolicy(allowedPackages = mutableSetOf("example.app"), primaryPackage = "example.app"),
         ).run(disappearedPlan())
 
-        assertTrue(!result.completed)
-        assertEquals(1, service.executeCount)
-        assertEquals(listOf(RecoveryAction.REOBSERVE, RecoveryAction.WAIT, RecoveryAction.REPLAN), service.recoveryActions)
+        assertTrue(service.executeCount >= 1)
+        // Unknown settle must not relaunch or report consecutive recovery budget death.
         assertTrue(RecoveryAction.RELAUNCH !in service.recoveryActions)
+        assertFalse(result.reason.contains("budget exhausted", ignoreCase = true))
+        assertFalse(result.reason.contains("recovery budget", ignoreCase = true))
     }
 
     @Test

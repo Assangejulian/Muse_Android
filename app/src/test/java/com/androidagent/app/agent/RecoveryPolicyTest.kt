@@ -1,12 +1,14 @@
 package com.androidagent.app.agent
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RecoveryPolicyTest {
     @Test
     fun recoveryUsesStructuredReasonWithoutContentKeywords() {
-        val policy = RecoveryPolicy(maxRecoveries = 4)
+        val policy = RecoveryPolicy(maxHardRecoveries = 4)
         assertEquals(RecoveryAction.REPLAN, policy.decide(RecoveryReason.REPEATED_ACTION).action)
         assertEquals(RecoveryAction.REPLAN, policy.decide(RecoveryReason.ABAB_LOOP).action)
     }
@@ -25,8 +27,8 @@ class RecoveryPolicyTest {
     }
 
     @Test
-    fun missingTargetReobservesOnceThenReplansAndProgressResetsFailures() {
-        val policy = RecoveryPolicy(maxRecoveries = 6)
+    fun missingTargetReobservesThenReplansAndProgressResetsFailures() {
+        val policy = RecoveryPolicy(maxHardRecoveries = 6)
         val context = RecoveryContext(currentMilestoneId = "m1", reason = RecoveryReason.TARGET_MISSING)
         assertEquals(RecoveryAction.REOBSERVE, policy.decide(context).action)
         assertEquals(RecoveryAction.REPLAN, policy.decide(context).action)
@@ -36,7 +38,7 @@ class RecoveryPolicyTest {
 
     @Test
     fun missingPredicateBindingReplansImmediately() {
-        val policy = RecoveryPolicy(maxRecoveries = 6)
+        val policy = RecoveryPolicy(maxHardRecoveries = 6)
         val context = RecoveryContext(
             currentMilestoneId = "m1",
             failedAction = AgentAction.BindPredicate("m1-p1", selector = ElementSelector(text = "Target")),
@@ -47,40 +49,50 @@ class RecoveryPolicyTest {
     }
 
     @Test
-    fun networkRecoveryUsesIndependentBackoffBudget() {
-        val policy = RecoveryPolicy(maxActionRetries = 2, maxRecoveries = 4)
+    fun networkRecoveryReplansInsteadOfAborting() {
+        val policy = RecoveryPolicy(maxActionRetries = 2, maxHardRecoveries = 4)
         val context = RecoveryContext(reason = RecoveryReason.NETWORK_ERROR)
         assertEquals(RecoveryAction.WAIT, policy.decide(context).action)
-        assertEquals(RecoveryAction.WAIT, policy.decide(context).action)
-        assertEquals(RecoveryAction.ABORT, policy.decide(context).action)
-    }
-
-    @Test
-    fun progressResetsConsecutiveRecoveryBudgetButKeepsDiagnostics() {
-        val policy = RecoveryPolicy(maxRecoveries = 2)
-        val context = RecoveryContext(currentMilestoneId = "m1", reason = RecoveryReason.SCREEN_UNCHANGED)
-        policy.decide(context)
-        assertEquals(1, policy.consecutiveRecoveries)
-        assertEquals(1, policy.totalRecoveries)
-        policy.resetFailures("m1")
-        assertEquals(0, policy.consecutiveRecoveries)
-        assertEquals(1, policy.totalRecoveries)
-        assertEquals(RecoveryAction.REOBSERVE, policy.decide(context).action)
-    }
-
-    @Test
-    fun unknownResultReobservesWaitsThenReplans() {
-        val policy = RecoveryPolicy(maxRecoveries = 6)
-        val context = RecoveryContext(currentMilestoneId = "m1", reason = RecoveryReason.RESULT_UNKNOWN)
-
-        assertEquals(RecoveryAction.REOBSERVE, policy.decide(context).action)
         assertEquals(RecoveryAction.WAIT, policy.decide(context).action)
         assertEquals(RecoveryAction.REPLAN, policy.decide(context).action)
     }
 
     @Test
+    fun hardBudgetSoftCapsToReplanNeverAbort() {
+        val policy = RecoveryPolicy(maxHardRecoveries = 2)
+        val context = RecoveryContext(currentMilestoneId = "m1", reason = RecoveryReason.REPEATED_ACTION)
+        policy.decide(context)
+        policy.decide(context)
+        // Soft-cap reached: still REPLAN, never ABORT the agent run.
+        val capped = policy.decide(context)
+        assertEquals(RecoveryAction.REPLAN, capped.action)
+        assertFalse(capped.action == RecoveryAction.ABORT)
+        assertTrue(capped.detail.contains("soft-cap") || capped.detail.contains("replan") || capped.detail.contains("Actor"))
+    }
+
+    @Test
+    fun softRecoveriesDoNotBurnHardBudget() {
+        val policy = RecoveryPolicy(maxHardRecoveries = 2)
+        val context = RecoveryContext(currentMilestoneId = "m1", reason = RecoveryReason.SCREEN_UNCHANGED)
+        repeat(3) {
+            assertEquals(RecoveryAction.REOBSERVE, policy.decide(context).action)
+        }
+        assertEquals(0, policy.consecutiveRecoveries)
+        assertFalse(policy.budgetExhausted())
+        policy.noteSuccessfulDispatch()
+        assertEquals(0, policy.consecutiveSoftRecoveries)
+    }
+
+    @Test
+    fun unknownResultHandsControlToActorViaReplan() {
+        val policy = RecoveryPolicy(maxHardRecoveries = 6)
+        val context = RecoveryContext(currentMilestoneId = "m1", reason = RecoveryReason.RESULT_UNKNOWN)
+        assertEquals(RecoveryAction.REPLAN, policy.decide(context).action)
+    }
+
+    @Test
     fun appNotRespondingRequiresTwoRecoveryObservationsBeforeRelaunch() {
-        val policy = RecoveryPolicy(maxRecoveries = 6)
+        val policy = RecoveryPolicy(maxHardRecoveries = 6)
         val context = RecoveryContext(
             expectedPackage = "example.app",
             currentMilestoneId = "m1",
@@ -94,7 +106,7 @@ class RecoveryPolicyTest {
 
     @Test
     fun sensitiveSurfaceBacksThenRelaunchesThenReplans() {
-        val policy = RecoveryPolicy(maxRecoveries = 6)
+        val policy = RecoveryPolicy(maxHardRecoveries = 6)
         val context = RecoveryContext(
             expectedPackage = "example.app",
             currentMilestoneId = "m1",

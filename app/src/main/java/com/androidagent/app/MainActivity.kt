@@ -389,8 +389,8 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
                         val values = when (preset) {
                             "qwen" -> Triple("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.6-flash")
                             "mimo" -> Triple("mimo", "https://dashscope.aliyuncs.com/compatible-mode/v1", "mimo-v2.5-pro")
-                            "deepseek-flash" -> Triple("deepseek", "https://api.deepseek.com", "deepseek-v4-flash")
-                            else -> Triple("deepseek", "https://api.deepseek.com", "deepseek-v4-pro")
+                            "deepseek-pro" -> Triple("deepseek", SecureSettings.DEFAULT_BASE_URL, "deepseek-v4-pro")
+                            else -> Triple("deepseek", SecureSettings.DEFAULT_BASE_URL, SecureSettings.DEFAULT_MODEL)
                         }
                         settings.currentProvider = values.first
                         activeProvider = values.first
@@ -613,16 +613,16 @@ private fun DrawerContent(
                 modifier = Modifier.fillMaxWidth(),
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { onModelPreset("deepseek") }) {
-                    Text(
-                        "DS Pro",
-                        color = providerColor(activeProvider == "deepseek" && modelName.contains("pro", true)),
-                    )
-                }
                 TextButton(onClick = { onModelPreset("deepseek-flash") }) {
                     Text(
                         "DS Flash",
                         color = providerColor(activeProvider == "deepseek" && modelName.contains("flash", true)),
+                    )
+                }
+                TextButton(onClick = { onModelPreset("deepseek-pro") }) {
+                    Text(
+                        "DS Pro",
+                        color = providerColor(activeProvider == "deepseek" && modelName.contains("pro", true)),
                     )
                 }
                 TextButton(onClick = { onModelPreset("qwen") }) { Text("Qwen", color = providerColor(activeProvider == "qwen")) }
@@ -632,19 +632,19 @@ private fun DrawerContent(
                 value = modelName,
                 onValueChange = onModelName,
                 label = { Text("模型名称") },
-                placeholder = { Text("deepseek-v4-pro 或 deepseek-v4-flash") },
+                placeholder = { Text(SecureSettings.DEFAULT_MODEL) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
             if (activeProvider == "deepseek" && modelName.contains("flash", true)) {
                 Text(
-                    "Flash：关闭 thinking，开局更快；复杂长任务可切回 DS Pro",
+                    "默认 Flash：低延迟 Actor 循环，适合多步 GUI；thinking 关闭",
                     color = Color(0xFFB9C2BC),
                     style = MaterialTheme.typography.labelSmall,
                 )
             } else if (activeProvider == "deepseek" && modelName.contains("pro", true)) {
                 Text(
-                    "Pro：任务执行全程关闭 thinking，以紧凑计划快速开局",
+                    "Pro：Manager 可 thinking；Actor 仍关 thinking",
                     color = Color(0xFFB9C2BC),
                     style = MaterialTheme.typography.labelSmall,
                 )
@@ -792,9 +792,30 @@ private fun ChatWorkspace(
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
             if (conversation.messages.isEmpty()) {
-                Spacer(Modifier.height(60.dp))
+                Spacer(Modifier.height(40.dp))
                 Text("想让平板做什么？", style = MaterialTheme.typography.headlineMedium, color = Ink, fontWeight = FontWeight.Bold)
-                Text("直接说出应用名称和任务。模型自主决策；Shizuku 优先作为控制终端。/list 应用 · /shell 命令 · /run 强制执行。", color = Muted)
+                Text(
+                    "用自然语言描述任务。模型自主规划与操作；Shizuku 是首选控制终端，无障碍负责观察与兜底。",
+                    color = Muted,
+                )
+                Spacer(Modifier.height(16.dp))
+                ReadinessChip(
+                    ok = state.accessibilityConnected,
+                    okText = "无障碍已连接",
+                    badText = "请开启 Muse 无障碍",
+                )
+                ReadinessChip(
+                    ok = shizukuState.connected,
+                    okText = "Shizuku 控制终端就绪",
+                    badText = "建议连接 Shizuku（侧栏）",
+                )
+                ReadinessChip(
+                    ok = settings.apiKey.isNotBlank(),
+                    okText = "模型 Key 已配置 · ${settings.modelName}",
+                    badText = "请在侧栏配置 DeepSeek API Key",
+                )
+                Spacer(Modifier.height(8.dp))
+                Text("/list 应用目录 · /run 强制执行 · /shell 命令 · /trace 轨迹", color = Muted, style = MaterialTheme.typography.labelSmall)
             }
             conversation.messages.forEach { message -> MessageBubble(message) }
         }
@@ -999,6 +1020,26 @@ private fun RunStatusPanel(state: AgentUiState, onShowTrace: () -> Unit) {
             }
             HorizontalDivider(color = Line)
         }
+    }
+}
+
+@Composable
+private fun ReadinessChip(ok: Boolean, okText: String, badText: String) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .background(if (ok) Color(0xFFE8F5EE) else Color(0xFFFFF4E5), RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(if (ok) "●" else "○", color = if (ok) Accent else Color(0xFFC47B16))
+        Text(
+            if (ok) okText else badText,
+            color = if (ok) Ink else Color(0xFF6B4E16),
+            modifier = Modifier.padding(start = 8.dp),
+            style = MaterialTheme.typography.bodyMedium,
+        )
     }
 }
 
