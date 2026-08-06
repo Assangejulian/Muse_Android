@@ -1254,14 +1254,13 @@ class AgentRuntime(
                 "screen settle condition satisfied",
             )
             is WaitResult.TimedOut -> {
-                // Feeds, video players, and live counters almost never freeze.
-                // Treating settle timeout as RESULT_UNKNOWN used to burn the
-                // recovery budget (reobserve/wait/replan × N steps) and abort
-                // long Bilibili-style tasks with "consecutive recovery budget exhausted".
-                // Accept the latest observation as settled; Critic + predicates judge progress.
-                onLog("Settle timeout accepted as confirmed: ${result.reason}")
+                // Dynamic screens may never become visually still. Preserve the
+                // latest observation without claiming that dispatch was confirmed;
+                // the outer Actor loop can choose a different route without a
+                // nested recovery burn loop.
+                onLog("Settle timeout; continuing with an uncertain result: ${result.reason}")
                 RuntimeStepSettleResult(
-                    DispatchResultState.CONFIRMED,
+                    DispatchResultState.RESULT_UNKNOWN,
                     service.observe(),
                     "settle timed out on a dynamic screen; using latest observation",
                 )

@@ -190,7 +190,7 @@ class RunScopedSideEffectLedgerTest {
     }
 
     @Test
-    fun settleUnknownContinuesAsConfirmedWithoutRecovery() = runBlocking {
+    fun settleUnknownRecordsNoProgressWithoutRecovery() = runBlocking {
         val plan = TaskPlan(
             summary = "dismiss",
             targetAppHint = "primary.app",
@@ -205,6 +205,7 @@ class RunScopedSideEffectLedgerTest {
         val bindings = PredicateBindingStore()
         val sideEffects = RunScopedSideEffectLedger("run-1")
         val snapshots = PreDispatchEvidenceStore()
+        val ledger = RunLedger(plan)
         val driver = object : RuntimeStepDriver {
             override suspend fun executeDetailed(action: AgentAction, observation: Observation) = ActionExecutionResult(true, "accepted")
             override suspend fun settle(before: Observation, action: AgentAction) = RuntimeStepSettleResult(DispatchResultState.RESULT_UNKNOWN, before, "timeout")
@@ -219,7 +220,7 @@ class RunScopedSideEffectLedgerTest {
                 plan = plan,
                 milestone = plan.milestones.single(),
                 guard = ToolGuard(plan, PackagePolicy(mutableSetOf("primary.app"), "primary.app")),
-                ledger = RunLedger(plan),
+                ledger = ledger,
                 bindings = bindings,
                 recoveryPolicy = RecoveryPolicy(),
                 packagePolicy = PackagePolicy(mutableSetOf("primary.app"), "primary.app"),
@@ -234,6 +235,7 @@ class RunScopedSideEffectLedgerTest {
         )
         assertEquals(DispatchResultState.RESULT_UNKNOWN, result.dispatchResultState)
         assertEquals(RuntimeStepStatus.RESULT_UNKNOWN, result.status)
+        assertEquals(1, ledger.noProgressCount)
         assertTrue(result.recoveryDecisions.isEmpty())
         assertTrue(sideEffects.records().single().state == SideEffectResultState.UNKNOWN_SIDE_EFFECT)
     }

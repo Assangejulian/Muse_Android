@@ -458,7 +458,7 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
                     request.executionObservation.observationId,
                     TraceSanitizer.action(action),
                     rawSettled.observation.observationId,
-                    TransitionJudgement.PROGRESS,
+                    TransitionJudgement.NO_PROGRESS,
                     if (execution.partialMutation) {
                         "partial mutation; Actor continues without recovery burn"
                     } else {

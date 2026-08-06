@@ -1,12 +1,12 @@
 # Muse Android Agent 0.13.0
 
-A private, sideloaded Android 11–17 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, and independently checks the result. Workflow decomposition is **model-first**: the Actor owns routing; Shizuku is the preferred control terminal; there are **no app nickname tables or hard-coded workflows**. Recovery never budget-suicides the run — soft uncertainty continues to the Actor; only step budget / wall-clock stop long tasks. Default model: `deepseek-v4-flash-0731`.
+A private, sideloaded Android 11–17 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, and independently checks the result. Workflow decomposition is **model-first**: the Actor owns routing; Shizuku is the preferred control terminal; there are **no app nickname tables or hard-coded workflows**. Recovery never budget-suicides the run — soft uncertainty continues to the Actor; only step budget / wall-clock stop long tasks. Default model: `deepseek-v4-flash`.
 
 ## MVP capabilities
 
 - Accessibility node observation
 - DeepSeek, Qwen, or MiMo planning through OpenAI-compatible APIs
-- Default DeepSeek model preset: `deepseek-v4-flash-0731`; runtime thinking stays off for Flash (Manager may think on Pro only)
+- Default DeepSeek model preset: `deepseek-v4-flash`; runtime thinking stays off for Flash (Manager may think on Pro only)
 - Native `tools` / `tool_calls` planning for DeepSeek and Qwen, with a cached compatibility fallback
 - One strictly validated action per model response, with unknown action fields ignored
 - Target package allowlist

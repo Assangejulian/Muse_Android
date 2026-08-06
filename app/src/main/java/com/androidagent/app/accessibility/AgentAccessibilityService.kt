@@ -278,13 +278,14 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun launchApp(packageName: String): Boolean {
+        if (PrivilegedDeviceBackend.launchPackage(packageName)) return true
         val standardLaunch = runCatching {
             val intent = packageManager.getLaunchIntentForPackage(packageName) ?: return@runCatching false
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
             startActivity(intent)
             true
         }.getOrDefault(false)
-        return standardLaunch || PrivilegedDeviceBackend.launchPackage(packageName)
+        return standardLaunch
     }
 
     suspend fun recognizeScreenText(): String {
@@ -410,8 +411,6 @@ class AgentAccessibilityService : AccessibilityService() {
         val snapshot = resolvedTarget?.effectiveActionNode ?: return false
         val liveNode = findLiveNode(snapshot) ?: return false
         if (!liveNode.isVisibleToUser || !liveNode.isEnabled || !liveNode.isClickable) return false
-        if (liveNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-
         val bounds = Rect().also(liveNode::getBoundsInScreen)
         if (!NodeClickPolicy.isSafeBounds(
                 left = bounds.left,
@@ -420,8 +419,10 @@ class AgentAccessibilityService : AccessibilityService() {
                 bottom = bounds.bottom,
                 screenWidth = resources.displayMetrics.widthPixels,
                 screenHeight = resources.displayMetrics.heightPixels,
-            )) return false
-        return tap(bounds.exactCenterX(), bounds.exactCenterY())
+            )) return liveNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        return tap(bounds.exactCenterX(), bounds.exactCenterY()) {
+            liveNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
     }
 
     private fun findLiveNode(snapshot: UiNodeSnapshot): AccessibilityNodeInfo? {
@@ -494,18 +495,19 @@ class AgentAccessibilityService : AccessibilityService() {
         return false
     }
 
-    private suspend fun tap(x: Float, y: Float): Boolean {
+    private suspend fun tap(x: Float, y: Float, accessibilityClick: (() -> Boolean)? = null): Boolean {
         if (::overlayController.isInitialized) {
             withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(true) }
             delay(32)
         }
         return try {
+            if (PrivilegedDeviceBackend.tap(x.toInt(), y.toInt())) return true
+            if (accessibilityClick?.invoke() == true) return true
             val path = Path().apply { moveTo(x, y) }
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
                 .build()
-            val accepted = dispatchGestureAwait(gesture, GESTURE_TIMEOUT_MS)
-            accepted || PrivilegedDeviceBackend.tap(x.toInt(), y.toInt())
+            dispatchGestureAwait(gesture, GESTURE_TIMEOUT_MS)
         } finally {
             if (::overlayController.isInitialized) {
                 withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(false) }
@@ -614,6 +616,10 @@ class AgentAccessibilityService : AccessibilityService() {
             delay(80)
         }
 
+        if (PrivilegedDeviceBackend.keyEvent(KeyEvent.KEYCODE_ENTER)) {
+            return ActionExecutionResult(true, "submitted", "privileged Enter key accepted")
+        }
+
         val imeEnterAccepted = node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
         if (imeEnterAccepted) return ActionExecutionResult(true, "submitted", "IME action accepted")
 
@@ -636,11 +642,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 }
             }
         }
-        return if (PrivilegedDeviceBackend.keyEvent(KeyEvent.KEYCODE_ENTER)) {
-            ActionExecutionResult(true, "submitted", "privileged Enter key accepted")
-        } else {
-            ActionExecutionResult(false, "submit_failed", "no safe IME submit action was accepted")
-        }
+        return ActionExecutionResult(false, "submit_failed", "no safe IME submit action was accepted")
     }
 
     private fun findInputMethodWindow(): AccessibilityWindowInfo? = windows
@@ -705,22 +707,22 @@ class AgentAccessibilityService : AccessibilityService() {
             "right" -> listOf(width * .2f, height * .5f, width * .8f, height * .5f)
             else -> listOf(width * .5f, height * .75f, width * .5f, height * .3f)
         }
+        if (PrivilegedDeviceBackend.swipe(
+                startX.toInt(),
+                startY.toInt(),
+                endX.toInt(),
+                endY.toInt(),
+                450,
+            )) return true
         val path = Path().apply { moveTo(startX, startY); lineTo(endX, endY) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 450))
             .build()
-        val gestureAccepted = dispatchGestureAwait(gesture, SWIPE_TIMEOUT_MS)
-        return gestureAccepted || PrivilegedDeviceBackend.swipe(
-            startX.toInt(),
-            startY.toInt(),
-            endX.toInt(),
-            endY.toInt(),
-            450,
-        )
+        return dispatchGestureAwait(gesture, SWIPE_TIMEOUT_MS)
     }
 
     private suspend fun globalActionOrPrivileged(globalAction: Int, keyCode: Int): Boolean =
-        performGlobalAction(globalAction) || PrivilegedDeviceBackend.keyEvent(keyCode)
+        PrivilegedDeviceBackend.keyEvent(keyCode) || performGlobalAction(globalAction)
 
     companion object {
         private const val TAG = "AndroidAgent"

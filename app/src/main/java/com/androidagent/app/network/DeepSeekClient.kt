@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
@@ -25,6 +26,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resumeWithException
 
@@ -514,7 +516,7 @@ class DeepSeekClient(
                 .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
                 .build()
             try {
-                val response = client.newCall(request).awaitResponseBody()
+                val response = client.newCall(request).awaitResponseBodyWithinDeadline("planner-native")
                 val responseBody = response.body
                 if (!response.isSuccessful) {
                     val apiMessage = runCatching {
@@ -586,7 +588,10 @@ class DeepSeekClient(
         val serviceLabel = provider.ifBlank { "model-service" }
         var lastError = "$purpose ($serviceLabel) returned no usable content"
         val workingMessages = JSONArray(messages.toString())
-        repeat(MAX_ATTEMPTS) { attempt ->
+        // Manager owns schema validation retries at the plan level. Keeping its
+        // HTTP layer single-attempt avoids multiplicative 2 x 2 wait stacks.
+        val maxAttempts = if (purpose.startsWith("manager", ignoreCase = true)) 1 else MAX_ATTEMPTS
+        repeat(maxAttempts) { attempt ->
             val bodyJson = JSONObject()
                 .put("model", model)
                 .put("temperature", temperature)
@@ -601,7 +606,7 @@ class DeepSeekClient(
                 .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
                 .build()
             try {
-                val response = client.newCall(request).awaitResponseBody()
+                val response = client.newCall(request).awaitResponseBodyWithinDeadline(purpose)
                 val responseBody = response.body
                 if (!response.isSuccessful) {
                     val apiMessage = runCatching {
@@ -636,11 +641,21 @@ class DeepSeekClient(
                 }
             } catch (error: IOException) {
                 lastError = "$purpose ($serviceLabel) network error: ${error.message.orEmpty()}"
-                if (attempt + 1 >= MAX_ATTEMPTS) throw error
+                if (attempt + 1 >= maxAttempts) throw error
             }
-            if (attempt + 1 < MAX_ATTEMPTS) delay(ModelRetryPolicy.delayMillis(attempt))
+            if (attempt + 1 < maxAttempts) delay(ModelRetryPolicy.delayMillis(attempt))
         }
         error(lastError)
+    }
+
+    private suspend fun Call.awaitResponseBodyWithinDeadline(purpose: String): HttpResponse {
+        val deadlineMillis = if (purpose.equals("manager", ignoreCase = true)) {
+            MANAGER_RESPONSE_DEADLINE_MS
+        } else {
+            MODEL_RESPONSE_DEADLINE_MS
+        }
+        return withTimeoutOrNull(deadlineMillis) { awaitResponseBody() }
+            ?: throw SocketTimeoutException("$purpose model response exceeded ${deadlineMillis}ms")
     }
 
     private suspend fun Call.awaitResponseBody(): HttpResponse = suspendCancellableCoroutine { continuation ->
@@ -727,13 +742,15 @@ class DeepSeekClient(
     private companion object {
         val sharedClient: OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
+            .readTimeout(50, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
             .build()
         const val ROUTE_OUTPUT_TOKENS = 2_048
         const val PLAN_OUTPUT_TOKENS = 4_096
-        const val MAX_ATTEMPTS = 3
+        const val MAX_ATTEMPTS = 2
         const val MAX_MANAGER_PLAN_ATTEMPTS = 2
+        const val MODEL_RESPONSE_DEADLINE_MS = 35_000L
+        const val MANAGER_RESPONSE_DEADLINE_MS = 45_000L
     }
 }
 
