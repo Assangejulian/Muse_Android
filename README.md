@@ -1,4 +1,4 @@
-# Muse Android Agent 0.13.0
+# Muse Android Agent 0.13.1
 
 A private, sideloaded Android 11–17 automation agent. It observes the active UI through accessibility and optional vision, asks the selected model for one constrained action, validates that action locally, and independently checks the result. Workflow decomposition is **model-first**: the Actor owns routing; Shizuku is the preferred control terminal; there are **no app nickname tables or hard-coded workflows**. Recovery never budget-suicides the run — soft uncertainty continues to the Actor; only step budget / wall-clock stop long tasks. Default model: `deepseek-v4-flash`.
 
