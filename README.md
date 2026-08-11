@@ -1,4 +1,4 @@
-# Muse Android Agent 0.14.4
+# Muse Android Agent 0.14.5
 
 Muse is a private, sideloaded Android control terminal. The app combines an OpenAI-compatible model with an externally installed Shizuku service, so device operations run through Android's `shell` identity without Termux or an embedded ADB client.
 
@@ -74,4 +74,4 @@ Do not use Muse for payments, purchases, account-security changes, verification 
 .\gradlew.bat assembleDebug --no-daemon --console=plain
 ```
 
-The application ID remains `com.androidagent.app`; version `0.14.4` uses versionCode `46` for in-place updates.
+The application ID remains `com.androidagent.app`; version `0.14.5` uses versionCode `47` for in-place updates. Environment archive validation no longer calls package-aware storage APIs from the Shizuku shell process, avoiding package/UID identity mismatches during installation.

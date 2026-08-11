@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.SystemClock
 import android.system.Os
 import androidx.annotation.Keep
+import com.androidagent.app.BuildConfig
 import org.json.JSONObject
 import java.io.InputStream
 import java.util.concurrent.ExecutorService
@@ -18,11 +19,11 @@ import kotlin.system.exitProcess
  */
 class MusePrivilegedService() : IMusePrivilegedService.Stub() {
     private val streamExecutor: ExecutorService = Executors.newCachedThreadPool()
-    private var serviceContext: Context? = null
+    private var nativeLibraryDir: String? = null
 
     @Keep
     constructor(context: Context) : this() {
-        serviceContext = context.applicationContext
+        nativeLibraryDir = context.applicationInfo.nativeLibraryDir
     }
 
     override fun destroy() {
@@ -34,15 +35,18 @@ class MusePrivilegedService() : IMusePrivilegedService.Stub() {
 
     override fun installEnvironment(archivePath: String?, mirrorId: String?, toolIds: String?): String {
         val startedAt = SystemClock.elapsedRealtime()
-        val context = serviceContext ?: return resultJson(
+        val runtimeDirectory = nativeLibraryDir ?: return resultJson(
             exitCode = -1,
             stdout = "",
             stderr = "",
             timedOut = false,
             durationMillis = 0,
-            error = "Privileged service context is unavailable",
+            error = "Privileged runtime directory is unavailable",
         )
-        val result = PrivilegedEnvironmentInstaller(context).install(
+        val result = PrivilegedEnvironmentInstaller(
+            applicationId = BuildConfig.APPLICATION_ID,
+            nativeLibraryDir = runtimeDirectory,
+        ).install(
             archivePath = archivePath.orEmpty(),
             mirrorId = mirrorId.orEmpty(),
             toolIds = toolIds.orEmpty(),

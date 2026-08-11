@@ -1,6 +1,5 @@
 package com.androidagent.app.privileged
 
-import android.content.Context
 import android.os.StatFs
 import android.system.Os
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
@@ -32,7 +31,10 @@ internal data class EnvironmentInstallResult(
     val error: String? = null,
 )
 
-internal class PrivilegedEnvironmentInstaller(private val context: Context) {
+internal class PrivilegedEnvironmentInstaller(
+    private val applicationId: String,
+    private val nativeLibraryDir: String,
+) {
     fun install(archivePath: String, mirrorId: String, toolIds: String): EnvironmentInstallResult {
         val started = System.currentTimeMillis()
         val mirror = MIRRORS[mirrorId]
@@ -119,9 +121,10 @@ internal class PrivilegedEnvironmentInstaller(private val context: Context) {
     }
 
     private fun validateArchive(rawPath: String): File {
-        val allowedRoot = requireNotNull(context.getExternalFilesDir(null)).canonicalFile
         val archive = File(rawPath).canonicalFile
-        require(archive.toPath().startsWith(allowedRoot.toPath())) { "Archive is outside the app download directory" }
+        require(isAllowedEnvironmentArchivePath(archive.path, applicationId, ROOTFS_FILE)) {
+            "Archive is outside the app download directory"
+        }
         require(archive.isFile && archive.name == ROOTFS_FILE) { "Ubuntu Base archive is missing" }
         return archive
     }
@@ -203,7 +206,7 @@ internal class PrivilegedEnvironmentInstaller(private val context: Context) {
     }
 
     private fun installRuntime(base: Path) {
-        val sourceDirectory = Paths.get(context.applicationInfo.nativeLibraryDir)
+        val sourceDirectory = Paths.get(nativeLibraryDir)
         val targetDirectory = base.resolve("bin")
         Files.createDirectories(targetDirectory)
         RUNTIME_LIBRARIES.forEach { name ->
@@ -398,4 +401,19 @@ internal class PrivilegedEnvironmentInstaller(private val context: Context) {
             "libproroot-stub-loader.so",
         )
     }
+}
+
+internal fun isAllowedEnvironmentArchivePath(
+    canonicalPath: String,
+    applicationId: String,
+    expectedFileName: String,
+): Boolean {
+    if (applicationId.isBlank() || applicationId.any { it == '/' || it == '\\' }) return false
+    if (expectedFileName.isBlank() || expectedFileName.any { it == '/' || it == '\\' }) return false
+    val normalized = canonicalPath.replace('\\', '/').trimEnd('/')
+    val isExternalStorage = normalized.startsWith("/storage/") ||
+        normalized.startsWith("/mnt/") ||
+        normalized.startsWith("/sdcard/")
+    val expectedSuffix = "/Android/data/$applicationId/files/environment-installer/$expectedFileName"
+    return isExternalStorage && normalized.endsWith(expectedSuffix)
 }
