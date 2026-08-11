@@ -57,11 +57,54 @@ class SecureSettings(context: Context) {
         get() = normalizeModelName(prefs.getString("model_name", DEFAULT_MODEL).orEmpty())
         set(value) = prefs.edit().putString("model_name", value.trim()).apply()
 
+    var contextLength: Int
+        get() = prefs.getInt("context_length", DEFAULT_CONTEXT_LENGTH)
+            .coerceIn(MIN_CONTEXT_LENGTH, MAX_CONTEXT_LENGTH)
+        set(value) = prefs.edit()
+            .putInt("context_length", value.coerceIn(MIN_CONTEXT_LENGTH, MAX_CONTEXT_LENGTH))
+            .apply()
+
+    var maxOutputTokens: Int
+        get() = prefs.getInt("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
+            .coerceIn(MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS)
+        set(value) = prefs.edit()
+            .putInt("max_output_tokens", value.coerceIn(MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS))
+            .apply()
+
+    var terminalWorkingDirectory: String
+        get() = prefs.getString("terminal_working_directory", DEFAULT_WORKING_DIRECTORY).orEmpty()
+            .ifBlank { DEFAULT_WORKING_DIRECTORY }
+        set(value) = prefs.edit().putString("terminal_working_directory", value.trim()).apply()
+
+    var terminalPathPrefix: String
+        get() = prefs.getString("terminal_path_prefix", "").orEmpty()
+        set(value) = prefs.edit().putString("terminal_path_prefix", value.trim()).apply()
+
+    var enabledTerminalTools: Set<String>
+        get() = prefs.getStringSet("enabled_terminal_tools", DEFAULT_TERMINAL_TOOLS)?.toSet()
+            ?: DEFAULT_TERMINAL_TOOLS
+        set(value) = prefs.edit().putStringSet("enabled_terminal_tools", value).apply()
+
+    fun terminalToolCommand(toolId: String, defaultValue: String): String =
+        prefs.getString("terminal_tool_$toolId", defaultValue).orEmpty().ifBlank { defaultValue }
+
+    fun setTerminalToolCommand(toolId: String, value: String) {
+        prefs.edit().putString("terminal_tool_$toolId", value.trim()).apply()
+    }
+
     companion object {
         /** Preferred default: DeepSeek V4 Flash (fast Actor loop). */
         const val DEFAULT_MODEL = "deepseek-v4-flash"
         const val DEFAULT_BASE_URL = "https://api.deepseek.com"
         const val DEFAULT_PROVIDER = "deepseek"
+        const val DEFAULT_CONTEXT_LENGTH = 32_000
+        const val MIN_CONTEXT_LENGTH = 4_096
+        const val MAX_CONTEXT_LENGTH = 128_000
+        const val DEFAULT_MAX_OUTPUT_TOKENS = 4_096
+        const val MIN_OUTPUT_TOKENS = 256
+        const val MAX_OUTPUT_TOKENS = 16_384
+        const val DEFAULT_WORKING_DIRECTORY = "/sdcard"
+        val DEFAULT_TERMINAL_TOOLS = setOf("shell", "ssh", "python", "node", "java")
     }
 
     var visionEnabled: Boolean

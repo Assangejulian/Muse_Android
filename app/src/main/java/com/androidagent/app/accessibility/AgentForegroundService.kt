@@ -1,5 +1,6 @@
 package com.androidagent.app.accessibility
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
@@ -39,6 +40,7 @@ class AgentForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    @SuppressLint("MissingPermission", "NotificationPermission")
     override fun onCreate() {
         super.onCreate()
         createChannel()

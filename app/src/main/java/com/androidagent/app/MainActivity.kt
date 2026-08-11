@@ -1,60 +1,59 @@
 package com.androidagent.app
 
-import android.content.Intent
 import android.os.Bundle
-import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.CutCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.Switch
-import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -62,275 +61,130 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.androidagent.app.accessibility.AgentController
-import com.androidagent.app.agent.AgentTraceStore
-import com.androidagent.app.agent.AgentUiState
-import com.androidagent.app.agent.SensitiveOperationPolicy
-import com.androidagent.app.automation.ScheduleCommandParser
-import com.androidagent.app.automation.ScheduledTaskScheduler
-import com.androidagent.app.apps.AppCatalog
 import com.androidagent.app.chat.ChatMessage
 import com.androidagent.app.chat.ChatStore
 import com.androidagent.app.chat.Conversation
+import com.androidagent.app.data.PersonalizationStore
 import com.androidagent.app.data.SecureSettings
-import com.androidagent.app.network.DeepSeekClient
-import com.androidagent.app.network.InteractionDecision
+import com.androidagent.app.network.TerminalAgentClient
+import com.androidagent.app.network.TerminalCommandPolicy
+import com.androidagent.app.network.TERMINAL_TOOL_TURN_LIMIT
 import com.androidagent.app.privileged.PrivilegedBackendRouter
 import com.androidagent.app.privileged.ShizukuBridge
-import com.androidagent.app.update.GitHubUpdater
-import com.androidagent.app.update.UpdateInfo
-import com.androidagent.app.update.DownloadProgress
+import com.androidagent.app.terminal.TERMINAL_TOOLS
+import com.androidagent.app.terminal.TerminalEnvironmentConfig
+import com.androidagent.app.terminal.TerminalEnvironmentProbe
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
-private val Ink = Color(0xFF17211B)
-private val Canvas = Color(0xFFF7F7F2)
-private val Accent = Color(0xFF16724B)
-private val Muted = Color(0xFF68736C)
-private val Line = Color(0xFFDDE2DC)
-private val IntelVoid = Color(0xFF061210)
-private val IntelCyan = Color(0xFF5EF4CA)
-private val IntelBlue = Color(0xFF49DAFF)
-private val IntelGlow = Color(0xFF80DDA8)
+private val Void = Color(0xFF010408)
+private val SurfaceLow = Color(0xE8071018)
+private val SurfaceHigh = Color(0xF20A1720)
+private val NeonCyan = Color(0xFF00F0FF)
+private val NeonPink = Color(0xFFFF3DF2)
+private val AcidYellow = Color(0xFFF2FF59)
+private val TextPrimary = Color(0xFFE9FCFF)
+private val TextSecondary = Color(0xFF7E9BA6)
+private val Divider = Color(0xFF123746)
+private val Warning = Color(0xFFF2FF59)
+private val Error = Color(0xFFFF416C)
+private val CyberShape = CutCornerShape(topStart = 0.dp, topEnd = 12.dp, bottomEnd = 0.dp, bottomStart = 12.dp)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ShizukuBridge.initialize(applicationContext)
         setContent {
-            MaterialTheme {
-                var showSplash by remember { mutableStateOf(true) }
-                Box(Modifier.fillMaxSize()) {
-                    AgentChatApp(openAccessibilitySettings = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
-                    AnimatedVisibility(
-                        visible = showSplash,
-                        exit = fadeOut(animationSpec = tween(520)),
-                    ) {
-                        AppIntelligenceSplash(onFinished = { showSplash = false })
-                    }
-                }
+            MaterialTheme(
+                colorScheme = darkColorScheme(
+                    primary = NeonCyan,
+                    secondary = NeonPink,
+                    tertiary = AcidYellow,
+                    background = Void,
+                    surface = SurfaceLow,
+                    onBackground = TextPrimary,
+                    onSurface = TextPrimary,
+                ),
+            ) {
+                MuseApp()
             }
         }
     }
 }
 
-/**
- * Cold-start gate inspired by App Intelligence aesthetics: dark field, scanning
- * frame, cyan accent, then fade into the chat workspace.
- */
+private enum class MusePage(val label: String) {
+    Chat("CHAT://"),
+    Configure("CONFIG://"),
+    Personal("PERSONA://"),
+}
+
 @Composable
-private fun AppIntelligenceSplash(onFinished: () -> Unit) {
-    val transition = rememberInfiniteTransition(label = "intel-splash")
+private fun CyberBackdrop() {
+    val transition = rememberInfiniteTransition(label = "hud-scan")
     val scan by transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "scan",
+        animationSpec = infiniteRepeatable(tween(4_800, easing = LinearEasing), RepeatMode.Restart),
+        label = "scan-position",
     )
-    val pulse by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1100, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "pulse",
-    )
-    var contentAlpha by remember { mutableStateOf(0f) }
-    val alpha by animateFloatAsState(
-        targetValue = contentAlpha,
-        animationSpec = tween(600),
-        label = "splash-alpha",
-    )
-
-    LaunchedEffect(Unit) {
-        contentAlpha = 1f
-        delay(2_050)
-        contentAlpha = 0f
-        delay(420)
-        onFinished()
-    }
-
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(IntelVoid)
-            .alpha(alpha.coerceAtLeast(0.02f)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Canvas(Modifier.fillMaxSize().padding(28.dp)) {
-            val stroke = 3.5.dp.toPx()
-            val corner = 28.dp.toPx()
-            val inset = 6.dp.toPx()
-            val frame = androidx.compose.ui.geometry.Rect(
-                inset,
-                inset,
-                size.width - inset,
-                size.height - inset,
-            )
-            drawRoundRect(
-                brush = Brush.linearGradient(
-                    colors = listOf(
-                        IntelCyan.copy(alpha = 0.15f + 0.35f * pulse),
-                        IntelBlue.copy(alpha = 0.55f),
-                        IntelCyan.copy(alpha = 0.2f + 0.4f * pulse),
-                    ),
-                ),
-                topLeft = Offset(frame.left, frame.top),
-                size = Size(frame.width, frame.height),
-                cornerRadius = CornerRadius(corner, corner),
-                style = Stroke(width = stroke),
-            )
-            // Ambient outer glow
-            drawRoundRect(
-                color = IntelCyan.copy(alpha = 0.08f * pulse),
-                topLeft = Offset(frame.left - 8.dp.toPx(), frame.top - 8.dp.toPx()),
-                size = Size(frame.width + 16.dp.toPx(), frame.height + 16.dp.toPx()),
-                cornerRadius = CornerRadius(corner + 8.dp.toPx()),
-                style = Stroke(width = 10.dp.toPx()),
-            )
-            // Horizontal scan beam
-            val y = frame.top + frame.height * scan
-            drawLine(
-                brush = Brush.horizontalGradient(
-                    listOf(Color.Transparent, IntelCyan.copy(alpha = 0.85f), IntelBlue, Color.Transparent),
-                ),
-                start = Offset(frame.left + 12.dp.toPx(), y),
-                end = Offset(frame.right - 12.dp.toPx(), y),
-                strokeWidth = 2.5.dp.toPx(),
-                cap = StrokeCap.Round,
-            )
-            // Corner ticks
-            val tick = 22.dp.toPx()
-            val tickPaint = IntelGlow.copy(alpha = 0.9f)
-            fun cornerTick(x: Float, y0: Float, dx: Float, dy: Float) {
-                drawLine(tickPaint, Offset(x, y0), Offset(x + dx, y0), strokeWidth = stroke, cap = StrokeCap.Round)
-                drawLine(tickPaint, Offset(x, y0), Offset(x, y0 + dy), strokeWidth = stroke, cap = StrokeCap.Round)
-            }
-            cornerTick(frame.left, frame.top, tick, tick)
-            cornerTick(frame.right, frame.top, -tick, tick)
-            cornerTick(frame.left, frame.bottom, tick, -tick)
-            cornerTick(frame.right, frame.bottom, -tick, -tick)
+    Canvas(Modifier.fillMaxSize()) {
+        val grid = 42.dp.toPx()
+        var x = 0f
+        while (x <= size.width) {
+            drawLine(Divider.copy(alpha = 0.18f), Offset(x, 0f), Offset(x, size.height), 1f)
+            x += grid
         }
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.padding(horizontal = 40.dp),
-        ) {
-            Box(
-                Modifier
-                    .size(72.dp)
-                    .background(
-                        Brush.radialGradient(listOf(IntelCyan.copy(alpha = 0.35f * pulse), Color.Transparent)),
-                        RoundedCornerShape(36.dp),
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "M",
-                    color = IntelCyan,
-                    fontSize = 34.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-            Text(
-                "MUSE",
-                color = Color.White,
-                fontSize = 34.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 6.sp,
-            )
-            Text(
-                "App Intelligence",
-                color = IntelCyan.copy(alpha = 0.55f + 0.45f * pulse),
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = 2.sp,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "模型决策 · Shizuku 控制终端",
-                color = Color(0xFF9BB5AB),
-                fontSize = 13.sp,
-                textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(16.dp))
-            LinearProgressIndicator(
-                progress = { (scan * 0.85f + 0.12f).coerceIn(0f, 1f) },
-                modifier = Modifier
-                    .width(160.dp)
-                    .height(3.dp),
-                color = IntelCyan,
-                trackColor = Color(0xFF1A2E28),
-            )
+        var y = 0f
+        while (y <= size.height) {
+            drawLine(Divider.copy(alpha = 0.14f), Offset(0f, y), Offset(size.width, y), 1f)
+            y += grid
         }
+        val scanY = size.height * scan
+        drawRect(
+            brush = Brush.verticalGradient(
+                listOf(Color.Transparent, NeonCyan.copy(alpha = 0.08f), Color.Transparent),
+                startY = scanY - 32.dp.toPx(),
+                endY = scanY + 32.dp.toPx(),
+            ),
+            topLeft = Offset(0f, scanY - 32.dp.toPx()),
+            size = androidx.compose.ui.geometry.Size(size.width, 64.dp.toPx()),
+        )
+        drawLine(NeonCyan.copy(alpha = 0.22f), Offset(0f, scanY), Offset(size.width, scanY), 1.dp.toPx())
     }
 }
 
 @Composable
-private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
+private fun MuseApp() {
     val context = LocalContext.current
     val settings = remember { SecureSettings(context) }
+    val memoryStore = remember { PersonalizationStore(context) }
     val chatStore = remember { ChatStore(context) }
-    val catalog = remember { AppCatalog(context) }
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    val agentState by AgentController.state.collectAsState()
+    val shizukuState by ShizukuBridge.state.collectAsState()
+
+    var page by remember { mutableStateOf(MusePage.Chat) }
     var conversations by remember {
-        mutableStateOf(chatStore.load().ifEmpty { listOf(Conversation()) })
+        mutableStateOf(chatStore.load().ifEmpty { listOf(Conversation(title = "新对话")) })
     }
     var selectedId by remember { mutableStateOf(conversations.first().id) }
-    var apiKey by remember { mutableStateOf(settings.apiKey) }
-    var activeProvider by remember { mutableStateOf(settings.currentProvider) }
-    var defaultPackage by remember { mutableStateOf(settings.targetPackage) }
-    var githubRepository by remember { mutableStateOf(settings.githubRepository) }
-    var modelBaseUrl by remember { mutableStateOf(settings.modelBaseUrl) }
-    var modelName by remember { mutableStateOf(settings.modelName) }
-    var visionEnabled by remember { mutableStateOf(settings.visionEnabled) }
-    var visionApiKey by remember { mutableStateOf(settings.visionApiKey) }
-    var visionBaseUrl by remember { mutableStateOf(settings.visionBaseUrl) }
-    var visionModelName by remember { mutableStateOf(settings.visionModelName) }
-    var privilegedEnabled by remember { mutableStateOf(settings.privilegedBackendEnabled) }
-    var availableUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
-    var updateMessage by remember { mutableStateOf<String?>(null) }
-    var downloadProgress by remember { mutableStateOf<DownloadProgress?>(null) }
-    var updateJob by remember { mutableStateOf<Job?>(null) }
-    var nextRunAt by remember { mutableLongStateOf(settings.nextRunAt) }
-    val apps = remember { catalog.list() }
-    val updater = remember { GitHubUpdater(context) }
+    var input by remember { mutableStateOf("") }
+    var runStatus by remember { mutableStateOf("") }
+    var activeJob by remember { mutableStateOf<Job?>(null) }
+    var environmentStatus by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
-    LaunchedEffect(githubRepository) {
-        if (githubRepository.isNotBlank()) {
-            runCatching { updater.check(githubRepository) }
-                .onSuccess { availableUpdate = it }
-                .onFailure { updateMessage = "更新检查失败：${it.message}" }
-        }
-    }
-    LaunchedEffect(agentState.status) {
-        if (!agentState.running) nextRunAt = settings.nextRunAt
-    }
-    LaunchedEffect(privilegedEnabled) {
-        PrivilegedBackendRouter.configure(context, privilegedEnabled)
+    LaunchedEffect(Unit) {
+        PrivilegedBackendRouter.configure(context, true)
     }
 
     fun persist(updated: List<Conversation>) {
@@ -338,752 +192,663 @@ private fun AgentChatApp(openAccessibilitySettings: () -> Unit) {
         chatStore.save(updated)
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet(drawerContainerColor = Ink, modifier = Modifier.width(330.dp)) {
-                DrawerContent(
-                    conversations = conversations,
-                    selectedId = selectedId,
-                    apiKey = apiKey,
-                    activeProvider = activeProvider,
-                    defaultPackage = defaultPackage,
-                    githubRepository = githubRepository,
-                    modelBaseUrl = modelBaseUrl,
-                    modelName = modelName,
-                    visionEnabled = visionEnabled,
-                    visionApiKey = visionApiKey,
-                    visionBaseUrl = visionBaseUrl,
-                    visionModelName = visionModelName,
-                    privilegedEnabled = privilegedEnabled,
-                    appCount = apps.size,
-                    connected = AgentController.state.value.accessibilityConnected,
-                    nextRunAt = nextRunAt,
-                    onSelect = { selectedId = it; scope.launch { drawerState.close() } },
-                    onNew = {
-                        val chat = Conversation()
-                        persist(listOf(chat) + conversations)
-                        selectedId = chat.id
-                        scope.launch { drawerState.close() }
-                    },
-                    onPin = { id -> persist(conversations.map { if (it.id == id) it.copy(pinned = !it.pinned) else it }) },
-                    onDelete = { id ->
-                        val remaining = conversations.filterNot { it.id == id }.ifEmpty { listOf(Conversation()) }
-                        persist(remaining)
-                        if (selectedId == id) selectedId = remaining.first().id
-                    },
-                    onApiKey = { apiKey = it; settings.apiKey = it },
-                    onDefaultPackage = { defaultPackage = it; settings.targetPackage = it },
-                    onGithubRepository = { githubRepository = it; settings.githubRepository = it },
-                    onModelBaseUrl = { modelBaseUrl = it; settings.modelBaseUrl = it },
-                    onModelName = { modelName = it; settings.modelName = it },
-                    onVisionEnabled = { visionEnabled = it; settings.visionEnabled = it },
-                    onVisionApiKey = { visionApiKey = it; settings.visionApiKey = it },
-                    onVisionBaseUrl = { visionBaseUrl = it; settings.visionBaseUrl = it },
-                    onVisionModelName = { visionModelName = it; settings.visionModelName = it },
-                    onPrivilegedEnabled = {
-                        privilegedEnabled = it
-                        settings.privilegedBackendEnabled = it
-                    },
-                    onModelPreset = { preset ->
-                        val values = when (preset) {
-                            "qwen" -> Triple("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.6-flash")
-                            "mimo" -> Triple("mimo", "https://dashscope.aliyuncs.com/compatible-mode/v1", "mimo-v2.5-pro")
-                            "deepseek-pro" -> Triple("deepseek", SecureSettings.DEFAULT_BASE_URL, "deepseek-v4-pro")
-                            else -> Triple("deepseek", SecureSettings.DEFAULT_BASE_URL, SecureSettings.DEFAULT_MODEL)
-                        }
-                        settings.currentProvider = values.first
-                        activeProvider = values.first
-                        modelBaseUrl = values.second
-                        modelName = values.third
-                        settings.modelBaseUrl = values.second
-                        settings.modelName = values.third
-                        apiKey = settings.apiKey
-                    },
-                    onCancelSchedule = {
-                        ScheduledTaskScheduler.cancel(context)
-                        nextRunAt = 0L
-                    },
-                    openAccessibilitySettings = openAccessibilitySettings,
-                )
-            }
-        },
-    ) {
-        val conversation = conversations.firstOrNull { it.id == selectedId } ?: conversations.first()
-        ChatWorkspace(
-            conversation = conversation,
-            appCatalog = catalog,
-            settings = settings,
-            openDrawer = { scope.launch { drawerState.open() } },
-            updateConversation = { updated -> persist(conversations.map { if (it.id == updated.id) updated else it }) },
-        )
+    fun updateConversation(conversation: Conversation) {
+        persist(conversations.map { if (it.id == conversation.id) conversation else it })
     }
 
-    availableUpdate?.let { update ->
-        AlertDialog(
-            onDismissRequest = { if (downloadProgress == null) availableUpdate = null },
-            title = { Text("发现新版本 ${update.version}") },
-            text = {
-                val progress = downloadProgress
-                if (progress == null) {
-                    Text(update.notes.ifBlank { "可以从 GitHub Release 下载并安装新版本。" })
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("正在下载… ${progress.percent}%")
-                        LinearProgressIndicator(progress = { progress.fraction }, modifier = Modifier.fillMaxWidth())
-                        Text("${formatMegabytes(progress.downloadedBytes)} / ${if (progress.totalBytes > 0) formatMegabytes(progress.totalBytes) else "未知大小"}", color = Muted)
-                    }
-                }
-            },
-            confirmButton = {
-                if (downloadProgress == null) Button(onClick = {
-                    updateJob = scope.launch {
-                        updateMessage = "正在下载更新…"
-                        runCatching { updater.downloadAndInstall(update) { downloadProgress = it } }
-                            .onFailure { updateMessage = "更新失败：${it.message}" }
-                        downloadProgress = null
-                        availableUpdate = null
-                    }
-                }) { Text("下载并安装") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    if (downloadProgress != null) updateJob?.cancel()
-                    downloadProgress = null
-                    availableUpdate = null
-                }) { Text(if (downloadProgress == null) "稍后" else "取消下载") }
-            },
+    fun sendMessage() {
+        val text = input.trim()
+        if (text.isBlank() || activeJob?.isActive == true) return
+        val current = conversations.firstOrNull { it.id == selectedId } ?: return
+        val runConversationId = current.id
+        val withUser = current.copy(
+            title = if (current.messages.isEmpty()) text.take(24) else current.title,
+            updatedAt = System.currentTimeMillis(),
+            messages = current.messages + ChatMessage("user", text),
         )
-    }
-    updateMessage?.let { message ->
-        if (message.startsWith("更新失败") || message.startsWith("更新检查失败")) {
-            AlertDialog(
-                onDismissRequest = { updateMessage = null },
-                title = { Text("更新提示") },
-                text = { Text(message) },
-                confirmButton = { TextButton(onClick = { updateMessage = null }) { Text("知道了") } },
+        updateConversation(withUser)
+        input = ""
+        runStatus = "正在思考"
+        activeJob = scope.launch {
+            val reply = runCatching {
+                if (text.startsWith("/shell ", ignoreCase = true)) {
+                    require(shizukuState.connected) { "Shizuku 控制终端未连接" }
+                    runStatus = "执行直接命令"
+                    val command = TerminalCommandPolicy.validate(text.substringAfter(' ').trim()).getOrThrow()
+                    PrivilegedBackendRouter.execute(
+                        TerminalEnvironmentConfig.from(settings).wrap(command),
+                        30_000L,
+                    ).displayText()
+                } else {
+                    TerminalAgentClient().respond(
+                        apiKey = settings.apiKey,
+                        baseUrl = settings.modelBaseUrl,
+                        model = settings.modelName,
+                        provider = settings.currentProvider,
+                        input = text,
+                        history = current.messages.map { it.role to it.content },
+                        memoryMarkdown = memoryStore.loadMemory(),
+                        contextLength = settings.contextLength,
+                        maxOutputTokens = settings.maxOutputTokens,
+                        environment = TerminalEnvironmentConfig.from(settings),
+                        environmentStatus = environmentStatus,
+                        terminalAvailable = shizukuState.connected,
+                        execute = PrivilegedBackendRouter::execute,
+                        onProgress = { progress -> scope.launch { runStatus = progress } },
+                    )
+                }
+            }.getOrElse { error ->
+                if (error is kotlinx.coroutines.CancellationException) "已停止当前任务。"
+                else "执行失败：${error.message ?: error::class.java.simpleName}"
+            }
+            val latest = conversations.firstOrNull { it.id == runConversationId } ?: withUser
+            updateConversation(
+                latest.copy(
+                    updatedAt = System.currentTimeMillis(),
+                    messages = latest.messages + ChatMessage("assistant", reply),
+                ),
             )
+            runStatus = ""
+            activeJob = null
+        }
+    }
+
+    Scaffold(
+        containerColor = Void,
+        topBar = {
+            MuseHeader(
+                page = page,
+                connected = shizukuState.connected,
+                onNewChat = {
+                    val chat = Conversation(title = "新对话")
+                    persist(listOf(chat) + conversations)
+                    selectedId = chat.id
+                    page = MusePage.Chat
+                },
+                onStatusClick = { page = MusePage.Configure },
+            )
+        },
+        bottomBar = {
+            MuseNavigation(selected = page, onSelect = { page = it })
+        },
+    ) { padding ->
+        Box(
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .imePadding(),
+        ) {
+            CyberBackdrop()
+            when (page) {
+                MusePage.Chat -> ChatWorkspace(
+                    conversation = conversations.firstOrNull { it.id == selectedId } ?: conversations.first(),
+                    input = input,
+                    onInputChange = { input = it.take(12_000) },
+                    runStatus = runStatus,
+                    running = activeJob?.isActive == true,
+                    connected = shizukuState.connected,
+                    onSend = ::sendMessage,
+                    onStop = { activeJob?.cancel() },
+                )
+                MusePage.Configure -> ConfigureWorkspace(
+                    settings = settings,
+                    environmentStatus = environmentStatus,
+                    onEnvironmentStatus = { environmentStatus = it },
+                )
+                MusePage.Personal -> PersonalWorkspace(settings, memoryStore)
+            }
         }
     }
 }
 
 @Composable
-private fun DrawerContent(
-    conversations: List<Conversation>,
-    selectedId: String,
-    apiKey: String,
-    activeProvider: String,
-    defaultPackage: String,
-    githubRepository: String,
-    modelBaseUrl: String,
-    modelName: String,
-    visionEnabled: Boolean,
-    visionApiKey: String,
-    visionBaseUrl: String,
-    visionModelName: String,
-    privilegedEnabled: Boolean,
-    appCount: Int,
+private fun MuseHeader(
+    page: MusePage,
     connected: Boolean,
-    nextRunAt: Long,
-    onSelect: (String) -> Unit,
-    onNew: () -> Unit,
-    onPin: (String) -> Unit,
-    onDelete: (String) -> Unit,
-    onApiKey: (String) -> Unit,
-    onDefaultPackage: (String) -> Unit,
-    onGithubRepository: (String) -> Unit,
-    onModelBaseUrl: (String) -> Unit,
-    onModelName: (String) -> Unit,
-    onVisionEnabled: (Boolean) -> Unit,
-    onVisionApiKey: (String) -> Unit,
-    onVisionBaseUrl: (String) -> Unit,
-    onVisionModelName: (String) -> Unit,
-    onPrivilegedEnabled: (Boolean) -> Unit,
-    onModelPreset: (String) -> Unit,
-    onCancelSchedule: () -> Unit,
-    openAccessibilitySettings: () -> Unit,
+    onNewChat: () -> Unit,
+    onStatusClick: () -> Unit,
 ) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val privilegedState by ShizukuBridge.state.collectAsState()
-    var pendingDelete by remember { mutableStateOf<String?>(null) }
-    var privilegedFeedback by remember { mutableStateOf<String?>(null) }
-    Column(Modifier.fillMaxHeight().padding(18.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Column {
-                Text("MUSE v${BuildConfig.VERSION_NAME}", color = Color(0xFF80DDA8), fontWeight = FontWeight.Bold)
-                Text("私人平板助手", color = Color.White)
-            }
-            TextButton(onClick = onNew) { Text("＋ 新对话", color = Color.White) }
-        }
-        Spacer(Modifier.height(20.dp))
-        Text("历史对话", color = Color(0xFF98A59D), style = MaterialTheme.typography.labelMedium)
-        Column(
-            Modifier.weight(0.35f).verticalScroll(rememberScrollState()).padding(top = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(
+                Brush.horizontalGradient(
+                    listOf(SurfaceHigh, Color(0xF2060B12), SurfaceHigh),
+                ),
+            ),
+    ) {
+        Box(Modifier.fillMaxWidth().height(2.dp).background(Brush.horizontalGradient(listOf(NeonCyan, NeonPink))))
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            conversations.sortedWith(compareByDescending<Conversation> { it.pinned }.thenByDescending { it.updatedAt }).forEach { chat ->
-                Row(
-                    Modifier.fillMaxWidth()
-                        .background(if (chat.id == selectedId) Color(0xFF29362E) else Color.Transparent, RoundedCornerShape(10.dp))
-                        .clickable { onSelect(chat.id) }
-                        .padding(horizontal = 10.dp, vertical = 9.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(if (chat.pinned) "●" else "○", color = if (chat.pinned) Color(0xFF80DDA8) else Color(0xFF66746B))
-                    Text(chat.title, color = Color.White, modifier = Modifier.weight(1f).padding(horizontal = 8.dp), maxLines = 1)
-                    TextButton(onClick = { onPin(chat.id) }) {
-                        Text(if (chat.pinned) "取消置顶" else "置顶", color = Color(0xFF9BA79F), style = MaterialTheme.typography.labelSmall)
-                    }
-                    TextButton(onClick = { pendingDelete = chat.id }) {
-                        Text("删除", color = Color(0xFFDFA39F), style = MaterialTheme.typography.labelSmall)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    "MUSE//OS",
+                    color = NeonCyan,
+                    fontSize = 21.sp,
+                    fontWeight = FontWeight.Black,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 2.sp,
+                )
+                Text(
+                    "${page.label}  NEURAL TERMINAL · V${BuildConfig.VERSION_NAME}",
+                    color = NeonPink,
+                    fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 0.7.sp,
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                ConnectionPill(connected = connected, onClick = onStatusClick)
+                if (page == MusePage.Chat) {
+                    TextButton(onClick = onNewChat) {
+                        Text("＋NEW", color = NeonPink, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
                     }
                 }
             }
         }
-        HorizontalDivider(color = Color(0xFF354139))
-        Column(
-            Modifier.weight(0.65f).verticalScroll(rememberScrollState()).padding(top = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Text("Agent 配置", color = Color.White, fontWeight = FontWeight.Bold)
-            Text(if (connected) "● 无障碍已连接" else "○ 无障碍未连接", color = if (connected) Color(0xFF80DDA8) else Color(0xFFFFC36A))
-            Text("已发现 $appCount 个可启动应用", color = Color(0xFFB9C2BC), style = MaterialTheme.typography.bodySmall)
-            HorizontalDivider(color = Color(0xFF354139))
-            Text("Shizuku 控制终端", color = Color.White, fontWeight = FontWeight.SemiBold)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        when {
-                            privilegedState.connected -> "● 控制终端已连接"
-                            privilegedState.permissionGranted -> "○ 等待连接 Shizuku"
-                            privilegedState.binderAvailable -> "○ 等待 Shizuku 授权"
-                            else -> "○ 请安装并启动 Shizuku"
-                        },
-                        color = if (privilegedState.connected) Color(0xFF80DDA8) else Color(0xFFFFC36A),
-                    )
-                    Text(privilegedState.detail, color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
-                }
-                Switch(checked = privilegedEnabled, onCheckedChange = onPrivilegedEnabled)
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = {
-                        when {
-                            !privilegedState.binderAvailable -> {
-                                privilegedFeedback = if (ShizukuBridge.openManager(context)) "请启动 Shizuku 后返回 Muse" else "未安装 Shizuku"
-                            }
-                            !privilegedState.permissionGranted -> ShizukuBridge.requestPermission()
-                            else -> ShizukuBridge.connect()
-                        }
-                    },
-                    enabled = privilegedEnabled,
-                    modifier = Modifier.weight(1f),
-                ) { Text(if (privilegedState.permissionGranted) "连接 Shizuku" else "授权 Shizuku", color = Color.White) }
-                OutlinedButton(
-                    onClick = { scope.launch { privilegedFeedback = PrivilegedBackendRouter.testConnection().displayText() } },
-                    enabled = PrivilegedBackendRouter.isReady(),
-                    modifier = Modifier.weight(1f),
-                ) { Text("测试终端", color = Color.White) }
-            }
-            privilegedFeedback?.let {
-                Text(it.take(500), color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
-            }
-            Text(
-                "Shizuku 是任务首选控制终端；无障碍仅保留页面观察、结果验证与终端不可用时的操作兜底。",
-                color = Color(0xFFB9C2BC),
-                style = MaterialTheme.typography.labelSmall,
-            )
-            HorizontalDivider(color = Color(0xFF354139))
-            if (nextRunAt > System.currentTimeMillis()) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
-                        Text("计划任务已排程", color = Color(0xFF80DDA8))
-                        Text(formatScheduleTime(nextRunAt), color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
-                    }
-                    TextButton(onClick = onCancelSchedule) { Text("停用", color = Color(0xFFDFA39F)) }
-                }
-            }
-            OutlinedTextField(
-                value = apiKey,
-                onValueChange = onApiKey,
-                label = { Text("${providerName(activeProvider)} API Key") },
-                visualTransformation = PasswordVisualTransformation(),
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { onModelPreset("deepseek-flash") }) {
-                    Text(
-                        "DS Flash",
-                        color = providerColor(activeProvider == "deepseek" && modelName.contains("flash", true)),
-                    )
-                }
-                TextButton(onClick = { onModelPreset("deepseek-pro") }) {
-                    Text(
-                        "DS Pro",
-                        color = providerColor(activeProvider == "deepseek" && modelName.contains("pro", true)),
-                    )
-                }
-                TextButton(onClick = { onModelPreset("qwen") }) { Text("Qwen", color = providerColor(activeProvider == "qwen")) }
-                TextButton(onClick = { onModelPreset("mimo") }) { Text("MiMo", color = providerColor(activeProvider == "mimo")) }
-            }
-            OutlinedTextField(
-                value = modelName,
-                onValueChange = onModelName,
-                label = { Text("模型名称") },
-                placeholder = { Text(SecureSettings.DEFAULT_MODEL) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            if (activeProvider == "deepseek" && modelName.contains("flash", true)) {
-                Text(
-                    "默认 Flash：低延迟 Actor 循环，适合多步 GUI；thinking 关闭",
-                    color = Color(0xFFB9C2BC),
-                    style = MaterialTheme.typography.labelSmall,
-                )
-            } else if (activeProvider == "deepseek" && modelName.contains("pro", true)) {
-                Text(
-                    "Pro：Manager 可 thinking；Actor 仍关 thinking",
-                    color = Color(0xFFB9C2BC),
-                    style = MaterialTheme.typography.labelSmall,
-                )
-            }
-            OutlinedTextField(
-                value = modelBaseUrl,
-                onValueChange = onModelBaseUrl,
-                label = { Text("OpenAI-compatible Base URL") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("视觉规划", color = Color.White)
-                    Text("仅启用时发送当前屏幕截图", color = Color(0xFFB9C2BC), style = MaterialTheme.typography.labelSmall)
-                }
-                Switch(checked = visionEnabled, onCheckedChange = onVisionEnabled)
-            }
-            if (visionEnabled) {
-                OutlinedTextField(
-                    value = visionApiKey,
-                    onValueChange = onVisionApiKey,
-                    label = { Text("视觉模型 API Key") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = visionModelName,
-                    onValueChange = onVisionModelName,
-                    label = { Text("视觉模型名称") },
-                    placeholder = { Text("qwen3-vl-flash") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = visionBaseUrl,
-                    onValueChange = onVisionBaseUrl,
-                    label = { Text("视觉模型 Base URL") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            OutlinedTextField(
-                value = defaultPackage,
-                onValueChange = onDefaultPackage,
-                label = { Text("默认应用（可留空）") },
-                placeholder = { Text("留空时自动识别") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = githubRepository,
-                onValueChange = onGithubRepository,
-                label = { Text("更新仓库") },
-                placeholder = { Text("owner/AndroidAgent") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedButton(onClick = openAccessibilitySettings, modifier = Modifier.fillMaxWidth()) {
-                Text("打开无障碍设置", color = Color.White)
-            }
-        }
+        HorizontalDivider(color = NeonCyan.copy(alpha = 0.32f))
     }
-    pendingDelete?.let { id ->
-        AlertDialog(
-            onDismissRequest = { pendingDelete = null },
-            title = { Text("删除这段对话？") },
-            text = { Text("此操作会删除本机保存的对话记录。") },
-            confirmButton = {
-                TextButton(onClick = { onDelete(id); pendingDelete = null }) { Text("删除", color = Color(0xFF9B2C2C)) }
-            },
-            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
+}
+
+@Composable
+private fun ConnectionPill(connected: Boolean, onClick: () -> Unit) {
+    val transition = rememberInfiniteTransition(label = "connection-pulse")
+    val pulse by transition.animateFloat(
+        initialValue = 0.55f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1_200, easing = LinearEasing), RepeatMode.Reverse),
+        label = "connection-alpha",
+    )
+    Row(
+        Modifier
+            .border(1.dp, if (connected) NeonCyan else Warning, CyberShape)
+            .background(if (connected) NeonCyan.copy(alpha = 0.08f) else Warning.copy(alpha = 0.08f), CyberShape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Box(
+            Modifier
+                .size(7.dp)
+                .alpha(if (connected) pulse else 1f)
+                .background(if (connected) NeonCyan else Warning, CircleShape),
         )
+        Text(
+            if (connected) "LINK//ON" else "LINK//OFF",
+            color = if (connected) NeonCyan else Warning,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Black,
+            fontFamily = FontFamily.Monospace,
+        )
+    }
+}
+
+@Composable
+private fun MuseNavigation(selected: MusePage, onSelect: (MusePage) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(SurfaceLow)
+            .border(width = 1.dp, color = NeonCyan.copy(alpha = 0.18f))
+            .navigationBarsPadding()
+            .padding(horizontal = 8.dp, vertical = 7.dp),
+    ) {
+        MusePage.entries.forEach { page ->
+            val color by animateColorAsState(if (selected == page) NeonCyan else TextSecondary, label = "nav-color")
+            Column(
+                Modifier
+                    .weight(1f)
+                    .clickable { onSelect(page) }
+                    .padding(vertical = 7.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Box(
+                    Modifier
+                        .size(width = if (selected == page) 34.dp else 6.dp, height = 2.dp)
+                        .background(if (selected == page) Brush.horizontalGradient(listOf(NeonCyan, NeonPink)) else Brush.linearGradient(listOf(color, color))),
+                )
+                Text(
+                    page.label,
+                    color = color,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = if (selected == page) FontWeight.Black else FontWeight.Normal,
+                    letterSpacing = 0.5.sp,
+                )
+            }
+        }
     }
 }
 
 @Composable
 private fun ChatWorkspace(
     conversation: Conversation,
-    appCatalog: AppCatalog,
-    settings: SecureSettings,
-    openDrawer: () -> Unit,
-    updateConversation: (Conversation) -> Unit,
+    input: String,
+    onInputChange: (String) -> Unit,
+    runStatus: String,
+    running: Boolean,
+    connected: Boolean,
+    onSend: () -> Unit,
+    onStop: () -> Unit,
 ) {
-    val context = LocalContext.current
-    val state by AgentController.state.collectAsState()
-    val shizukuState by ShizukuBridge.state.collectAsState()
-    var input by remember(conversation.id) { mutableStateOf("") }
-    var sending by remember(conversation.id) { mutableStateOf(false) }
-    var showTrace by remember(conversation.id) { mutableStateOf(false) }
-    var ownsActiveRun by remember(conversation.id) { mutableStateOf(false) }
-    val interactionScope = rememberCoroutineScope()
-    val scrollState = rememberScrollState()
-
+    val listState = rememberLazyListState()
     LaunchedEffect(conversation.messages.size) {
-        scrollState.animateScrollTo(scrollState.maxValue)
+        if (conversation.messages.isNotEmpty()) listState.animateScrollToItem(conversation.messages.lastIndex)
     }
-    LaunchedEffect(state.running, state.outcome, conversation.id) {
-        if (ownsActiveRun && !state.running && state.outcome.isNotBlank()) {
-            val prefix = when {
-                state.status.substringBefore(':') == "Succeeded" -> "执行完成"
-                state.status == "Stopped" || state.status == "Cancelled" -> "执行已停止"
-                else -> "执行未完成"
-            }
-            updateConversation(
-                conversation.copy(
-                    updatedAt = System.currentTimeMillis(),
-                    messages = conversation.messages + ChatMessage("assistant", "$prefix：${state.outcome}"),
-                ),
-            )
-            ownsActiveRun = false
+    Column(Modifier.fillMaxSize()) {
+        AnimatedVisibility(runStatus.isNotBlank()) {
+            ExecutionStrip(runStatus)
         }
-    }
-
-    Column(Modifier.fillMaxSize().background(Canvas)) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = openDrawer) { Text("☰", color = Ink, style = MaterialTheme.typography.headlineSmall) }
-                Column {
-                    Text(conversation.title, color = Ink, fontWeight = FontWeight.Bold)
-                    Text(
-                        "${if (shizukuState.connected) "● Shizuku" else "○ Shizuku"} · ${translateStatus(state.status)}",
-                        color = if (shizukuState.connected) Accent else Muted,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-            AnimatedVisibility(state.running) {
-                Button(onClick = AgentController::stop, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9B2C2C))) { Text("停止") }
-            }
-        }
-        HorizontalDivider(color = Line)
-        RunStatusPanel(
-            state = state,
-            onShowTrace = { showTrace = true },
-        )
-
-        Column(
-            Modifier.weight(1f).fillMaxWidth().verticalScroll(scrollState).padding(horizontal = 22.dp, vertical = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            state = listState,
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             if (conversation.messages.isEmpty()) {
-                Spacer(Modifier.height(40.dp))
-                Text("想让平板做什么？", style = MaterialTheme.typography.headlineMedium, color = Ink, fontWeight = FontWeight.Bold)
-                Text(
-                    "用自然语言描述任务。模型自主规划与操作；Shizuku 是首选控制终端，无障碍负责观察与兜底。",
-                    color = Muted,
-                )
-                Spacer(Modifier.height(16.dp))
-                ReadinessChip(
-                    ok = state.accessibilityConnected,
-                    okText = "无障碍已连接",
-                    badText = "请开启 Muse 无障碍",
-                )
-                ReadinessChip(
-                    ok = shizukuState.connected,
-                    okText = "Shizuku 控制终端就绪",
-                    badText = "建议连接 Shizuku（侧栏）",
-                )
-                ReadinessChip(
-                    ok = settings.apiKey.isNotBlank(),
-                    okText = "模型 Key 已配置 · ${settings.modelName}",
-                    badText = "请在侧栏配置 DeepSeek API Key",
-                )
-                Spacer(Modifier.height(8.dp))
-                Text("/list 应用目录 · /run 强制执行 · /shell 命令 · /trace 轨迹", color = Muted, style = MaterialTheme.typography.labelSmall)
+                item {
+                    EmptyChat(connected)
+                }
             }
-            conversation.messages.forEach { message -> MessageBubble(message) }
+            items(conversation.messages) { message -> MessageBubble(message) }
         }
-
-        Column(Modifier.fillMaxWidth().background(Color.White).padding(14.dp)) {
+        HorizontalDivider(color = Divider)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(SurfaceLow)
+                .border(1.dp, NeonCyan.copy(alpha = 0.2f))
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
             OutlinedTextField(
                 value = input,
-                onValueChange = { input = it },
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("聊天或任务；/run 执行，/shell 命令，/trace 轨迹") },
-                minLines = 2,
+                onValueChange = onInputChange,
+                modifier = Modifier.weight(1f).heightIn(min = 54.dp, max = 140.dp),
+                placeholder = { Text("> REQUEST OR /shell …", color = TextSecondary, fontFamily = FontFamily.Monospace) },
+                label = { Text("COMMAND_INPUT", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp) },
                 maxLines = 5,
+                shape = CyberShape,
+                textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, color = TextPrimary),
             )
-            Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(if (sending) "正在理解你的意思…" else "自动判断聊天或操作 · 本地安全校验", color = Muted, style = MaterialTheme.typography.labelSmall)
-                Button(
-                    enabled = input.isNotBlank() && !state.running && !sending,
-                    onClick = {
-                        val text = input.trim()
-                        val title = if (conversation.messages.isEmpty()) text.removePrefix("/list").ifBlank { "应用列表" }.take(18) else conversation.title
-                        val withUser = conversation.copy(
-                            title = title,
-                            updatedAt = System.currentTimeMillis(),
-                            messages = conversation.messages + ChatMessage("user", text),
-                        )
-                        updateConversation(withUser)
-                        input = ""
-                        if (text.equals("/list", true)) {
-                            val response = "已发现 ${appCatalog.list().size} 个可启动应用：\n\n" + appCatalog.list().joinToString("\n") { "• ${it.label}  (${it.packageName})" }
-                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
-                        } else if (text.equals("/trace", true)) {
-                            val response = AgentTraceStore(context).latestRunSummary()
-                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
-                        } else if (text.equals("/shell", true) || text.startsWith("/shell ", ignoreCase = true)) {
-                            val command = text.substringAfter(' ', "").trim()
-                            when {
-                                command.isBlank() -> {
-                                    updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "用法：/shell <command>")))
-                                }
-                                !settings.privilegedBackendEnabled -> {
-                                    updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先安装并启动 Shizuku，然后在侧栏授权 Muse。")))
-                                }
-                                else -> {
-                                    sending = true
-                                    interactionScope.launch {
-                                        val response = PrivilegedBackendRouter.execute(command).displayText()
-                                        updateConversation(
-                                            withUser.copy(
-                                                updatedAt = System.currentTimeMillis(),
-                                                messages = withUser.messages + ChatMessage("assistant", response),
-                                            ),
-                                        )
-                                        sending = false
-                                    }
-                                }
-                            }
-                        } else if (ScheduleCommandParser.isCommand(text)) {
-                            val request = ScheduleCommandParser.parse(text)
-                            val goalRisk = request?.let { SensitiveOperationPolicy.matchGoal(it.goal) }
-                            val response = if (goalRisk != null) {
-                                "安全策略已拦截敏感调度目标：${goalRisk.term}"
-                            } else if (request == null) {
-                                "Usage: /schedule <triggerAtMillis>|<goal>"
-                            } else {
-                                ScheduledTaskScheduler.schedule(context, request)
-                                "Scheduled task ${request.taskId} for ${request.triggerAtMillis}"
-                            }
-                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
-                        } else if (text.startsWith("/run ", ignoreCase = true) &&
-                            SensitiveOperationPolicy.matchGoal(text.substringAfter(' ').trim()) != null
-                        ) {
-                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "安全策略已拦截敏感操作目标。请勿让 Muse 执行支付、验证码、密码或权限变更。")))
-                        } else if (settings.apiKey.isBlank()) {
-                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "请先在侧栏配置当前模型的 API Key。")))
-                        } else if (text.startsWith("/run ", ignoreCase = true)) {
-                            val directGoal = text.substringAfter(' ').trim()
-                            val response = if (!state.accessibilityConnected) {
-                                "这个请求需要操作设备，请先在侧栏开启 Muse 无障碍服务。"
-                            } else {
-                                settings.taskGoal = directGoal
-                                when (val started = AgentController.start(context, settings)) {
-                                    is com.androidagent.app.accessibility.AgentStartResult.Started -> {
-                                        ownsActiveRun = true
-                                        if (ShizukuBridge.isReady()) "任务已启动，优先使用 Shizuku 控制终端。" else "任务已启动；Shizuku 未连接，将使用无障碍兜底。"
-                                    }
-                                    is com.androidagent.app.accessibility.AgentStartResult.Busy ->
-                                        "已有任务正在运行（${started.activeRunId.take(8)}）"
-                                    is com.androidagent.app.accessibility.AgentStartResult.SafetyBlocked ->
-                                        "任务被本地安全策略拦截，未启动执行"
-                                    com.androidagent.app.accessibility.AgentStartResult.InvalidGoal ->
-                                        "任务目标或模型配置无效，未启动执行"
-                                    com.androidagent.app.accessibility.AgentStartResult.AccessibilityDisconnected ->
-                                        "无障碍服务未连接，未启动执行"
-                                }
-                            }
-                            updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", response)))
-                        } else {
-                            sending = true
-                            interactionScope.launch {
-                                val history = conversation.messages.map { it.role to it.content }
-                                val result = runCatching { DeepSeekClient().route(settings.apiKey, settings.modelBaseUrl, settings.modelName, text, appCatalog.compactList(), history, settings.currentProvider) }
-                                result.onSuccess { decision ->
-                                    val response = when (decision) {
-                                        is InteractionDecision.Chat -> decision.reply
-                                        is InteractionDecision.Action -> {
-                                            val goalRisk = SensitiveOperationPolicy.matchGoal(decision.goal)
-                                            if (goalRisk != null) {
-                                                "安全策略已拦截敏感操作目标：${goalRisk.term}"
-                                            } else if (!state.accessibilityConnected) {
-                                                "这个请求需要操作设备，请先在侧栏开启并连接 Muse 无障碍服务。"
-                                            } else {
-                                                // Preserve the immutable user wording; the router may summarize but must not mutate locked entities.
-                                                settings.taskGoal = if (text.startsWith("/run ", ignoreCase = true)) {
-                                                    text.substringAfter(' ').trim()
-                                                } else {
-                                                    text
-                                                }
-                                                when (val started = AgentController.start(context, settings)) {
-                                                    is com.androidagent.app.accessibility.AgentStartResult.Started -> {
-                                                        ownsActiveRun = true
-                                                        decision.reply
-                                                    }
-                                                    is com.androidagent.app.accessibility.AgentStartResult.Busy ->
-                                                        "已有任务正在运行（${started.activeRunId.take(8)}）"
-                                                    is com.androidagent.app.accessibility.AgentStartResult.SafetyBlocked ->
-                                                        "任务被本地安全策略拦截，未启动执行"
-                                                    com.androidagent.app.accessibility.AgentStartResult.InvalidGoal ->
-                                                        "任务目标或模型配置无效，未启动执行"
-                                                    com.androidagent.app.accessibility.AgentStartResult.AccessibilityDisconnected ->
-                                                        "无障碍服务未连接，未启动执行"
-                                                }
-                                            }
-                                        }
-                                    }
-                                    updateConversation(withUser.copy(
-                                        updatedAt = System.currentTimeMillis(),
-                                        messages = withUser.messages + ChatMessage("assistant", response),
-                                    ))
-                                }.onFailure { error ->
-                                    updateConversation(withUser.copy(messages = withUser.messages + ChatMessage("assistant", "我暂时没理解成功：${error.message}")))
-                                }
-                                sending = false
-                            }
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Accent),
-                ) { Text("发送") }
-            }
-        }
-    }
-
-    if (showTrace) {
-        AlertDialog(
-            onDismissRequest = { showTrace = false },
-            title = { Text("最近一次运行轨迹") },
-            text = {
-                Text(
-                    AgentTraceStore(context).latestRunSummary(),
-                    modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
-                )
-            },
-            confirmButton = { TextButton(onClick = { showTrace = false }) { Text("关闭") } },
-        )
-    }
-}
-
-@Composable
-private fun RunStatusPanel(state: AgentUiState, onShowTrace: () -> Unit) {
-    AnimatedVisibility(state.running || state.outcome.isNotBlank()) {
-        Column(Modifier.fillMaxWidth()) {
-            Column(
-                Modifier.fillMaxWidth().background(Color(0xFFEEF3EE)).padding(horizontal = 22.dp, vertical = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(7.dp),
+            Button(
+                onClick = if (running) onStop else onSend,
+                modifier = Modifier.height(54.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = if (running) Error else NeonCyan),
+                shape = CyberShape,
             ) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        if (state.running) "运行中 · ${translateStatus(state.status)}" else translateStatus(state.status),
-                        color = if (state.status == "Failed") Color(0xFF9B2C2C) else Accent,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Text("第 ${state.step.coerceAtLeast(0)} / ${state.maxSteps} 步", color = Muted, style = MaterialTheme.typography.labelMedium)
-                }
-                if (state.running) {
-                    val progress by animateFloatAsState(
-                        targetValue = (state.step.toFloat() / state.maxSteps.coerceAtLeast(1)).coerceIn(0f, 1f),
-                        label = "run-progress",
-                    )
-                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(), color = Accent)
-                }
-                if (state.goal.isNotBlank()) Text(state.goal, color = Ink, fontWeight = FontWeight.SemiBold, maxLines = 2)
-                state.progressSummaries.takeLast(2).forEach { summary ->
-                    Text(summary, color = Accent, style = MaterialTheme.typography.bodySmall, maxLines = 1)
-                }
-                if (!state.running && state.outcome.isNotBlank()) {
-                    Text(state.outcome, color = if (state.status.substringBefore(':') == "Succeeded") Accent else Color(0xFF9B2C2C), maxLines = 3)
-                }
-                TextButton(onClick = onShowTrace, modifier = Modifier.align(Alignment.End)) { Text("查看完整轨迹") }
+                Text(if (running) "ABORT" else "SEND", color = Void, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
             }
-            HorizontalDivider(color = Line)
         }
     }
 }
 
 @Composable
-private fun ReadinessChip(ok: Boolean, okText: String, badText: String) {
-    Row(
+private fun ExecutionStrip(runStatus: String) {
+    val step = runStatus.substringBefore('/').trim().toIntOrNull()?.coerceIn(0, TERMINAL_TOOL_TURN_LIMIT) ?: 0
+    Column(
         Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .background(if (ok) Color(0xFFE8F5EE) else Color(0xFFFFF4E5), RoundedCornerShape(12.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .background(NeonCyan.copy(alpha = 0.07f))
+            .border(1.dp, NeonCyan.copy(alpha = 0.35f))
+            .padding(horizontal = 18.dp, vertical = 9.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
-        Text(if (ok) "●" else "○", color = if (ok) Accent else Color(0xFFC47B16))
-        Text(
-            if (ok) okText else badText,
-            color = if (ok) Ink else Color(0xFF6B4E16),
-            modifier = Modifier.padding(start = 8.dp),
-            style = MaterialTheme.typography.bodyMedium,
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp, color = NeonPink)
+                Text("EXEC_CHAIN", color = NeonPink, fontSize = 10.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+            }
+            Text(
+                step.toString().padStart(2, '0') + " / $TERMINAL_TOOL_TURN_LIMIT",
+                color = AcidYellow,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Black,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        LinearProgressIndicator(
+            progress = { step.toFloat() / TERMINAL_TOOL_TURN_LIMIT },
+            modifier = Modifier.fillMaxWidth().height(2.dp),
+            color = NeonCyan,
+            trackColor = Divider,
         )
+        Text(runStatus.substringAfter('·', runStatus).trim(), color = TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun EmptyChat(connected: Boolean) {
+    Column(
+        Modifier.fillMaxWidth().padding(top = 54.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Text("NEURAL CONTROL", color = NeonCyan, fontSize = 29.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace, letterSpacing = 1.sp)
+        Text("ANDROID // SHIZUKU // MODEL", color = NeonPink, fontSize = 11.sp, fontFamily = FontFamily.Monospace, letterSpacing = 1.sp)
+        Text(
+            if (connected) "Shizuku 已连接。Muse 可以对话，也可以在安全边界内调用终端操作手机。"
+            else "先到 Configure 连接 Shizuku。普通对话仍可使用，终端操作会等待连接。",
+            color = TextSecondary,
+            lineHeight = 22.sp,
+        )
+        Text("> QUICK_TEST: /shell id", color = AcidYellow, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text("MAX_CHAIN: $TERMINAL_TOOL_TURN_LIMIT", color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
     }
 }
 
 @Composable
 private fun MessageBubble(message: ChatMessage) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (message.role == "user") Arrangement.End else Arrangement.Start) {
+    val user = message.role == "user"
+    val accent = if (user) NeonPink else NeonCyan
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
         Column(
-            Modifier.fillMaxWidth(if (message.role == "user") .82f else .92f)
-                .background(if (message.role == "user") Ink else Color(0xFFE9EEE9), RoundedCornerShape(16.dp))
-                .padding(14.dp),
+            Modifier
+                .fillMaxWidth(if (user) 0.84f else 0.94f)
+                .border(1.dp, accent.copy(alpha = 0.72f), CyberShape)
+                .background(accent.copy(alpha = if (user) 0.1f else 0.06f), CyberShape)
+                .padding(horizontal = 15.dp, vertical = 13.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
         ) {
-            Text(if (message.role == "user") "你" else "Agent", color = if (message.role == "user") Color(0xFF92DDB2) else Accent, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
-            Spacer(Modifier.height(5.dp))
-            Text(message.content, color = if (message.role == "user") Color.White else Ink)
+            Text(
+                if (user) "[ OPERATOR ]" else "[ MUSE_CORE ]",
+                color = accent,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Black,
+                fontFamily = FontFamily.Monospace,
+                letterSpacing = 1.sp,
+            )
+            Text(message.content, color = TextPrimary, lineHeight = 21.sp)
         }
     }
 }
 
-private fun translateStatus(status: String): String = when {
-    status == "Idle" -> "空闲"
-    status == "Preparing" -> "准备中"
-    status == "Compiling" -> "拆解任务"
-    status == "Observing" -> "读取页面"
-    status == "Planning" -> "正在规划"
-    status == "Acting" -> "正在操作"
-    status == "Critiquing" -> "检查结果"
-    status == "Verifying" -> "最终验收"
-    status == "Replanning" -> "更换策略"
-    status == "Stopped" -> "已停止"
-    status == "Cancelled" -> "已取消"
-    status == "Failed" -> "执行失败"
-    status.substringBefore(':') == "Succeeded" -> "已完成"
-    else -> status
+@Composable
+private fun ConfigureWorkspace(
+    settings: SecureSettings,
+    environmentStatus: Map<String, String>,
+    onEnvironmentStatus: (Map<String, String>) -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val state by ShizukuBridge.state.collectAsState()
+    var provider by remember { mutableStateOf(settings.currentProvider) }
+    var apiKey by remember { mutableStateOf(settings.apiKey) }
+    var baseUrl by remember { mutableStateOf(settings.modelBaseUrl) }
+    var model by remember { mutableStateOf(settings.modelName) }
+    var workingDirectory by remember { mutableStateOf(settings.terminalWorkingDirectory) }
+    var pathPrefix by remember { mutableStateOf(settings.terminalPathPrefix) }
+    var enabledTools by remember { mutableStateOf(settings.enabledTerminalTools) }
+    var toolCommands by remember {
+        mutableStateOf(TERMINAL_TOOLS.associate { it.id to settings.terminalToolCommand(it.id, it.defaultCommand) })
+    }
+    var feedback by remember { mutableStateOf("") }
+    var probing by remember { mutableStateOf(false) }
+
+    fun saveConfiguration() {
+        settings.currentProvider = provider
+        settings.apiKey = apiKey
+        settings.modelBaseUrl = baseUrl
+        settings.modelName = model
+        settings.terminalWorkingDirectory = workingDirectory
+        settings.terminalPathPrefix = pathPrefix
+        settings.enabledTerminalTools = enabledTools
+        TERMINAL_TOOLS.forEach { tool -> settings.setTerminalToolCommand(tool.id, toolCommands[tool.id].orEmpty()) }
+        PrivilegedBackendRouter.configure(context, true)
+        feedback = "配置已保存"
+    }
+
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
+        SettingsSection("SHIZUKU", "唯一的高权限执行通道") {
+            StatusLine("Binder", state.binderAvailable)
+            StatusLine("App permission", state.permissionGranted)
+            StatusLine("Control terminal", state.connected)
+            Text(state.detail, color = TextSecondary, fontSize = 12.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = {
+                        when {
+                            !state.binderAvailable -> {
+                                feedback = if (ShizukuBridge.openManager(context)) "请启动 Shizuku 后返回" else "未安装 Shizuku"
+                            }
+                            !state.permissionGranted -> ShizukuBridge.requestPermission()
+                            !state.connected -> ShizukuBridge.connect()
+                            else -> scope.launch { feedback = ShizukuBridge.testConnection().displayText() }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = NeonCyan),
+                    shape = CyberShape,
+                ) {
+                    Text(
+                        when {
+                            !state.binderAvailable -> "打开 Shizuku"
+                            !state.permissionGranted -> "授权"
+                            !state.connected -> "连接"
+                            else -> "测试连接"
+                        },
+                        color = Void,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+        }
+
+        SettingsSection("MODEL", "OpenAI-compatible Chat Completions") {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("deepseek" to "DeepSeek", "qwen" to "Qwen", "mimo" to "MiMo").forEach { (id, label) ->
+                    OutlinedButton(
+                        onClick = {
+                            provider = id
+                            when (id) {
+                                "qwen" -> { baseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1"; model = "qwen3.6-flash" }
+                                "mimo" -> { baseUrl = "https://api.xiaomimimo.com/v1"; model = "mimo-v2-flash" }
+                                else -> { baseUrl = SecureSettings.DEFAULT_BASE_URL; model = SecureSettings.DEFAULT_MODEL }
+                            }
+                            apiKey = settings.apiKeyFor(id)
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = if (provider == id) NeonCyan else TextSecondary),
+                        shape = CyberShape,
+                    ) { Text(label) }
+                }
+            }
+            OutlinedTextField(
+                value = apiKey,
+                onValueChange = { apiKey = it },
+                label = { Text("API Key") },
+                modifier = Modifier.fillMaxWidth(),
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                shape = CyberShape,
+            )
+            OutlinedTextField(value = baseUrl, onValueChange = { baseUrl = it }, label = { Text("Base URL") }, modifier = Modifier.fillMaxWidth(), singleLine = true, shape = CyberShape)
+            OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("Model") }, modifier = Modifier.fillMaxWidth(), singleLine = true, shape = CyberShape)
+        }
+
+        SettingsSection("INITIAL ENVIRONMENT", "为每次 Shizuku shell 设置工作目录与 PATH") {
+            OutlinedTextField(
+                value = workingDirectory,
+                onValueChange = { workingDirectory = it },
+                label = { Text("Working directory") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                shape = CyberShape,
+            )
+            OutlinedTextField(
+                value = pathPrefix,
+                onValueChange = { pathPrefix = it },
+                label = { Text("PATH prefix (optional)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                shape = CyberShape,
+            )
+            TERMINAL_TOOLS.forEach { tool ->
+                ToolConfigurationRow(
+                    label = tool.label,
+                    enabled = tool.id in enabledTools,
+                    command = toolCommands[tool.id].orEmpty(),
+                    detectedPath = environmentStatus[tool.id],
+                    onEnabledChange = { enabled ->
+                        enabledTools = if (enabled) enabledTools + tool.id else enabledTools - tool.id
+                    },
+                    onCommandChange = { value -> toolCommands = toolCommands + (tool.id to value) },
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    enabled = state.connected && !probing,
+                    shape = CyberShape,
+                    onClick = {
+                        saveConfiguration()
+                        probing = true
+                        scope.launch {
+                            onEnvironmentStatus(TerminalEnvironmentProbe.probe(TerminalEnvironmentConfig.from(settings)))
+                            feedback = "环境探测完成"
+                            probing = false
+                        }
+                    },
+                ) { Text(if (probing) "探测中…" else "探测环境") }
+                Button(onClick = ::saveConfiguration, colors = ButtonDefaults.buttonColors(containerColor = NeonCyan), shape = CyberShape) {
+                    Text("保存配置", color = Void, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        if (feedback.isNotBlank()) {
+            Text(feedback, color = if (feedback.startsWith("未") || feedback.contains("失败")) Error else NeonCyan, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+        }
+        Spacer(Modifier.height(18.dp))
+    }
 }
 
-private fun formatMegabytes(bytes: Long): String = "%.1f MB".format(bytes / 1024.0 / 1024.0)
+@Composable
+private fun ToolConfigurationRow(
+    label: String,
+    enabled: Boolean,
+    command: String,
+    detectedPath: String?,
+    onEnabledChange: (Boolean) -> Unit,
+    onCommandChange: (String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(label, color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                Text(detectedPath ?: "未探测", color = if (detectedPath == null) TextSecondary else NeonCyan, fontSize = 11.sp, maxLines = 1, fontFamily = FontFamily.Monospace)
+            }
+            Switch(checked = enabled, onCheckedChange = onEnabledChange)
+        }
+        AnimatedVisibility(enabled) {
+            OutlinedTextField(
+                value = command,
+                onValueChange = onCommandChange,
+                label = { Text("Executable") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                shape = CyberShape,
+                textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+            )
+        }
+        HorizontalDivider(color = Divider)
+    }
+}
 
-private fun formatScheduleTime(timestamp: Long): String =
-    "下次执行：${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(timestamp))}"
+@Composable
+private fun PersonalWorkspace(settings: SecureSettings, memoryStore: PersonalizationStore) {
+    var memory by remember { mutableStateOf(memoryStore.loadMemory()) }
+    var contextLength by remember { mutableStateOf(settings.contextLength.toString()) }
+    var maxTokens by remember { mutableStateOf(settings.maxOutputTokens.toString()) }
+    var feedback by remember { mutableStateOf("") }
 
-private fun providerColor(selected: Boolean): Color = if (selected) Color(0xFF80DDA8) else Color.White
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
+        SettingsSection("USER MEMORY", "Markdown 会作为稳定偏好注入每次新请求") {
+            OutlinedTextField(
+                value = memory,
+                onValueChange = { memory = it.take(PersonalizationStore.MAX_MEMORY_CHARS) },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 260.dp),
+                label = { Text("memory.md") },
+                shape = CyberShape,
+                textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+            )
+            Text(memoryStore.absolutePath(), color = TextSecondary, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+        }
+        SettingsSection("MODEL BUDGET", "上下文在本地裁剪；输出限制会发送给模型服务") {
+            OutlinedTextField(
+                value = contextLength,
+                onValueChange = { contextLength = it.filter(Char::isDigit).take(6) },
+                label = { Text("Context length · 4,096–128,000") },
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true,
+                shape = CyberShape,
+            )
+            OutlinedTextField(
+                value = maxTokens,
+                onValueChange = { maxTokens = it.filter(Char::isDigit).take(5) },
+                label = { Text("Max output tokens · 256–16,384") },
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true,
+                shape = CyberShape,
+            )
+            Button(
+                onClick = {
+                    memoryStore.saveMemory(memory)
+                    settings.contextLength = contextLength.toIntOrNull() ?: SecureSettings.DEFAULT_CONTEXT_LENGTH
+                    settings.maxOutputTokens = maxTokens.toIntOrNull() ?: SecureSettings.DEFAULT_MAX_OUTPUT_TOKENS
+                    contextLength = settings.contextLength.toString()
+                    maxTokens = settings.maxOutputTokens.toString()
+                    feedback = "个性化配置已保存"
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = NeonCyan),
+                shape = CyberShape,
+            ) { Text("保存个性化", color = Void, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace) }
+            if (feedback.isNotBlank()) Text(feedback, color = NeonCyan, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+        }
+        Spacer(Modifier.height(18.dp))
+    }
+}
 
-private fun providerName(provider: String): String = when (provider) {
-    "qwen" -> "Qwen"
-    "mimo" -> "MiMo"
-    else -> "DeepSeek"
+@Composable
+private fun SettingsSection(
+    title: String,
+    subtitle: String,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, Divider, CyberShape)
+            .background(SurfaceLow, CyberShape)
+            .padding(horizontal = 14.dp, vertical = 15.dp),
+        verticalArrangement = Arrangement.spacedBy(13.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("// $title", color = NeonCyan, fontSize = 12.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace, letterSpacing = 1.2.sp)
+                Text(subtitle, color = TextSecondary, fontSize = 11.sp)
+            }
+            Text("◆", color = NeonPink, fontSize = 10.sp)
+        }
+        HorizontalDivider(color = NeonCyan.copy(alpha = 0.22f))
+        content()
+    }
+}
+
+@Composable
+private fun StatusLine(label: String, ready: Boolean) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text("> $label", color = TextPrimary, fontFamily = FontFamily.Monospace)
+        Text(if (ready) "[ ONLINE ]" else "[ STANDBY ]", color = if (ready) NeonCyan else Warning, fontSize = 10.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+    }
 }
