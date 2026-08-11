@@ -1,4 +1,4 @@
-# Muse Android Agent 0.14.2
+# Muse Android Agent 0.14.3
 
 Muse is a private, sideloaded Android control terminal. The app combines an OpenAI-compatible model with an externally installed Shizuku service, so device operations run through Android's `shell` identity without Termux or an embedded ADB client.
 
@@ -9,7 +9,7 @@ The Compose UI uses a cyberpunk terminal system: near-black HUD surfaces, cyan o
 ## Product surfaces
 
 - **Chat** — persistent conversations, normal model replies, bounded terminal-agent loops, and explicit `/shell <command>` execution.
-- **Configure** — Shizuku authorization/connection, model provider settings, working directory, PATH prefix, runtime executable names, and live environment probing.
+- **Configure** — automatic GitHub Release updates, Shizuku authorization/connection, model provider settings, environment installation, PATH configuration, and live probing.
 - **个性化** — app-private `memory.md`, configurable context length, and maximum output tokens.
 
 ## Terminal model
@@ -49,6 +49,10 @@ The file is injected as preference memory for new model requests but cannot over
 
 The UI includes presets for DeepSeek, Qwen, and MiMo and accepts any compatible HTTPS Chat Completions endpoint. API keys remain in encrypted shared preferences. Public cleartext HTTP endpoints are rejected; debug builds may use loopback HTTP for local development.
 
+## Updates
+
+Automatic update checks are enabled by default and query the repository's latest GitHub Release once at app startup. Configure also provides a manual check and a visible download progress surface. Muse requires the Release API's SHA-256 asset digest, verifies the downloaded APK before launching Android's package installer, and reuses an already verified download after the user grants unknown-app installation access. Android still requires explicit user confirmation for every sideloaded update.
+
 ## First run
 
 1. Install and start the separate Shizuku app using its documented setup method.
@@ -69,4 +73,4 @@ Do not use Muse for payments, purchases, account-security changes, verification 
 .\gradlew.bat assembleDebug --no-daemon --console=plain
 ```
 
-The application ID remains `com.androidagent.app`; version `0.14.2` uses versionCode `44` for in-place updates.
+The application ID remains `com.androidagent.app`; version `0.14.3` uses versionCode `45` for in-place updates.

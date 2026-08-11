@@ -49,6 +49,10 @@ class SecureSettings(context: Context) {
         get() = prefs.getString("github_repository", BuildConfig.GITHUB_REPOSITORY).orEmpty()
         set(value) = prefs.edit().putString("github_repository", value.trim()).apply()
 
+    var autoUpdateEnabled: Boolean
+        get() = prefs.getBoolean("auto_update_enabled", true)
+        set(value) = prefs.edit().putBoolean("auto_update_enabled", value).apply()
+
     var modelBaseUrl: String
         get() = prefs.getString("model_base_url", "https://api.deepseek.com").orEmpty()
         set(value) = prefs.edit().putString("model_base_url", value.trim().trimEnd('/')).apply()

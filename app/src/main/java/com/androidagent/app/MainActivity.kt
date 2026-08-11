@@ -88,6 +88,10 @@ import com.androidagent.app.terminal.EnvironmentInstallProgress
 import com.androidagent.app.terminal.InstalledLinuxEnvironment
 import com.androidagent.app.terminal.TerminalEnvironmentConfig
 import com.androidagent.app.terminal.TerminalEnvironmentProbe
+import com.androidagent.app.update.DownloadProgress
+import com.androidagent.app.update.GitHubUpdater
+import com.androidagent.app.update.InstallerLaunchResult
+import com.androidagent.app.update.UpdateInfo
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
@@ -185,9 +189,56 @@ private fun MuseApp() {
     var runStatus by remember { mutableStateOf("") }
     var activeJob by remember { mutableStateOf<Job?>(null) }
     var environmentStatus by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    val updater = remember { GitHubUpdater(context.applicationContext) }
+    var autoUpdateEnabled by remember { mutableStateOf(settings.autoUpdateEnabled) }
+    var availableUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
+    var updateStatus by remember { mutableStateOf(if (autoUpdateEnabled) "AUTO CHECK // READY" else "AUTO CHECK // OFF") }
+    var checkingUpdate by remember { mutableStateOf(false) }
+    var installingUpdate by remember { mutableStateOf(false) }
+    var updateProgress by remember { mutableStateOf<DownloadProgress?>(null) }
+
+    fun checkForUpdates(manual: Boolean) {
+        if (checkingUpdate || installingUpdate) return
+        checkingUpdate = true
+        updateStatus = if (manual) "正在检查 GitHub Release" else "启动自动检查"
+        scope.launch {
+            runCatching { updater.check(settings.githubRepository) }
+                .onSuccess { update ->
+                    availableUpdate = update
+                    updateStatus = if (update == null) "CURRENT // 已是最新版本" else "UPDATE // v${update.version} 可用"
+                }
+                .onFailure { error ->
+                    updateStatus = "检查失败：${error.message ?: error::class.java.simpleName}"
+                }
+            checkingUpdate = false
+        }
+    }
+
+    fun installAvailableUpdate() {
+        val update = availableUpdate ?: return
+        if (installingUpdate || checkingUpdate) return
+        installingUpdate = true
+        updateProgress = null
+        updateStatus = "正在下载并校验 v${update.version}"
+        scope.launch {
+            runCatching {
+                updater.downloadAndInstall(update) { progress -> updateProgress = progress }
+            }.onSuccess { result ->
+                updateStatus = when (result) {
+                    InstallerLaunchResult.INSTALLER_OPENED -> "系统安装器已打开，请确认覆盖安装"
+                    InstallerLaunchResult.PERMISSION_REQUIRED -> "APK 已校验，请允许安装未知应用后再次点击"
+                }
+            }.onFailure { error ->
+                updateStatus = "更新失败：${error.message ?: error::class.java.simpleName}"
+                updateProgress = null
+            }
+            installingUpdate = false
+        }
+    }
 
     LaunchedEffect(Unit) {
         PrivilegedBackendRouter.configure(context, true)
+        if (autoUpdateEnabled) checkForUpdates(manual = false)
     }
 
     LaunchedEffect(shizukuState.connected) {
@@ -270,6 +321,7 @@ private fun MuseApp() {
             MuseHeader(
                 page = page,
                 connected = shizukuState.connected,
+                updateVersion = availableUpdate?.version,
                 onNewChat = {
                     val chat = Conversation(title = "新对话")
                     persist(listOf(chat) + conversations)
@@ -277,6 +329,7 @@ private fun MuseApp() {
                     page = MusePage.Chat
                 },
                 onStatusClick = { page = MusePage.Configure },
+                onUpdateClick = { page = MusePage.Configure },
             )
         },
         bottomBar = {
@@ -305,6 +358,19 @@ private fun MuseApp() {
                     settings = settings,
                     environmentStatus = environmentStatus,
                     onEnvironmentStatus = { environmentStatus = it },
+                    autoUpdateEnabled = autoUpdateEnabled,
+                    onAutoUpdateEnabledChange = { enabled ->
+                        autoUpdateEnabled = enabled
+                        settings.autoUpdateEnabled = enabled
+                        if (enabled) checkForUpdates(manual = true) else updateStatus = "AUTO CHECK // OFF"
+                    },
+                    availableUpdate = availableUpdate,
+                    updateStatus = updateStatus,
+                    checkingUpdate = checkingUpdate,
+                    installingUpdate = installingUpdate,
+                    updateProgress = updateProgress,
+                    onCheckUpdate = { checkForUpdates(manual = true) },
+                    onInstallUpdate = ::installAvailableUpdate,
                 )
                 MusePage.Personal -> PersonalWorkspace(settings, memoryStore)
             }
@@ -316,8 +382,10 @@ private fun MuseApp() {
 private fun MuseHeader(
     page: MusePage,
     connected: Boolean,
+    updateVersion: String?,
     onNewChat: () -> Unit,
     onStatusClick: () -> Unit,
+    onUpdateClick: () -> Unit,
 ) {
     Column(
         Modifier
@@ -360,7 +428,42 @@ private fun MuseHeader(
                 }
             }
         }
+        AnimatedVisibility(updateVersion != null) {
+            UpdateStrip(version = updateVersion.orEmpty(), onClick = onUpdateClick)
+        }
         HorizontalDivider(color = NeonCyan.copy(alpha = 0.32f))
+    }
+}
+
+@Composable
+private fun UpdateStrip(version: String, onClick: () -> Unit) {
+    val transition = rememberInfiniteTransition(label = "update-pulse")
+    val pulse by transition.animateFloat(
+        initialValue = 0.62f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing), RepeatMode.Reverse),
+        label = "update-alpha",
+    )
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(NeonPink.copy(alpha = 0.08f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 7.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(6.dp).alpha(pulse).background(NeonPink, CircleShape))
+            Text(
+                "UPDATE//READY · v$version",
+                color = NeonPink,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Black,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        Text("OPEN CONFIG >", color = TextPrimary, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
     }
 }
 
@@ -584,6 +687,15 @@ private fun ConfigureWorkspace(
     settings: SecureSettings,
     environmentStatus: Map<String, String>,
     onEnvironmentStatus: (Map<String, String>) -> Unit,
+    autoUpdateEnabled: Boolean,
+    onAutoUpdateEnabledChange: (Boolean) -> Unit,
+    availableUpdate: UpdateInfo?,
+    updateStatus: String,
+    checkingUpdate: Boolean,
+    installingUpdate: Boolean,
+    updateProgress: DownloadProgress?,
+    onCheckUpdate: () -> Unit,
+    onInstallUpdate: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -632,6 +744,92 @@ private fun ConfigureWorkspace(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
+        SettingsSection("APP UPDATE", "启动时检查 GitHub Release；安装前校验 APK SHA-256") {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("CURRENT // v${BuildConfig.VERSION_NAME}", color = NeonCyan, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+                    Text("AUTO CHECK", color = TextSecondary, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                }
+                Switch(checked = autoUpdateEnabled, onCheckedChange = onAutoUpdateEnabledChange)
+            }
+            HorizontalDivider(color = Divider)
+            Text(
+                updateStatus,
+                color = if (updateStatus.contains("失败")) Error else if (availableUpdate == null) TextSecondary else NeonPink,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            )
+            updateProgress?.let { progress ->
+                LinearProgressIndicator(
+                    progress = { progress.fraction },
+                    modifier = Modifier.fillMaxWidth().height(3.dp),
+                    color = NeonPink,
+                    trackColor = Divider,
+                )
+                Text(
+                    "DOWNLOAD // ${progress.percent}% · ${progress.downloadedBytes / 1_024 / 1_024} / ${progress.totalBytes / 1_024 / 1_024} MiB",
+                    color = NeonPink,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+            OutlinedButton(
+                onClick = onCheckUpdate,
+                enabled = !checkingUpdate && !installingUpdate,
+                modifier = Modifier.fillMaxWidth(),
+                shape = CyberShape,
+            ) {
+                Text(if (checkingUpdate) "CHECKING..." else "检查更新", fontFamily = FontFamily.Monospace)
+            }
+            AnimatedVisibility(availableUpdate != null) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val update = availableUpdate
+                    if (update != null) {
+                        Text("TARGET // v${update.version}", color = NeonPink, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+                        if (update.notes.isNotBlank()) {
+                            Text(
+                                update.notes.take(1_200),
+                                color = TextSecondary,
+                                fontSize = 11.sp,
+                                lineHeight = 17.sp,
+                                maxLines = 8,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Text(
+                            "SHA256 // ${update.sha256.take(12)}…${update.sha256.takeLast(8)}",
+                            color = AcidYellow,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                        Button(
+                            onClick = onInstallUpdate,
+                            enabled = !installingUpdate && !checkingUpdate,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = NeonPink),
+                            shape = CyberShape,
+                        ) {
+                            Text(
+                                when {
+                                    installingUpdate -> "DOWNLOADING..."
+                                    updateStatus.startsWith("APK 已校验") -> "继续安装"
+                                    else -> "下载 · 校验 · 安装"
+                                },
+                                color = Void,
+                                fontWeight = FontWeight.Black,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         SettingsSection("SHIZUKU", "唯一的高权限执行通道") {
             StatusLine("Binder", state.binderAvailable)
             StatusLine("App permission", state.permissionGranted)
