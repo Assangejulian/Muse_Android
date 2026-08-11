@@ -146,10 +146,12 @@ class DeepSeekClient(
             inspect with terminal, scroll, go Back, or open a relevant filter/tab.
             input_text should use values the user provided, values already on screen, or short keywords clearly
             implied by the goal for search/navigation fields — never paste the entire residual goal sentence.
-            When a screenshot is supplied, red Set-of-Mark labels correspond to node IDs in the Screen list.
-            Use tap_point only with a supplied screenshot, only when the exact non-sensitive target is visibly clear
-            but has no usable red node mark or text. Coordinates are normalized over the full screenshot from 0 to 1000.
-            ${if (terminalAvailable) "Shizuku terminal is connected and is your PRIMARY control surface. Prefer terminal for dumpsys/am/input inspection, app launch, navigation, and deterministic manipulation. Accessibility is fallback when terminal cannot identify or operate the target. Terminal output is planning evidence only — completion still needs UI predicates / Stop Gate." else "Shizuku is offline; use accessibility actions. Prefer node/text tools."}
+            Node-only mode is default: decide from the Screen node list (id, text, description, bounds, clickable).
+            When a screenshot is supplied, red Set-of-Mark labels correspond to node IDs; without a screenshot do not
+            invent visual geometry — use click_node / click_text / bounds from the node list. tap_point only when a
+            screenshot is supplied and the exact non-sensitive target is clear without a usable node mark.
+            Coordinates are normalized over the full screenshot from 0 to 1000.
+            ${if (terminalAvailable) "Shizuku terminal is available for dumpsys/am/input and launch helpers. Prefer accessibility node tools (click_node, click_text, swipe, input_text) for UI work; use terminal when nodes are insufficient. Terminal output is planning evidence only — completion still needs UI predicates / Stop Gate." else "Shizuku is offline; use accessibility actions. Prefer node/text tools."}
         """.trimIndent()
         val taskContext = packageContext(primaryPackage, currentPackage, allowedPackages) +
             "\nGoal: ${goal.take(8_000)}\nINSTALLED APPS:\n$appCatalog"
@@ -261,10 +263,10 @@ class DeepSeekClient(
             Never click IME character keys. Prefer controls that advance the milestone; otherwise scroll, Back, or terminal inspect.
             input_text may use user-provided values, on-screen values, or short goal-implied search keywords —
             never dump the entire residual goal sentence into a field.
-            When a screenshot is supplied, red Set-of-Mark labels correspond to node IDs in the Screen list.
-            Use tap_point only with a supplied screenshot when the target is visible but has no usable node mark.
+            Node-only mode is default: use Screen node ids/text/description/bounds. Without a screenshot do not invent
+            geometry; prefer click_node / click_text. tap_point only with a supplied screenshot when no usable node mark exists.
             Coordinates are normalized over the full screenshot from 0 to 1000.
-            ${if (terminalAvailable) "Shizuku terminal is PRIMARY control. Prefer terminal for inspection, launch, navigation, and manipulation. Accessibility is fallback. Terminal output is not task-completion proof." else "Shizuku offline — use accessibility tools."}
+            ${if (terminalAvailable) "Shizuku terminal is available for inspection, launch, and input helpers. Prefer accessibility node tools for UI; terminal is support. Terminal output is not task-completion proof." else "Shizuku offline — use accessibility tools."}
         """.trimIndent()
         val user = "Goal: ${goal.take(8_000)}\n${packageContext(primaryPackage, currentPackage, allowedPackages)}\nHARNESS STATE: $harnessState\nINSTALLED APPS:\n$appCatalog\nRecent actions: ${history.takeLast(16)}\nScreen:\n${observation.compactText()}"
         val userContent: Any = if (screenshotDataUrl == null) user else JSONArray()

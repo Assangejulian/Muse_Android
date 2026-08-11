@@ -1,6 +1,9 @@
 package com.androidagent.app
 
+import android.content.Context
+import android.content.Intent
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
@@ -72,6 +75,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.androidagent.app.accessibility.AgentAccessibilityService
+import com.androidagent.app.accessibility.AgentController
+import com.androidagent.app.accessibility.AgentStartResult
+import com.androidagent.app.agent.RuntimeOutcome
 import com.androidagent.app.chat.ChatMessage
 import com.androidagent.app.chat.ChatStore
 import com.androidagent.app.chat.Conversation
@@ -79,7 +86,6 @@ import com.androidagent.app.data.PersonalizationStore
 import com.androidagent.app.data.SecureSettings
 import com.androidagent.app.network.TerminalAgentClient
 import com.androidagent.app.network.TerminalCommandPolicy
-import com.androidagent.app.network.TERMINAL_TOOL_TURN_LIMIT
 import com.androidagent.app.privileged.PrivilegedBackendRouter
 import com.androidagent.app.privileged.ShizukuBridge
 import com.androidagent.app.terminal.TERMINAL_TOOLS
@@ -93,7 +99,9 @@ import com.androidagent.app.update.GitHubUpdater
 import com.androidagent.app.update.InstallerLaunchResult
 import com.androidagent.app.update.UpdateInfo
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
 
 private val Void = Color(0xFF010408)
 private val SurfaceLow = Color(0xE8071018)
@@ -179,6 +187,7 @@ private fun MuseApp() {
     val chatStore = remember { ChatStore(context) }
     val scope = rememberCoroutineScope()
     val shizukuState by ShizukuBridge.state.collectAsState()
+    val agentState by AgentController.state.collectAsState()
 
     var page by remember { mutableStateOf(MusePage.Chat) }
     var conversations by remember {
@@ -260,7 +269,7 @@ private fun MuseApp() {
 
     fun sendMessage() {
         val text = input.trim()
-        if (text.isBlank() || activeJob?.isActive == true) return
+        if (text.isBlank() || activeJob?.isActive == true || agentState.running) return
         val current = conversations.firstOrNull { it.id == selectedId } ?: return
         val runConversationId = current.id
         val withUser = current.copy(
@@ -272,37 +281,88 @@ private fun MuseApp() {
         input = ""
         runStatus = "正在思考"
         activeJob = scope.launch {
+            val progressMirror = launch {
+                AgentController.state.collectLatest { state ->
+                    if (!state.running && state.progressSummaries.isEmpty()) return@collectLatest
+                    val summary = state.progressSummaries.lastOrNull()
+                        ?: state.currentAction.takeIf { it.isNotBlank() }
+                        ?: state.status
+                    runStatus = "${state.step}/120 · $summary"
+                }
+            }
             val reply = runCatching {
-                if (text.startsWith("/shell ", ignoreCase = true)) {
-                    require(shizukuState.connected) { "Shizuku 控制终端未连接" }
-                    runStatus = "执行直接命令"
-                    val command = TerminalCommandPolicy.validate(text.substringAfter(' ').trim()).getOrThrow()
-                    PrivilegedBackendRouter.execute(
-                        TerminalEnvironmentConfig.from(settings).wrap(command),
-                        30_000L,
-                    ).displayText()
-                } else {
-                    TerminalAgentClient().respond(
-                        apiKey = settings.apiKey,
-                        baseUrl = settings.modelBaseUrl,
-                        model = settings.modelName,
-                        provider = settings.currentProvider,
-                        input = text,
-                        history = current.messages.map { it.role to it.content },
-                        memoryMarkdown = memoryStore.loadMemory(),
-                        contextLength = settings.contextLength,
-                        maxOutputTokens = settings.maxOutputTokens,
-                        environment = TerminalEnvironmentConfig.from(settings),
-                        environmentStatus = environmentStatus,
-                        terminalAvailable = shizukuState.connected,
-                        execute = PrivilegedBackendRouter::execute,
-                        onProgress = { progress -> scope.launch { runStatus = progress } },
-                    )
+                when {
+                    text.startsWith("/shell ", ignoreCase = true) -> {
+                        require(shizukuState.connected) { "Shizuku 控制终端未连接" }
+                        runStatus = "1/1 · 执行直接命令"
+                        val command = TerminalCommandPolicy.validate(text.substringAfter(' ').trim()).getOrThrow()
+                        PrivilegedBackendRouter.execute(
+                            TerminalEnvironmentConfig.from(settings).wrap(command),
+                            30_000L,
+                        ).displayText()
+                    }
+                    text.startsWith("/ask ", ignoreCase = true) || text.startsWith("/chat ", ignoreCase = true) -> {
+                        val question = text.substringAfter(' ').trim()
+                        require(question.isNotBlank()) { "请在 /ask 后输入问题" }
+                        TerminalAgentClient().respond(
+                            apiKey = settings.apiKey,
+                            baseUrl = settings.modelBaseUrl,
+                            model = settings.modelName,
+                            provider = settings.currentProvider,
+                            input = question,
+                            history = current.messages.map { it.role to it.content },
+                            memoryMarkdown = memoryStore.loadMemory(),
+                            contextLength = settings.contextLength,
+                            maxOutputTokens = settings.maxOutputTokens,
+                            environment = TerminalEnvironmentConfig.from(settings),
+                            environmentStatus = environmentStatus,
+                            terminalAvailable = shizukuState.connected,
+                            execute = PrivilegedBackendRouter::execute,
+                            onProgress = { progress -> runStatus = progress },
+                        )
+                    }
+                    else -> {
+                        // Node-only device agent (DeepSeek has no vision). UI tree tools only.
+                        settings.visionEnabled = false
+                        settings.taskGoal = text
+                        PrivilegedBackendRouter.configure(context, settings.privilegedBackendEnabled)
+                        when (val start = AgentController.start(context, settings, goalOverride = text)) {
+                            is AgentStartResult.Started -> {
+                                val result = AgentController.awaitAndConsumeResult(
+                                    start.runId,
+                                    TimeUnit.MINUTES.toMillis(30),
+                                )
+                                when {
+                                    result == null -> "任务超时或结果未返回。可拆小目标后重试。"
+                                    result.succeeded -> "任务完成：${result.reason}"
+                                    result.outcome == RuntimeOutcome.USER_CANCELLED -> "已停止当前任务。"
+                                    result.outcome == RuntimeOutcome.ACCESSIBILITY_DISCONNECTED ->
+                                        "无障碍服务已断开。请到 Configure 重新开启 Muse 无障碍后重试。"
+                                    result.outcome == RuntimeOutcome.SAFETY_BLOCKED ->
+                                        "安全策略阻止了该任务：${result.reason}"
+                                    else -> "任务未完成（${result.outcome.name}）：${result.reason}"
+                                }
+                            }
+                            is AgentStartResult.Busy ->
+                                "已有任务在执行（run ${start.activeRunId.take(8)}）。请先 ABORT 再发新目标。"
+                            is AgentStartResult.SafetyBlocked ->
+                                "安全策略阻止了该任务：${start.reason}"
+                            AgentStartResult.InvalidGoal ->
+                                "请先在 Configure 填写 API Key，并发送非空任务目标。"
+                            AgentStartResult.AccessibilityDisconnected ->
+                                "设备 UI 工具需要无障碍服务。请到 Configure → ACCESSIBILITY 开启 Muse，再返回重试。"
+                        }
+                    }
                 }
             }.getOrElse { error ->
-                if (error is kotlinx.coroutines.CancellationException) "已停止当前任务。"
-                else "执行失败：${error.message ?: error::class.java.simpleName}"
+                if (error is kotlinx.coroutines.CancellationException) {
+                    AgentController.stop()
+                    "已停止当前任务。"
+                } else {
+                    "执行失败：${error.message ?: error::class.java.simpleName}"
+                }
             }
+            progressMirror.cancel()
             val latest = conversations.firstOrNull { it.id == runConversationId } ?: withUser
             updateConversation(
                 latest.copy(
@@ -320,7 +380,8 @@ private fun MuseApp() {
         topBar = {
             MuseHeader(
                 page = page,
-                connected = shizukuState.connected,
+                shizukuConnected = shizukuState.connected,
+                accessibilityConnected = agentState.accessibilityConnected,
                 updateVersion = availableUpdate?.version,
                 onNewChat = {
                     val chat = Conversation(title = "新对话")
@@ -348,16 +409,28 @@ private fun MuseApp() {
                     conversation = conversations.firstOrNull { it.id == selectedId } ?: conversations.first(),
                     input = input,
                     onInputChange = { input = it.take(12_000) },
-                    runStatus = runStatus,
-                    running = activeJob?.isActive == true,
-                    connected = shizukuState.connected,
+                    runStatus = runStatus.ifBlank {
+                        if (agentState.running) {
+                            val summary = agentState.progressSummaries.lastOrNull() ?: agentState.status
+                            "${agentState.step}/120 · $summary"
+                        } else {
+                            ""
+                        }
+                    },
+                    running = activeJob?.isActive == true || agentState.running,
+                    shizukuConnected = shizukuState.connected,
+                    accessibilityConnected = agentState.accessibilityConnected,
                     onSend = ::sendMessage,
-                    onStop = { activeJob?.cancel() },
+                    onStop = {
+                        AgentController.stop()
+                        activeJob?.cancel()
+                    },
                 )
                 MusePage.Configure -> ConfigureWorkspace(
                     settings = settings,
                     environmentStatus = environmentStatus,
                     onEnvironmentStatus = { environmentStatus = it },
+                    accessibilityConnected = agentState.accessibilityConnected,
                     autoUpdateEnabled = autoUpdateEnabled,
                     onAutoUpdateEnabledChange = { enabled ->
                         autoUpdateEnabled = enabled
@@ -381,7 +454,8 @@ private fun MuseApp() {
 @Composable
 private fun MuseHeader(
     page: MusePage,
-    connected: Boolean,
+    shizukuConnected: Boolean,
+    accessibilityConnected: Boolean,
     updateVersion: String?,
     onNewChat: () -> Unit,
     onStatusClick: () -> Unit,
@@ -420,7 +494,16 @@ private fun MuseHeader(
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
-                ConnectionPill(connected = connected, onClick = onStatusClick)
+                ConnectionPill(
+                    label = "A11Y",
+                    connected = accessibilityConnected,
+                    onClick = onStatusClick,
+                )
+                ConnectionPill(
+                    label = "SHZ",
+                    connected = shizukuConnected,
+                    onClick = onStatusClick,
+                )
                 if (page == MusePage.Chat) {
                     TextButton(onClick = onNewChat) {
                         Text("＋NEW", color = NeonPink, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
@@ -468,32 +551,33 @@ private fun UpdateStrip(version: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ConnectionPill(connected: Boolean, onClick: () -> Unit) {
-    val transition = rememberInfiniteTransition(label = "connection-pulse")
+private fun ConnectionPill(label: String, connected: Boolean, onClick: () -> Unit) {
+    val transition = rememberInfiniteTransition(label = "connection-pulse-$label")
     val pulse by transition.animateFloat(
         initialValue = 0.55f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(tween(1_200, easing = LinearEasing), RepeatMode.Reverse),
-        label = "connection-alpha",
+        label = "connection-alpha-$label",
     )
+    val accent = if (connected) NeonCyan else Warning
     Row(
         Modifier
-            .border(1.dp, if (connected) NeonCyan else Warning, CyberShape)
-            .background(if (connected) NeonCyan.copy(alpha = 0.08f) else Warning.copy(alpha = 0.08f), CyberShape)
+            .border(1.dp, accent, CyberShape)
+            .background(accent.copy(alpha = 0.08f), CyberShape)
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 7.dp),
+            .padding(horizontal = 8.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Box(
             Modifier
                 .size(7.dp)
                 .alpha(if (connected) pulse else 1f)
-                .background(if (connected) NeonCyan else Warning, CircleShape),
+                .background(accent, CircleShape),
         )
         Text(
-            if (connected) "LINK//ON" else "LINK//OFF",
-            color = if (connected) NeonCyan else Warning,
+            if (connected) "$label//ON" else "$label//OFF",
+            color = accent,
             fontSize = 10.sp,
             fontWeight = FontWeight.Black,
             fontFamily = FontFamily.Monospace,
@@ -546,7 +630,8 @@ private fun ChatWorkspace(
     onInputChange: (String) -> Unit,
     runStatus: String,
     running: Boolean,
-    connected: Boolean,
+    shizukuConnected: Boolean,
+    accessibilityConnected: Boolean,
     onSend: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -566,7 +651,10 @@ private fun ChatWorkspace(
         ) {
             if (conversation.messages.isEmpty()) {
                 item {
-                    EmptyChat(connected)
+                    EmptyChat(
+                        shizukuConnected = shizukuConnected,
+                        accessibilityConnected = accessibilityConnected,
+                    )
                 }
             }
             items(conversation.messages) { message -> MessageBubble(message) }
@@ -585,7 +673,13 @@ private fun ChatWorkspace(
                 value = input,
                 onValueChange = onInputChange,
                 modifier = Modifier.weight(1f).heightIn(min = 54.dp, max = 140.dp),
-                placeholder = { Text("> REQUEST OR /shell …", color = TextSecondary, fontFamily = FontFamily.Monospace) },
+                placeholder = {
+                    Text(
+                        "> 设备任务 · /ask 问答 · /shell …",
+                        color = TextSecondary,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                },
                 label = { Text("COMMAND_INPUT", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp) },
                 maxLines = 5,
                 shape = CyberShape,
@@ -605,7 +699,8 @@ private fun ChatWorkspace(
 
 @Composable
 private fun ExecutionStrip(runStatus: String) {
-    val step = runStatus.substringBefore('/').trim().toIntOrNull()?.coerceIn(0, TERMINAL_TOOL_TURN_LIMIT) ?: 0
+    val maxSteps = 120
+    val step = runStatus.substringBefore('/').trim().toIntOrNull()?.coerceIn(0, maxSteps) ?: 0
     Column(
         Modifier
             .fillMaxWidth()
@@ -620,7 +715,7 @@ private fun ExecutionStrip(runStatus: String) {
                 Text("EXEC_CHAIN", color = NeonPink, fontSize = 10.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
             }
             Text(
-                step.toString().padStart(2, '0') + " / $TERMINAL_TOOL_TURN_LIMIT",
+                step.toString().padStart(2, '0') + " / $maxSteps",
                 color = AcidYellow,
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Black,
@@ -628,7 +723,7 @@ private fun ExecutionStrip(runStatus: String) {
             )
         }
         LinearProgressIndicator(
-            progress = { step.toFloat() / TERMINAL_TOOL_TURN_LIMIT },
+            progress = { step.toFloat() / maxSteps },
             modifier = Modifier.fillMaxWidth().height(2.dp),
             color = NeonCyan,
             trackColor = Divider,
@@ -638,21 +733,31 @@ private fun ExecutionStrip(runStatus: String) {
 }
 
 @Composable
-private fun EmptyChat(connected: Boolean) {
+private fun EmptyChat(shizukuConnected: Boolean, accessibilityConnected: Boolean) {
     Column(
         Modifier.fillMaxWidth().padding(top = 54.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Text("NEURAL CONTROL", color = NeonCyan, fontSize = 29.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace, letterSpacing = 1.sp)
-        Text("ANDROID // SHIZUKU // MODEL", color = NeonPink, fontSize = 11.sp, fontFamily = FontFamily.Monospace, letterSpacing = 1.sp)
+        Text("A11Y // UI-TREE // SHIZUKU // DEEPSEEK", color = NeonPink, fontSize = 11.sp, fontFamily = FontFamily.Monospace, letterSpacing = 1.sp)
         Text(
-            if (connected) "Shizuku 已连接。Muse 可以对话，也可以在安全边界内调用终端操作手机。"
-            else "先到 Configure 连接 Shizuku。普通对话仍可使用，终端操作会等待连接。",
+            when {
+                accessibilityConnected && shizukuConnected ->
+                    "无障碍与 Shizuku 均已就绪。直接发送自然语言设备任务（点击、滑动、启动应用…）；节点树工具已接入，无需视觉模型。"
+                accessibilityConnected ->
+                    "无障碍已连接，UI 工具可用。建议再到 Configure 连接 Shizuku 以获得启动应用与终端能力。"
+                shizukuConnected ->
+                    "Shizuku 已连接，但设备 UI 任务需要无障碍。请到 Configure → ACCESSIBILITY 开启 Muse。"
+                else ->
+                    "先到 Configure 开启无障碍（UI 工具）并连接 Shizuku。可用 /ask 纯问答，/shell 直接命令。"
+            },
             color = TextSecondary,
             lineHeight = 22.sp,
         )
-        Text("> QUICK_TEST: /shell id", color = AcidYellow, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-        Text("MAX_CHAIN: $TERMINAL_TOOL_TURN_LIMIT", color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+        Text("> 例: 打开B站给热搜第一个视频的第一个评论点赞", color = AcidYellow, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text("> /ask 解释一下这段日志", color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text("> /shell id", color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text("TOOLS: launch · click_node · tap · swipe · input · terminal · …", color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
     }
 }
 
@@ -687,6 +792,7 @@ private fun ConfigureWorkspace(
     settings: SecureSettings,
     environmentStatus: Map<String, String>,
     onEnvironmentStatus: (Map<String, String>) -> Unit,
+    accessibilityConnected: Boolean,
     autoUpdateEnabled: Boolean,
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
     availableUpdate: UpdateInfo?,
@@ -830,7 +936,41 @@ private fun ConfigureWorkspace(
             }
         }
 
-        SettingsSection("SHIZUKU", "唯一的高权限执行通道") {
+        SettingsSection("ACCESSIBILITY", "设备 UI 工具通道：控件树观察 / 点击 / 滑动 / 跨页进度浮层") {
+            StatusLine("Service connected", accessibilityConnected)
+            StatusLine("Live instance", AgentAccessibilityService.current() != null)
+            Text(
+                if (accessibilityConnected) {
+                    "无障碍已连接。发送自然语言设备任务时，模型可使用 launch_app / click_node / tap_point / swipe / input_text / terminal 等工具；DeepSeek 默认仅用节点树（无截图视觉）。"
+                } else {
+                    "请开启系统设置中的 Muse 无障碍服务。开启后，在其它 App 上层会显示赛博朋克进度条（STEP / 当前动作 / ABORT）。"
+                },
+                color = TextSecondary,
+                fontSize = 12.sp,
+                lineHeight = 18.sp,
+            )
+            Button(
+                onClick = {
+                    feedback = if (openAccessibilitySettings(context)) {
+                        "已打开无障碍设置，请找到 Muse 并开启"
+                    } else {
+                        "无法打开无障碍设置，请手动到 设置 → 无障碍 → 已安装的服务"
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = if (accessibilityConnected) NeonCyan else NeonPink),
+                shape = CyberShape,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (accessibilityConnected) "重新打开无障碍设置" else "开启无障碍",
+                    color = Void,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        }
+
+        SettingsSection("SHIZUKU", "高权限 shell / 启动应用 / 终端环境") {
             StatusLine("Binder", state.binderAvailable)
             StatusLine("App permission", state.permissionGranted)
             StatusLine("Control terminal", state.connected)
@@ -1166,4 +1306,17 @@ private fun StatusLine(label: String, ready: Boolean) {
         Text("> $label", color = TextPrimary, fontFamily = FontFamily.Monospace)
         Text(if (ready) "[ ONLINE ]" else "[ STANDBY ]", color = if (ready) NeonCyan else Warning, fontSize = 10.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
     }
+}
+
+private fun openAccessibilitySettings(context: Context): Boolean {
+    val intents = listOf(
+        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS),
+        Intent(Settings.ACTION_SETTINGS),
+    )
+    for (intent in intents) {
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val launched = runCatching { context.startActivity(intent) }.isSuccess
+        if (launched) return true
+    }
+    return false
 }

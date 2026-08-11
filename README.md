@@ -1,27 +1,33 @@
-# Muse Android Agent 0.14.7
+# Muse Android Agent 0.15.0
 
-Muse is a private, sideloaded Android control terminal. The app combines an OpenAI-compatible model with an externally installed Shizuku service, so device operations run through Android's `shell` identity without Termux or an embedded ADB client.
+Muse is a private, sideloaded Android control agent. Chat goals run through an **Accessibility UI-tree agent** (observe → plan → act) with optional **Shizuku** shell tools. DeepSeek and other text models use node lists by default; vision/screenshots stay off unless the user enables a vision provider.
 
-The active product no longer registers or requests an Android Accessibility Service. Muse is now terminal-first and terminal-only: the model may inspect and operate the device with bounded shell commands, while deterministic local policy blocks destructive and security-sensitive command classes.
+Registered capabilities:
 
-The Compose UI uses a cyberpunk terminal system: near-black HUD surfaces, cyan operational state, magenta identity accents, cut-corner controls, a restrained scan beam, and a visible `EXEC_CHAIN n/50` indicator.
+- **Accessibility** — live UI hierarchy, click/swipe/input gestures, system-wide cyberpunk progress overlay on other apps
+- **Shizuku** — shell identity for `am`/`pm`/`input`/`dumpsys` and the optional Ubuntu runtime
+- **Tools for the model** — `launch_app`, `click_node`, `click_text`, `tap_point`, `swipe`, `input_text`, `submit_input`, `ensure_toggle`, `bind_predicate`, `terminal`, `back`, `home`, `wait`, `finish`/`fail`
+
+The Compose UI keeps the cyberpunk terminal look: near-black HUD, cyan/magenta accents, cut-corner controls, scan beam, and `EXEC_CHAIN` progress both in-chat and as an overlay on other pages.
 
 ## Product surfaces
 
-- **Chat** — persistent conversations, normal model replies, bounded terminal-agent loops, and explicit `/shell <command>` execution.
-- **Configure** — automatic GitHub Release updates, Shizuku authorization/connection, model provider settings, environment installation, PATH configuration, and live probing.
-- **个性化** — app-private `memory.md`, configurable context length, and maximum output tokens.
+- **Chat** — natural-language **device tasks** (UI agent), `/ask` pure Q&A/terminal chat, and `/shell <command>` direct shell.
+- **Configure** — accessibility enablement, Shizuku, model provider, Ubuntu environment, updates.
+- **个性化** — `memory.md`, context length, max output tokens.
 
-## Terminal model
+## Device agent model (default Chat)
 
-For each user turn, the model must choose one JSON action:
+Each device goal starts `AgentRuntime` when Muse Accessibility is connected:
 
-- `run`: propose one shell command and a short progress summary.
-- `finish`: return the final Chinese response.
+1. Observe the live UI node tree (and optional OCR text).
+2. Model returns one structured action (`android_action` / JSON).
+3. Runtime executes via Accessibility gestures and/or Shizuku.
+4. Re-observe and continue until verified completion, fail, cancel, or budget exhaust.
 
-Muse validates every proposed command locally, runs it through the Shizuku UserService, then returns the exit code, bounded stdout/stderr, timeout state, and duration to the model. A request is limited to 50 terminal turns; each command is limited to 30 seconds and the UserService caps retained output.
+A cyberpunk progress overlay (`TYPE_ACCESSIBILITY_OVERLAY`) and a foreground notification stay visible on other apps with step, phase, and ABORT.
 
-The model never receives a general-purpose unbounded process handle. Local policy rejects recursive forced deletion, package clear/uninstall, reboot or shutdown, security/global settings mutation, device-policy commands, and privilege escalation commands.
+Vision stays **off** by default so DeepSeek and other text models work on the node list only.
 
 ## Initial environment
 
@@ -58,11 +64,11 @@ Automatic update checks are enabled by default and query the repository's latest
 
 1. Install and start the separate Shizuku app using its documented setup method.
 2. Install and open Muse.
-3. Open **Configure**, grant Muse access in Shizuku, and connect the control terminal.
-4. Select a provider and save its API key, Base URL, and model.
-5. Choose a domestic mirror and the desired runtimes, then install and probe the initial environment.
-6. Optionally edit `memory.md`, context length, and max output tokens under **个性化**.
-7. Use Chat normally, or enter `/shell id` for an explicit connection check.
+3. Open **Configure → ACCESSIBILITY**, enable Muse in system accessibility settings (required for UI tools + overlay).
+4. Grant Muse access in Shizuku and connect the control terminal.
+5. Select a provider (DeepSeek works without vision) and save API key, Base URL, and model.
+6. Optionally install Ubuntu runtimes under INITIAL ENVIRONMENT.
+7. In Chat, send a device goal in natural language. Use `/ask` for Q&A only, `/shell id` for a shell check.
 
 Do not use Muse for payments, purchases, account-security changes, verification codes, permission grants, credential extraction, or destructive device maintenance.
 
