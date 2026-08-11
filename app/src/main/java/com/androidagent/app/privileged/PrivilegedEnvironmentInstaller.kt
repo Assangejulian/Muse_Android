@@ -50,11 +50,16 @@ internal class PrivilegedEnvironmentInstaller(
             return EnvironmentInstallResult(-1, error = "Ubuntu Base SHA-256 mismatch")
         }
         val requiredBytes = if ("java" in tools) 650L * 1_024 * 1_024 else 420L * 1_024 * 1_024
-        if (StatFs(BASE_DIR).availableBytes < requiredBytes) {
+        val base = Paths.get(BASE_DIR)
+        val availableBytes = runCatching {
+            availableBytesAfterCreatingDirectory(base) { path -> StatFs(path).availableBytes }
+        }.getOrElse { error ->
+            return EnvironmentInstallResult(-1, error = "Could not prepare environment directory: ${error.message}")
+        }
+        if (availableBytes < requiredBytes) {
             return EnvironmentInstallResult(-1, error = "Insufficient storage: at least ${requiredBytes / 1_024 / 1_024} MiB free is required")
         }
 
-        val base = Paths.get(BASE_DIR)
         val rootfs = base.resolve("rootfs")
         val staging = base.resolve("rootfs.staging")
         val backup = base.resolve("rootfs.backup")
@@ -67,7 +72,6 @@ internal class PrivilegedEnvironmentInstaller(
         var shimsSwapped = false
         var shimsBackedUp = false
         return try {
-            Files.createDirectories(base)
             deleteTree(staging)
             deleteTree(backup)
             deleteTree(shimsStaging)
@@ -401,6 +405,14 @@ internal class PrivilegedEnvironmentInstaller(
             "libproroot-stub-loader.so",
         )
     }
+}
+
+internal fun availableBytesAfterCreatingDirectory(
+    directory: Path,
+    storageProbe: (String) -> Long,
+): Long {
+    Files.createDirectories(directory)
+    return storageProbe(directory.toString())
 }
 
 internal fun isAllowedEnvironmentArchivePath(

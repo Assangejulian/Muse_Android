@@ -1,10 +1,30 @@
 package com.androidagent.app.privileged
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.nio.file.Files
 
 class EnvironmentArchivePathTest {
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
+
+    @Test
+    fun createsInstallDirectoryBeforeProbingStorage() {
+        val installDirectory = temporaryFolder.root.toPath().resolve("missing/muse")
+
+        val availableBytes = availableBytesAfterCreatingDirectory(installDirectory) { path ->
+            assertTrue(Files.isDirectory(installDirectory))
+            assertEquals(installDirectory.toString(), path)
+            123L
+        }
+
+        assertEquals(123L, availableBytes)
+    }
+
     @Test
     fun acceptsAppSpecificArchiveOnSupportedExternalMounts() {
         val suffix = "/Android/data/com.androidagent.app/files/environment-installer/" +
