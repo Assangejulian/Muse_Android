@@ -13,6 +13,19 @@ class EnvironmentArchivePathTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
+    fun derivesHttpMirrorOnlyForSignedCaBootstrap() {
+        assertEquals(
+            "http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports",
+            caBootstrapMirrorUrl("https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"),
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsNonHttpsBootstrapMirrorInput() {
+        caBootstrapMirrorUrl("http://untrusted.example/ubuntu-ports")
+    }
+
+    @Test
     fun createsInstallDirectoryBeforeProbingStorage() {
         val installDirectory = temporaryFolder.root.toPath().resolve("missing/muse")
 

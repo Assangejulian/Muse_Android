@@ -78,7 +78,7 @@ internal class PrivilegedEnvironmentInstaller(
             deleteTree(shimsBackup)
             Files.createDirectories(staging)
             extractRootfs(archive.toPath(), staging)
-            configureRootfs(staging, mirror)
+            configureRootfs(staging, caBootstrapMirrorUrl(mirror))
             installRuntime(base)
 
             if (Files.exists(rootfs, LinkOption.NOFOLLOW_LINKS)) {
@@ -87,6 +87,18 @@ internal class PrivilegedEnvironmentInstaller(
             }
             Files.move(staging, rootfs)
             swapped = true
+
+            val bootstrapResult = runGuest(
+                base = base,
+                command = "export DEBIAN_FRONTEND=noninteractive; " +
+                    "apt-get update && " +
+                    "apt-get install -y --no-install-recommends ca-certificates && " +
+                    "rm -rf /var/lib/apt/lists/*",
+            )
+            if (bootstrapResult.exitCode != 0 || bootstrapResult.timedOut) {
+                error(bootstrapResult.error ?: bootstrapResult.stderr.ifBlank { "CA certificate bootstrap failed" })
+            }
+            configureRootfs(rootfs, mirror)
 
             val packages = packagesFor(tools)
             val commandResult = runGuest(
@@ -316,7 +328,6 @@ internal class PrivilegedEnvironmentInstaller(
     }
 
     private fun packagesFor(tools: Set<String>): String = buildList {
-        add("ca-certificates")
         add("curl")
         if ("python" in tools) addAll(listOf("python3", "python3-pip"))
         if ("node" in tools) addAll(listOf("nodejs", "npm"))
@@ -405,6 +416,11 @@ internal class PrivilegedEnvironmentInstaller(
             "libproroot-stub-loader.so",
         )
     }
+}
+
+internal fun caBootstrapMirrorUrl(secureMirrorUrl: String): String {
+    require(secureMirrorUrl.startsWith("https://")) { "APT mirror must use HTTPS" }
+    return "http://${secureMirrorUrl.removePrefix("https://")}"
 }
 
 internal fun availableBytesAfterCreatingDirectory(
