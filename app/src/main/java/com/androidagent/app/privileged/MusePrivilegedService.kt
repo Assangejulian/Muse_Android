@@ -18,9 +18,12 @@ import kotlin.system.exitProcess
  */
 class MusePrivilegedService() : IMusePrivilegedService.Stub() {
     private val streamExecutor: ExecutorService = Executors.newCachedThreadPool()
+    private var serviceContext: Context? = null
 
     @Keep
-    constructor(@Suppress("UNUSED_PARAMETER") context: Context) : this()
+    constructor(context: Context) : this() {
+        serviceContext = context.applicationContext
+    }
 
     override fun destroy() {
         streamExecutor.shutdownNow()
@@ -28,6 +31,31 @@ class MusePrivilegedService() : IMusePrivilegedService.Stub() {
     }
 
     override fun identity(): String = "uid=${Os.getuid()} pid=${Os.getpid()}"
+
+    override fun installEnvironment(archivePath: String?, mirrorId: String?, toolIds: String?): String {
+        val startedAt = SystemClock.elapsedRealtime()
+        val context = serviceContext ?: return resultJson(
+            exitCode = -1,
+            stdout = "",
+            stderr = "",
+            timedOut = false,
+            durationMillis = 0,
+            error = "Privileged service context is unavailable",
+        )
+        val result = PrivilegedEnvironmentInstaller(context).install(
+            archivePath = archivePath.orEmpty(),
+            mirrorId = mirrorId.orEmpty(),
+            toolIds = toolIds.orEmpty(),
+        )
+        return resultJson(
+            exitCode = result.exitCode,
+            stdout = result.stdout,
+            stderr = result.stderr,
+            timedOut = result.timedOut,
+            durationMillis = SystemClock.elapsedRealtime() - startedAt,
+            error = result.error,
+        )
+    }
 
     override fun execute(command: String?, timeoutMillis: Long): String {
         val startedAt = SystemClock.elapsedRealtime()

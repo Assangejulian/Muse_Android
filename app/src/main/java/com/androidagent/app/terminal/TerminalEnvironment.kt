@@ -17,8 +17,11 @@ data class TerminalEnvironmentConfig(
 ) {
     fun wrap(command: String): String {
         val safeDirectory = shellQuote(validatePath(workingDirectory, SecureSettings.DEFAULT_WORKING_DIRECTORY))
-        val prefix = pathPrefix.trim().takeIf(::isSafePath)
-        val pathClause = if (prefix == null) "" else "PATH=${shellQuote(prefix)}:\$PATH; export PATH; "
+        val prefixes = listOfNotNull(
+            EmbeddedLinuxEnvironment.SHIM_PATH,
+            pathPrefix.trim().takeIf(::isSafePath),
+        ).distinct().joinToString(":")
+        val pathClause = "PATH=${shellQuote(prefixes)}:\$PATH; export PATH; "
         return "cd $safeDirectory 2>/dev/null || cd /sdcard; $pathClause${command.trim()}"
     }
 

@@ -251,6 +251,19 @@ object ShizukuBridge {
                 }
         }
 
+    suspend fun installEnvironment(
+        archivePath: String,
+        mirrorId: String,
+        toolIds: String,
+    ): PrivilegedCommandResult = withContext(Dispatchers.IO) {
+        if (!enabled) return@withContext PrivilegedCommandResult.failure("Privileged backend is disabled")
+        val remote = service ?: return@withContext PrivilegedCommandResult.failure("Shizuku privileged service is not connected")
+        runCatching { PrivilegedCommandResult.parse(remote.installEnvironment(archivePath, mirrorId, toolIds)) }
+            .getOrElse { error ->
+                PrivilegedCommandResult.failure(error.message ?: error::class.java.simpleName)
+            }
+    }
+
     suspend fun testConnection(): PrivilegedCommandResult {
         val result = execute("id; getprop ro.build.version.release", 3_000L)
         mutableState.update {

@@ -83,6 +83,9 @@ import com.androidagent.app.network.TERMINAL_TOOL_TURN_LIMIT
 import com.androidagent.app.privileged.PrivilegedBackendRouter
 import com.androidagent.app.privileged.ShizukuBridge
 import com.androidagent.app.terminal.TERMINAL_TOOLS
+import com.androidagent.app.terminal.EmbeddedLinuxEnvironment
+import com.androidagent.app.terminal.EnvironmentInstallProgress
+import com.androidagent.app.terminal.InstalledLinuxEnvironment
 import com.androidagent.app.terminal.TerminalEnvironmentConfig
 import com.androidagent.app.terminal.TerminalEnvironmentProbe
 import kotlinx.coroutines.Job
@@ -185,6 +188,14 @@ private fun MuseApp() {
 
     LaunchedEffect(Unit) {
         PrivilegedBackendRouter.configure(context, true)
+    }
+
+    LaunchedEffect(shizukuState.connected) {
+        if (shizukuState.connected) {
+            environmentStatus = TerminalEnvironmentProbe.probe(TerminalEnvironmentConfig.from(settings))
+        } else {
+            environmentStatus = emptyMap()
+        }
     }
 
     fun persist(updated: List<Conversation>) {
@@ -584,11 +595,24 @@ private fun ConfigureWorkspace(
     var workingDirectory by remember { mutableStateOf(settings.terminalWorkingDirectory) }
     var pathPrefix by remember { mutableStateOf(settings.terminalPathPrefix) }
     var enabledTools by remember { mutableStateOf(settings.enabledTerminalTools) }
+    var selectedMirrorId by remember { mutableStateOf(settings.environmentMirrorId) }
+    var installedEnvironment by remember { mutableStateOf<InstalledLinuxEnvironment?>(null) }
+    var installProgress by remember { mutableStateOf<EnvironmentInstallProgress?>(null) }
+    var installing by remember { mutableStateOf(false) }
     var toolCommands by remember {
         mutableStateOf(TERMINAL_TOOLS.associate { it.id to settings.terminalToolCommand(it.id, it.defaultCommand) })
     }
     var feedback by remember { mutableStateOf("") }
     var probing by remember { mutableStateOf(false) }
+
+    LaunchedEffect(state.connected) {
+        if (state.connected) {
+            installedEnvironment = EmbeddedLinuxEnvironment.inspect()
+            installedEnvironment?.let { selectedMirrorId = it.mirrorId }
+        } else {
+            installedEnvironment = null
+        }
+    }
 
     fun saveConfiguration() {
         settings.currentProvider = provider
@@ -597,6 +621,7 @@ private fun ConfigureWorkspace(
         settings.modelName = model
         settings.terminalWorkingDirectory = workingDirectory
         settings.terminalPathPrefix = pathPrefix
+        settings.environmentMirrorId = selectedMirrorId
         settings.enabledTerminalTools = enabledTools
         TERMINAL_TOOLS.forEach { tool -> settings.setTerminalToolCommand(tool.id, toolCommands[tool.id].orEmpty()) }
         PrivilegedBackendRouter.configure(context, true)
@@ -672,7 +697,38 @@ private fun ConfigureWorkspace(
             OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("Model") }, modifier = Modifier.fillMaxWidth(), singleLine = true, shape = CyberShape)
         }
 
-        SettingsSection("INITIAL ENVIRONMENT", "为每次 Shizuku shell 设置工作目录与 PATH") {
+        SettingsSection("INITIAL ENVIRONMENT", "安装 Ubuntu ARM64，并把运行时接入 Shizuku 控制终端") {
+            val installed = installedEnvironment
+            Text(
+                if (installed == null) "STATUS // 未安装" else "STATUS // Ubuntu ${installed.version} · ${installed.tools.sorted().joinToString(" / ")}",
+                color = if (installed == null) Warning else NeonCyan,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            )
+            Text("镜像源同时用于 Ubuntu Base 下载和 ubuntu-ports 软件包", color = TextSecondary, fontSize = 11.sp)
+            EmbeddedLinuxEnvironment.mirrors.forEach { mirror ->
+                OutlinedButton(
+                    onClick = { selectedMirrorId = mirror.id },
+                    enabled = !installing,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = if (selectedMirrorId == mirror.id) NeonCyan else TextSecondary,
+                    ),
+                    shape = CyberShape,
+                ) {
+                    Text(
+                        if (selectedMirrorId == mirror.id) "[●] ${mirror.label}" else "[ ] ${mirror.label}",
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+            Text(
+                "Ubuntu ${EmbeddedLinuxEnvironment.ROOTFS_VERSION} · arm64-v8a · SHA-256 verified",
+                color = TextSecondary,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+            )
             OutlinedTextField(
                 value = workingDirectory,
                 onValueChange = { workingDirectory = it },
@@ -699,6 +755,67 @@ private fun ConfigureWorkspace(
                         enabledTools = if (enabled) enabledTools + tool.id else enabledTools - tool.id
                     },
                     onCommandChange = { value -> toolCommands = toolCommands + (tool.id to value) },
+                )
+            }
+            installProgress?.let { progress ->
+                if (progress.fraction == null) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = NeonPink, trackColor = Divider)
+                } else {
+                    LinearProgressIndicator(
+                        progress = { progress.fraction.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = NeonPink,
+                        trackColor = Divider,
+                    )
+                }
+                Text(progress.message, color = NeonPink, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+            }
+            Button(
+                enabled = state.connected && !installing && enabledTools.any { it != "shell" },
+                onClick = {
+                    saveConfiguration()
+                    val mirror = EmbeddedLinuxEnvironment.mirrorById(selectedMirrorId)
+                    if (mirror == null) {
+                        feedback = "未知镜像源"
+                    } else {
+                        installing = true
+                        installProgress = EnvironmentInstallProgress(0f, "准备安装")
+                        scope.launch {
+                            val result = runCatching {
+                                EmbeddedLinuxEnvironment.install(
+                                    context = context,
+                                    mirror = mirror,
+                                    tools = enabledTools - "shell",
+                                    onProgress = { progress -> scope.launch { installProgress = progress } },
+                                )
+                            }.getOrElse { error ->
+                                feedback = "环境安装失败：${error.message ?: error::class.java.simpleName}"
+                                null
+                            }
+                            if (result != null) {
+                                feedback = if (result.success) "环境安装完成" else "环境安装失败：${result.error ?: result.stderr.ifBlank { "未知错误" }}"
+                                if (result.success) {
+                                    installedEnvironment = EmbeddedLinuxEnvironment.inspect()
+                                    onEnvironmentStatus(TerminalEnvironmentProbe.probe(TerminalEnvironmentConfig.from(settings)))
+                                }
+                            }
+                            installing = false
+                            if (result?.success != true) installProgress = null
+                        }
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = NeonPink),
+                shape = CyberShape,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    when {
+                        installing -> "INSTALLING..."
+                        installed == null -> "下载并安装环境"
+                        else -> "修复 / 重新安装环境"
+                    },
+                    color = Void,
+                    fontWeight = FontWeight.Black,
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {

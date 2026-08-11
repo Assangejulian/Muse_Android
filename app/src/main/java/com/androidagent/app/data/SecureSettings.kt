@@ -80,6 +80,10 @@ class SecureSettings(context: Context) {
         get() = prefs.getString("terminal_path_prefix", "").orEmpty()
         set(value) = prefs.edit().putString("terminal_path_prefix", value.trim()).apply()
 
+    var environmentMirrorId: String
+        get() = prefs.getString("environment_mirror_id", "tuna").orEmpty().ifBlank { "tuna" }
+        set(value) = prefs.edit().putString("environment_mirror_id", value.trim()).apply()
+
     var enabledTerminalTools: Set<String>
         get() = prefs.getStringSet("enabled_terminal_tools", DEFAULT_TERMINAL_TOOLS)?.toSet()
             ?: DEFAULT_TERMINAL_TOOLS

@@ -1,4 +1,4 @@
-# Muse Android Agent 0.14.1
+# Muse Android Agent 0.14.2
 
 Muse is a private, sideloaded Android control terminal. The app combines an OpenAI-compatible model with an externally installed Shizuku service, so device operations run through Android's `shell` identity without Termux or an embedded ADB client.
 
@@ -25,14 +25,15 @@ The model never receives a general-purpose unbounded process handle. Local polic
 
 ## Initial environment
 
-Muse does not pretend that Node.js, Python, Java, or SSH is bundled. Configure lets the user:
+Configure can install a real Ubuntu 24.04.4 arm64 environment under `/data/local/tmp/muse` through the connected Shizuku UserService. The installer:
 
-- select which tools should be visible to the model;
-- set the executable name or an absolute executable path;
-- set a working directory and optional PATH prefix;
-- probe the connected Shizuku shell with `command -v`.
+- offers TUNA, USTC, and BFSU as pinned domestic Ubuntu mirrors;
+- downloads Ubuntu Base and verifies SHA-256 before extraction;
+- installs any selected Node.js, Python, Java, and SSH packages from `ubuntu-ports`;
+- exposes the installed commands through `/data/local/tmp/muse/shims` in every control-terminal PATH;
+- preserves Android shell tools such as `am`, `pm`, and `dumpsys` alongside the Linux runtimes.
 
-Shell and device commands are normally available through Android. Node.js, Python, Java, and SSH appear as ready only when a compatible Android executable is actually present at the configured path. Shipping full runtimes later requires trusted, architecture-specific Android binary packages.
+The embedded arm64 launcher is the unmodified proprietary `proroot` v1.2.8 binary release from `coderredlab/proroot`, used under its stated free-to-use-in-projects terms. Its five release assets are pinned by their published SHA-256 values. The Ubuntu Base archive is pinned to `04207713ece899c3740823d33690441ad3a7f0ded1101aca744e2b0f37ac7ff2`.
 
 ## Personalization
 
@@ -54,7 +55,7 @@ The UI includes presets for DeepSeek, Qwen, and MiMo and accepts any compatible 
 2. Install and open Muse.
 3. Open **Configure**, grant Muse access in Shizuku, and connect the control terminal.
 4. Select a provider and save its API key, Base URL, and model.
-5. Configure and probe the initial environment.
+5. Choose a domestic mirror and the desired runtimes, then install and probe the initial environment.
 6. Optionally edit `memory.md`, context length, and max output tokens under **个性化**.
 7. Use Chat normally, or enter `/shell id` for an explicit connection check.
 
@@ -68,4 +69,4 @@ Do not use Muse for payments, purchases, account-security changes, verification 
 .\gradlew.bat assembleDebug --no-daemon --console=plain
 ```
 
-The application ID remains `com.androidagent.app`; version `0.14.1` uses versionCode `43` for in-place updates.
+The application ID remains `com.androidagent.app`; version `0.14.2` uses versionCode `44` for in-place updates.
