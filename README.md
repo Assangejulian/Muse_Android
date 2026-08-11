@@ -1,4 +1,4 @@
-# Muse Android Agent 0.14.3
+# Muse Android Agent 0.14.4
 
 Muse is a private, sideloaded Android control terminal. The app combines an OpenAI-compatible model with an externally installed Shizuku service, so device operations run through Android's `shell` identity without Termux or an embedded ADB client.
 
@@ -29,6 +29,7 @@ Configure can install a real Ubuntu 24.04.4 arm64 environment under `/data/local
 
 - offers TUNA, USTC, and BFSU as pinned domestic Ubuntu mirrors;
 - downloads Ubuntu Base and verifies SHA-256 before extraction;
+- identifies downloads as an Android browser client so domestic mirror anti-abuse filters do not reject OkHttp;
 - installs any selected Node.js, Python, Java, and SSH packages from `ubuntu-ports`;
 - exposes the installed commands through `/data/local/tmp/muse/shims` in every control-terminal PATH;
 - preserves Android shell tools such as `am`, `pm`, and `dumpsys` alongside the Linux runtimes.
@@ -73,4 +74,4 @@ Do not use Muse for payments, purchases, account-security changes, verification 
 .\gradlew.bat assembleDebug --no-daemon --console=plain
 ```
 
-The application ID remains `com.androidagent.app`; version `0.14.3` uses versionCode `45` for in-place updates.
+The application ID remains `com.androidagent.app`; version `0.14.4` uses versionCode `46` for in-place updates.

@@ -39,6 +39,15 @@ class TerminalEnvironmentTest {
     }
 
     @Test
+    fun usesMirrorCompatibleBrowserIdentityForRootfsDownloads() {
+        val userAgent = rootfsUserAgent("0.14.4")
+
+        assertTrue(userAgent.startsWith("Mozilla/5.0 (Linux; Android"))
+        assertTrue(userAgent.contains("Chrome/"))
+        assertTrue(userAgent.endsWith("Muse/0.14.4"))
+    }
+
+    @Test
     fun parsesInstalledEnvironmentManifestDefensively() {
         val installed = EmbeddedLinuxEnvironment.parseManifest(
             """{"version":"24.04.4","mirror":"tuna","tools":["node","python"]}""",

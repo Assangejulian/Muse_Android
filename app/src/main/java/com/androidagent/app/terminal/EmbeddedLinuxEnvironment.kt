@@ -2,6 +2,7 @@ package com.androidagent.app.terminal
 
 import android.content.Context
 import android.os.Build
+import com.androidagent.app.BuildConfig
 import com.androidagent.app.privileged.PrivilegedCommandResult
 import com.androidagent.app.privileged.ShizukuBridge
 import kotlinx.coroutines.currentCoroutineContext
@@ -135,7 +136,11 @@ object EmbeddedLinuxEnvironment {
     ) {
         val partial = File(destination.parentFile, "${destination.name}.part")
         partial.delete()
-        val request = Request.Builder().url("${mirror.rootfsBaseUrl}/$ROOTFS_FILE").build()
+        val request = Request.Builder()
+            .url("${mirror.rootfsBaseUrl}/$ROOTFS_FILE")
+            .header("User-Agent", rootfsUserAgent(BuildConfig.VERSION_NAME))
+            .header("Accept", "application/octet-stream")
+            .build()
         val call = HTTP_CLIENT.newCall(request)
         val response = call.await()
         try {
@@ -210,3 +215,6 @@ object EmbeddedLinuxEnvironment {
         .readTimeout(2, TimeUnit.MINUTES)
         .build()
 }
+
+internal fun rootfsUserAgent(version: String): String =
+    "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/138.0 Mobile Safari/537.36 Muse/$version"
