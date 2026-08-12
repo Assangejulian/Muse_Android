@@ -31,6 +31,11 @@ class ExecutionHistory {
 
     fun recent(limit: Int = 12): List<ActionRecord> = records.takeLast(limit.coerceAtLeast(0))
 
+    fun recentActionTypes(limit: Int = 6): String = recent(limit)
+        .map { TraceSanitizer.actionType(it.action) }
+        .joinToString(",")
+        .ifBlank { "none" }
+
     fun promptLines(limit: Int = 12): List<String> = recent(limit).map { record ->
         "step=${record.step} action=${record.summary.ifBlank { ActorActionLabel.describe(record.action) }} success=${record.success} " +
             "before=${record.beforeFingerprint.orEmpty()} after=${record.afterFingerprint.orEmpty()} result=${record.result.take(500)}"

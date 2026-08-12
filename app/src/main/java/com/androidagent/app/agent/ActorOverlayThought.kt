@@ -55,7 +55,6 @@ internal object ActorOverlayThought {
         val lower = value.lowercase()
         return when {
             lower.contains("already followed") -> "结果：这个入口刚走过，换一条路"
-            lower.contains("near-miss") || lower.contains("similar tab") -> "结果：这是近似入口，不是目标词，去搜索"
             lower.contains("package changed") || lower.contains("foreground package") -> "结果：前台应用变了，重新看页"
             lower.contains("missing") || lower.contains("not in the current") -> "结果：没找到要点的控件"
             lower.contains("ambiguous") -> "结果：同名控件太多，没法点准"

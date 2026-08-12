@@ -210,7 +210,6 @@ class AgentRuntime(
                 var modelFailures = 0
                 var effectiveActions = 0
                 val evidenceCounters = StopGateEvidenceCounters()
-                val seenGoalTokens = mutableSetOf<String>()
 
                 traceStore.event(runId, "GOAL_READY", mapOf("goal" to plan.compactText(0)))
                 onLog("Goal ready; Actor owns the live execution route")
@@ -250,7 +249,6 @@ class AgentRuntime(
                         onLog(reason)
                     }
                     val before = privacy.observation
-                    seenGoalTokens += UnstickPolicy.seenOn(before, immutableGoal)
                     ledger.observe(before)
                     traceStore.event(
                         runId,
@@ -351,17 +349,11 @@ class AgentRuntime(
                             observation = before,
                             history = (history + executionHistory.promptLines()).takeLast(24),
                             screenshotDataUrl = screenshot,
-                            harnessState = buildString {
-                                appendLine("ADVISORY GOAL: ${milestone.objective}")
-                                val stuck = ledger.cyclePeriod() != null || ledger.noProgressCount >= 2
-                                appendLine("loopDetected=$stuck")
-                                appendLine("avoidReopening=${sideEffects.exploredActivationLabels().takeLast(8).joinToString(" | ").ifBlank { "none" }}")
-                                val missing = UnstickPolicy.missingTokens(immutableGoal, before, seenGoalTokens)
-                                val searchTargets = UnstickPolicy.searchTargets(before)
-                                val unstick = UnstickPolicy.harnessHint(missing, searchTargets, stuck)
-                                if (unstick.isNotBlank()) appendLine(unstick)
-                                append("terminalReady=${PrivilegedBackendRouter.isReady()}")
-                            },
+                            harnessState = "ADVISORY GOAL: ${milestone.objective}\n" +
+                                "loopDetected=${ledger.cyclePeriod() != null || ledger.noProgressCount >= 2}\n" +
+                                "avoidReopening=${sideEffects.exploredActivationLabels().takeLast(8).joinToString(" | ").ifBlank { "none" }}\n" +
+                                "recentActionTypes=${executionHistory.recentActionTypes()}\n" +
+                                "terminalReady=${PrivilegedBackendRouter.isReady()}",
                             toolTurns = toolTurns.takeLast(MAX_MODEL_TOOL_TURNS),
                             provider = settings.currentProvider,
                             primaryPackage = packagePolicy.primaryPackage,
@@ -419,26 +411,6 @@ class AgentRuntime(
                             "basedOn" to before.observationId,
                         ),
                     )
-
-                    val clickedLabel = when (proposed) {
-                        is AgentAction.ClickText -> proposed.text
-                        is AgentAction.ClickNode -> TargetResolver.resolve(proposed, before)
-                            ?.let { it.text.ifBlank { it.description } }
-                            .orEmpty()
-                        else -> ""
-                    }
-                    val missingNow = UnstickPolicy.missingTokens(immutableGoal, before, seenGoalTokens)
-                    val nearMiss = UnstickPolicy.nearMissToken(clickedLabel, missingNow)
-                    if (nearMiss != null && !UnstickPolicy.isSearchTarget(TargetResolver.resolve(proposed, before))) {
-                        val reason = "near-miss control '$clickedLabel' is not goal token '$nearMiss'; use search or a different route"
-                        val feedback = toolResultJson(false, proposed, before, before, "near_miss", reason)
-                        recordTurn(toolTurns, planned, feedback)
-                        history += "UNSTICK: $reason"
-                        ledger.record(StepTrace(milestone.id, before.observationId, TraceSanitizer.action(proposed), before.observationId, TransitionJudgement.NO_PROGRESS, reason))
-                        onThought(ActorOverlayThought.result(describeAction(proposed, TargetResolver.resolve(proposed, before)), reason, progressed = false))
-                        onLog(reason)
-                        continue
-                    }
 
                     if (proposed is AgentAction.Finish) {
                         onPhase(step, "Verifying")
