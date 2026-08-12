@@ -92,6 +92,7 @@ data class SideEffectCheck(
 class RunScopedSideEffectLedger(val runId: String? = null) {
     private val records = linkedMapOf<SideEffectIdentity, SideEffectRecord>()
     private val inputGenerations = linkedMapOf<InputTargetKey, Int>()
+    private val exploredActivations = linkedMapOf<String, String>()
     private var sequence = 0L
 
     @Synchronized
@@ -106,6 +107,16 @@ class RunScopedSideEffectLedger(val runId: String? = null) {
                 reason = "once-only side effect was already confirmed",
                 existing = existing,
             )
+        }
+        exploredActivationKey(identity)?.let { key ->
+            if (key in exploredActivations) {
+                val label = exploredActivations[key].orEmpty().ifBlank { "this control" }
+                return SideEffectCheck(
+                    allowed = false,
+                    reason = "already followed $label and left that page; pick a different control that advances the remaining goal",
+                    existing = existing,
+                )
+            }
         }
         val confirmedSubmit = if (identity.family == SideEffectFamily.SUBMIT_VALUE) {
             records.values.firstOrNull { record ->
@@ -272,11 +283,37 @@ class RunScopedSideEffectLedger(val runId: String? = null) {
     @Synchronized
     fun records(): List<SideEffectRecord> = records.values.toList()
 
+    /**
+     * A click that already opened another page (or flipped a boolean control)
+     * is a dead-end if the Actor tries it again after Back. The identity is the
+     * control's structure key, never an app-specific label.
+     */
+    @Synchronized
+    fun markActivationExplored(identity: SideEffectIdentity, label: String = "") {
+        val key = exploredActivationKey(identity) ?: return
+        exploredActivations[key] = label.trim().ifBlank { exploredActivations[key].orEmpty() }
+    }
+
+    @Synchronized
+    fun exploredActivationLabels(): List<String> =
+        exploredActivations.values.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+
     @Synchronized
     fun clear() {
         records.clear()
         inputGenerations.clear()
+        exploredActivations.clear()
         sequence = 0L
+    }
+
+    private fun exploredActivationKey(identity: SideEffectIdentity): String? {
+        if (identity.family != SideEffectFamily.ACTIVATE_CONTROL &&
+            identity.family != SideEffectFamily.POINT_ACTIVATION &&
+            identity.family != SideEffectFamily.SET_BOOLEAN_CONTROL
+        ) return null
+        val packageName = identity.targetPackage?.takeIf(String::isNotBlank) ?: return null
+        val target = identity.targetCrossWindowStructureKey?.takeIf(String::isNotBlank) ?: return null
+        return "$packageName|$target"
     }
 
     private fun inputTargetKey(target: ResolvedActionTarget): InputTargetKey {

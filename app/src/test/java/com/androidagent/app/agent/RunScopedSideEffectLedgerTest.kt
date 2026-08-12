@@ -92,6 +92,33 @@ class RunScopedSideEffectLedgerTest {
     }
 
     @Test
+    fun exploredNavigationClickCannotBeReopenedAfterLeaving() {
+        val ledger = RunScopedSideEffectLedger("run-1")
+        val video = observation(
+            UiNodeSnapshot(
+                1,
+                "9.1武侠",
+                "",
+                "Button",
+                true,
+                false,
+                "0,200,200,240",
+                viewId = "bili:id/tag",
+                treePath = listOf(0, 8),
+                packageName = "tv.danmaku.bili",
+            ),
+        )
+        val identity = SideEffectIdentityFactory.create(AgentAction.ClickNode(1), video)!!
+        assertTrue(ledger.markConfirmed(identity, video.observationId, dispatchSequence = 1))
+        assertTrue(ledger.check(identity).allowed)
+        ledger.markActivationExplored(identity, "9.1武侠")
+        val blocked = ledger.check(identity)
+        assertFalse(blocked.allowed)
+        assertTrue(blocked.reason.orEmpty().contains("9.1武侠"))
+        assertEquals(listOf("9.1武侠"), ledger.exploredActivationLabels())
+    }
+
+    @Test
     fun confirmedClickIsNotARunWideHardLock() {
         val ledger = RunScopedSideEffectLedger("run-1")
         val screen = observation(UiNodeSnapshot(1, "Next", "", "Button", true, false, "0,0,100,40", viewId = "primary:id/next", packageName = "primary.app"))

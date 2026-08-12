@@ -7,6 +7,7 @@ data class ActionRecord(
     val beforeFingerprint: String? = null,
     val afterFingerprint: String? = null,
     val result: String,
+    val summary: String = "",
     val timestamp: Long = System.currentTimeMillis(),
 )
 
@@ -31,7 +32,7 @@ class ExecutionHistory {
     fun recent(limit: Int = 12): List<ActionRecord> = records.takeLast(limit.coerceAtLeast(0))
 
     fun promptLines(limit: Int = 12): List<String> = recent(limit).map { record ->
-        "step=${record.step} action=${record.action::class.simpleName} success=${record.success} " +
+        "step=${record.step} action=${record.summary.ifBlank { ActorActionLabel.describe(record.action) }} success=${record.success} " +
             "before=${record.beforeFingerprint.orEmpty()} after=${record.afterFingerprint.orEmpty()} result=${record.result.take(500)}"
     }
 

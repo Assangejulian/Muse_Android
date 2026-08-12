@@ -361,6 +361,7 @@ class AgentRuntime(
                             screenshotDataUrl = screenshot,
                             harnessState = "ADVISORY GOAL: ${milestone.objective}\n" +
                                 "loopDetected=${ledger.cyclePeriod() != null || ledger.noProgressCount >= 2}\n" +
+                                "avoidReopening=${sideEffects.exploredActivationLabels().takeLast(8).joinToString(" | ").ifBlank { "none" }}\n" +
                                 "terminalReady=${PrivilegedBackendRouter.isReady()}",
                             toolTurns = toolTurns.takeLast(MAX_MODEL_TOOL_TURNS),
                             provider = settings.currentProvider,
@@ -491,8 +492,8 @@ class AgentRuntime(
                         ): ActionExecutionResult {
                             dispatchedByDriver = true
                             onPhase(step, "Acting")
-                            onAction(describeAction(action))
-                            onLog("Tool: ${describeAction(action)}")
+                            onAction(describeAction(action, resolvedTarget?.semanticNode))
+                            onLog("Tool: ${describeAction(action, resolvedTarget?.semanticNode)}")
                             return service.executeDetailed(action, observation, resolvedTarget)
                         }
 
@@ -529,7 +530,9 @@ class AgentRuntime(
                         effectiveActions += 1
                         onActionCount(effectiveActions)
                         if (!dispatchedByDriver) {
-                            engineResult.action?.let { onAction(describeAction(it)) }
+                            engineResult.action?.let {
+                                onAction(describeAction(it, engineResult.resolvedTarget?.semanticNode))
+                            }
                         }
                     }
                     val stepAction = engineResult.action ?: proposed
@@ -591,6 +594,7 @@ class AgentRuntime(
                                 before.observationId,
                                 engineResult.after.observationId,
                                 engineResult.reason,
+                                summary = describeAction(stepAction, engineResult.resolvedTarget?.semanticNode),
                             ),
                         )
                         traceStore.event(
@@ -663,6 +667,7 @@ class AgentRuntime(
                             beforeFingerprint = before.observationId,
                             afterFingerprint = after.observationId,
                             result = if (judgement == TransitionJudgement.MILESTONE_COMPLETE) "evidence: $evidence" else evidence,
+                            summary = describeAction(stepAction, engineResult.resolvedTarget?.semanticNode),
                         ),
                     )
                     recordTurn(toolTurns, planned, feedback)
@@ -970,23 +975,8 @@ class AgentRuntime(
         return TraceSanitizer.observationDelta(before, after)
     }
 
-    private fun describeAction(action: AgentAction): String = when (action) {
-        is AgentAction.LaunchApp -> "launch_app(${action.packageName})"
-        is AgentAction.ClickText -> "click_text(${action.text.take(40)})"
-        is AgentAction.ClickNode -> "click_node(#${action.nodeId})"
-        is AgentAction.TapPoint -> "tap_point(${action.x},${action.y})"
-        is AgentAction.Swipe -> "swipe(${action.direction})"
-        is AgentAction.InputText -> "input_text(#${action.nodeId ?: 0}, ${action.text.length} chars)"
-        is AgentAction.SubmitInput -> "submit_input(#${action.nodeId ?: 0})"
-        is AgentAction.EnsureToggle -> "ensure_toggle(#${action.nodeId}, ${action.desired})"
-        is AgentAction.BindPredicate -> "bind_predicate(${action.predicateId})"
-        is AgentAction.Terminal -> "terminal(${action.command.length} chars, sha256=${TraceSanitizer.digest(action.command)})"
-        is AgentAction.Wait -> "wait(${action.milliseconds}ms)"
-        is AgentAction.Finish -> "finish"
-        is AgentAction.Fail -> "fail"
-        AgentAction.Back -> "back"
-        AgentAction.Home -> "home"
-    }
+    private fun describeAction(action: AgentAction, target: UiNodeSnapshot? = null): String =
+        ActorActionLabel.describe(action, target)
 
     private fun actionTarget(action: AgentAction, observation: Observation): String = when (action) {
         else -> TraceSanitizer.actionTarget(action, observation)

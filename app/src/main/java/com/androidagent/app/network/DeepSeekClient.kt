@@ -134,6 +134,8 @@ class DeepSeekClient(
             Use finish when the current state plus confirmed tool history supports the entire user goal. Use fail for
             a real blocker you cannot resolve. HARNESS STATE is advisory runtime context, not a fixed plan.
             Preserve user-provided values. Use history as feedback; if loopDetected=true, choose a different route.
+            If avoidReopening lists a control, never click it again. A control that already opened another page
+            is a detour; after Back, pick a different control that still advances the remaining user goal.
             Never click IME character keys. After exact text is entered and read back, use submit_input instead of
             typing it again. Prefer controls whose text/description advances the current milestone; otherwise
             inspect with terminal, scroll, go Back, or open a relevant filter/tab.
@@ -248,6 +250,8 @@ class DeepSeekClient(
             Use finish when current state plus confirmed tool history supports the whole goal. Use fail for a real
             blocker you cannot resolve. HARNESS STATE is advisory. Preserve user-provided values and use history as
             feedback; if loopDetected=true, choose a genuinely different route.
+            If avoidReopening lists a control, never click it again. After a detour, choose a different control
+            that still advances the remaining user goal instead of reopening the same one.
             Never click IME character keys. Prefer controls that advance the milestone; otherwise scroll, Back, or terminal inspect.
             input_text may use user-provided values, on-screen values, or short goal-implied search keywords —
             never dump the entire residual goal sentence into a field.

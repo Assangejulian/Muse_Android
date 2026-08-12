@@ -1,4 +1,4 @@
-# Muse Android Agent 0.17.1
+# Muse Android Agent 0.17.2
 
 Muse is a private, sideloaded Android control agent. The model owns the live route: Accessibility provides fresh UI-tree observation and node actions, while Shizuku provides launch, package/device inspection, bounded shell tools, and the optional Ubuntu runtime. DeepSeek and other text models work without screenshots; vision stays off unless the user explicitly configures a vision provider.
 
@@ -8,7 +8,7 @@ Registered capabilities:
 - **Accessibility** — live UI hierarchy, target validation, click/swipe/input actions, and a compact progress overlay on other apps
 - **Tools for the model** — `launch_app`, `click_node`, `click_text`, `tap_point`, `swipe`, `input_text`, `submit_input`, `ensure_toggle`, `bind_predicate`, `terminal`, `back`, `home`, `wait`, `finish`/`fail`
 
-The Compose UI offers Catppuccin Mocha dark mode and a softer Latte-inspired light mode, with System / Light / Dark selection, animated palette transitions, rounded controls, and compact two-line progress both in Chat and over other apps.
+The Compose UI offers Catppuccin Mocha dark mode and a sun-warmed Latte light mode, with System / Light / Dark selection, animated palette transitions, rounded controls, and compact two-line progress both in Chat and over other apps.
 
 ## Product surfaces
 
@@ -84,4 +84,4 @@ Do not use Muse for payments, purchases, account-security changes, verification 
 .\gradlew.bat assembleDebug --no-daemon --console=plain
 ```
 
-The application ID remains `com.androidagent.app`; version `0.17.1` uses versionCode `54` for in-place updates. Environment setup bootstraps `ca-certificates` over an APT-signed HTTP index before switching the selected mirror back to HTTPS for all remaining packages.
+The application ID remains `com.androidagent.app`; version `0.17.2` uses versionCode `55` for in-place updates. Environment setup bootstraps `ca-certificates` over an APT-signed HTTP index before switching the selected mirror back to HTTPS for all remaining packages.

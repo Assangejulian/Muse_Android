@@ -1,11 +1,13 @@
 package com.androidagent.app
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.core.view.WindowCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateContentSize
@@ -26,6 +28,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -65,6 +69,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -75,8 +80,11 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -129,22 +137,46 @@ private data class MusePalette(
     val success: Color,
     val teal: Color,
     val error: Color,
+    val onAccent: Color,
 )
 
+// Official Catppuccin Mocha. Dark stays faithful so the product still reads as Mocha.
 private val MochaPalette = MusePalette(
-    background = Color(0xFF1E1E2E), surfaceLow = Color(0xFF181825), surfaceHigh = Color(0xFF11111B),
-    surfaceRaised = Color(0xFF313244), primary = Color(0xFF89B4FA), accent = Color(0xFFCBA6F7),
-    tertiary = Color(0xFFFAB387), textPrimary = Color(0xFFCDD6F4), textSecondary = Color(0xFFA6ADC8),
-    divider = Color(0xFF45475A), warning = Color(0xFFF9E2AF), success = Color(0xFFA6E3A1),
-    teal = Color(0xFF94E2D5), error = Color(0xFFF38BA8),
+    background = Color(0xFF1E1E2E),
+    surfaceLow = Color(0xFF181825),
+    surfaceHigh = Color(0xFF11111B),
+    surfaceRaised = Color(0xFF313244),
+    primary = Color(0xFF89B4FA),
+    accent = Color(0xFFCBA6F7),
+    tertiary = Color(0xFFFAB387),
+    textPrimary = Color(0xFFCDD6F4),
+    textSecondary = Color(0xFFA6ADC8),
+    divider = Color(0xFF45475A),
+    warning = Color(0xFFF9E2AF),
+    success = Color(0xFFA6E3A1),
+    teal = Color(0xFF94E2D5),
+    error = Color(0xFFF38BA8),
+    onAccent = Color(0xFF11111B),
 )
 
+// Catppuccin Latte, sun-warmed: same rosewater / peach / mauve family,
+// but cream paper instead of the official cool blue-gray base.
 private val LattePalette = MusePalette(
-    background = Color(0xFFF4F1F7), surfaceLow = Color(0xFFFCF8FD), surfaceHigh = Color(0xFFEDE8F1),
-    surfaceRaised = Color(0xFFE4DEEA), primary = Color(0xFF6F83C5), accent = Color(0xFF8C6BB1),
-    tertiary = Color(0xFFC98261), textPrimary = Color(0xFF4C4F69), textSecondary = Color(0xFF6C6F85),
-    divider = Color(0xFFC9C2D0), warning = Color(0xFFB7791F), success = Color(0xFF4F8B57),
-    teal = Color(0xFF4B8F8A), error = Color(0xFFB74D68),
+    background = Color(0xFFF6F0E6),
+    surfaceLow = Color(0xFFFFF9F2),
+    surfaceHigh = Color(0xFFEFE4D6),
+    surfaceRaised = Color(0xFFE7D8C8),
+    primary = Color(0xFFC96B4A),
+    accent = Color(0xFFA36BB5),
+    tertiary = Color(0xFFD98A3D),
+    textPrimary = Color(0xFF433D38),
+    textSecondary = Color(0xFF7A7066),
+    divider = Color(0xFFD9CBBA),
+    warning = Color(0xFFDF8E1D),
+    success = Color(0xFF4F8F4A),
+    teal = Color(0xFF2E8A80),
+    error = Color(0xFFC94A5A),
+    onAccent = Color(0xFFFFF8F1),
 )
 
 private val LocalMusePalette = staticCompositionLocalOf { MochaPalette }
@@ -162,6 +194,7 @@ private val Warning: Color @Composable get() = LocalMusePalette.current.warning
 private val Success: Color @Composable get() = LocalMusePalette.current.success
 private val Teal: Color @Composable get() = LocalMusePalette.current.teal
 private val Error: Color @Composable get() = LocalMusePalette.current.error
+private val OnAccent: Color @Composable get() = LocalMusePalette.current.onAccent
 private val CyberShape = RoundedCornerShape(18.dp)
 private val CompactShape = RoundedCornerShape(12.dp)
 
@@ -194,18 +227,27 @@ private fun MuseTheme(mode: MuseThemeMode, content: @Composable () -> Unit) {
         success = animated(target.success, "theme-success"),
         teal = animated(target.teal, "theme-teal"),
         error = animated(target.error, "theme-error"),
+        onAccent = animated(target.onAccent, "theme-on-accent"),
     )
     val scheme = if (dark) darkColorScheme(
         primary = palette.primary, secondary = palette.accent, tertiary = palette.tertiary,
         background = palette.background, surface = palette.surfaceLow, surfaceVariant = palette.surfaceRaised,
-        onBackground = palette.textPrimary, onSurface = palette.textPrimary, onPrimary = palette.surfaceHigh,
-        onSecondary = palette.surfaceHigh, error = palette.error,
+        onBackground = palette.textPrimary, onSurface = palette.textPrimary, onPrimary = palette.onAccent,
+        onSecondary = palette.onAccent, error = palette.error,
     ) else lightColorScheme(
         primary = palette.primary, secondary = palette.accent, tertiary = palette.tertiary,
         background = palette.background, surface = palette.surfaceLow, surfaceVariant = palette.surfaceRaised,
-        onBackground = palette.textPrimary, onSurface = palette.textPrimary, onPrimary = Color.White,
-        onSecondary = Color.White, error = palette.error,
+        onBackground = palette.textPrimary, onSurface = palette.textPrimary, onPrimary = palette.onAccent,
+        onSecondary = palette.onAccent, error = palette.error,
     )
+    val view = LocalView.current
+    SideEffect {
+        val window = (view.context as? Activity)?.window ?: return@SideEffect
+        window.statusBarColor = palette.surfaceHigh.toArgb()
+        window.navigationBarColor = palette.surfaceHigh.toArgb()
+        WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !dark
+        WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = !dark
+    }
     CompositionLocalProvider(LocalMusePalette provides palette) {
         MaterialTheme(colorScheme = scheme, content = content)
     }
@@ -240,7 +282,19 @@ private enum class MusePage(val label: String) {
 
 @Composable
 private fun CatppuccinBackdrop() {
-    Box(Modifier.fillMaxSize().background(Void))
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        Void,
+                        SurfaceHigh.copy(alpha = 0.55f),
+                        Void,
+                    ),
+                ),
+            ),
+    )
 }
 
 @Composable
@@ -556,6 +610,7 @@ private fun MuseHeader(
             .fillMaxWidth()
             .background(SurfaceHigh),
     ) {
+        Box(Modifier.fillMaxWidth().height(2.dp).background(Brush.horizontalGradient(listOf(AcidYellow, NeonPink, NeonCyan))))
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -739,6 +794,7 @@ private fun ChatWorkspace(
                     EmptyChat(
                         shizukuConnected = shizukuConnected,
                         accessibilityConnected = accessibilityConnected,
+                        onSuggestion = onInputChange,
                     )
                 }
             }
@@ -774,7 +830,7 @@ private fun ChatWorkspace(
                 colors = ButtonDefaults.buttonColors(containerColor = if (running) Error else NeonPink),
                 shape = CompactShape,
             ) {
-                Text(if (running) "Stop" else "Send", color = SurfaceHigh, fontWeight = FontWeight.Bold)
+                Text(if (running) "Stop" else "Send", color = OnAccent, fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -823,33 +879,59 @@ private fun ExecutionStrip(runStatus: String, routeLabel: String, progressLines:
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun EmptyChat(shizukuConnected: Boolean, accessibilityConnected: Boolean) {
+private fun EmptyChat(
+    shizukuConnected: Boolean,
+    accessibilityConnected: Boolean,
+    onSuggestion: (String) -> Unit,
+) {
     Column(
-        Modifier.fillMaxWidth().padding(top = 46.dp),
-        verticalArrangement = Arrangement.spacedBy(13.dp),
+        Modifier.fillMaxWidth().padding(top = 36.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Text("今天想让 Muse 做什么？", color = TextPrimary, fontSize = 27.sp, fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp)
-        Text("模型自主决策 · 无障碍实时操作 · Shizuku 设备工具", color = NeonPink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text("今天想让 Muse 做什么？", color = TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Black, letterSpacing = (-0.6).sp)
+        Text("模型自己找路  ·  无障碍点按  ·  Shizuku 管设备", color = NeonPink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         Text(
             when {
                 accessibilityConnected && shizukuConnected ->
-                    "无障碍与 Shizuku 均已就绪。直接发送自然语言设备任务（点击、滑动、启动应用…）；节点树工具已接入，无需视觉模型。"
+                    "无障碍与 Shizuku 都已就绪。直接说一句自然语言任务就行，不必开视觉模型。"
                 accessibilityConnected ->
-                    "无障碍已连接，UI 工具可用。建议再到 Configure 连接 Shizuku 以获得启动应用与终端能力。"
+                    "无障碍已连接。再到 Configure 接上 Shizuku，就能启动应用和跑终端。"
                 shizukuConnected ->
-                    "Shizuku 终端主控已连接，可执行终端能够完成的设备任务；开启无障碍后还能识别并操作页面控件。"
+                    "Shizuku 已连接。打开无障碍后，Muse 才能看懂并点击页面上的控件。"
                 else ->
-                    "先到 Configure 开启无障碍（UI 工具）并连接 Shizuku。可用 /ask 纯问答，/shell 直接命令。"
+                    "先到 Configure 打开无障碍并连接 Shizuku。也可以先用 /ask 问答，或 /shell 跑命令。"
             },
             color = TextSecondary,
             lineHeight = 22.sp,
         )
-        Text("试试：打开 B 站，找到热搜第一个视频并点赞第一条评论", color = AcidYellow, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-        Text("/ask 解释一下这段日志", color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-        Text("/shell id", color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-        Text("launch · click · swipe · input · terminal", color = TextSecondary, fontSize = 11.sp)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(
+                "打开设置，打开 WLAN",
+                "回到桌面",
+                "/ask 解释一下这段日志",
+                "/shell id",
+            ).forEach { suggestion ->
+                SuggestionChip(suggestion) { onSuggestion(suggestion) }
+            }
+        }
     }
+}
+
+@Composable
+private fun SuggestionChip(text: String, onClick: () -> Unit) {
+    Text(
+        text,
+        modifier = Modifier
+            .border(1.dp, Divider, RoundedCornerShape(50))
+            .background(SurfaceLow, RoundedCornerShape(50))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 13.dp, vertical = 8.dp),
+        color = TextPrimary,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Medium,
+    )
 }
 
 @Composable
@@ -860,8 +942,8 @@ private fun MessageBubble(message: ChatMessage) {
         Column(
             Modifier
                 .fillMaxWidth(if (user) 0.86f else 0.94f)
-                .border(1.dp, if (user) NeonPink.copy(alpha = 0.5f) else Divider, CyberShape)
-                .background(if (user) NeonPink.copy(alpha = 0.13f) else SurfaceLow, CyberShape)
+                .border(1.dp, if (user) NeonPink.copy(alpha = 0.38f) else Divider.copy(alpha = 0.8f), CyberShape)
+                .background(if (user) NeonPink.copy(alpha = 0.12f) else SurfaceLow, CyberShape)
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(5.dp),
         ) {
@@ -1324,17 +1406,26 @@ private fun PersonalWorkspace(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
-        SettingsSection("APPEARANCE", "跟随系统，或固定使用柔和 Latte 亮色 / Mocha 暗色") {
+        SettingsSection("APPEARANCE", "Catppuccin：浅色是晒过的 Latte，深色是原版 Mocha") {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ThemeChoice("System", themeMode == MuseThemeMode.SYSTEM, Modifier.weight(1f)) {
-                    onThemeModeChange(MuseThemeMode.SYSTEM)
-                }
-                ThemeChoice("Light", themeMode == MuseThemeMode.LIGHT, Modifier.weight(1f)) {
-                    onThemeModeChange(MuseThemeMode.LIGHT)
-                }
-                ThemeChoice("Dark", themeMode == MuseThemeMode.DARK, Modifier.weight(1f)) {
-                    onThemeModeChange(MuseThemeMode.DARK)
-                }
+                ThemeChoice(
+                    label = "System",
+                    selected = themeMode == MuseThemeMode.SYSTEM,
+                    swatches = listOf(Color(0xFFF6F0E6), Color(0xFF1E1E2E), Color(0xFFCBA6F7)),
+                    modifier = Modifier.weight(1f),
+                ) { onThemeModeChange(MuseThemeMode.SYSTEM) }
+                ThemeChoice(
+                    label = "Light",
+                    selected = themeMode == MuseThemeMode.LIGHT,
+                    swatches = listOf(Color(0xFFF6F0E6), Color(0xFFC96B4A), Color(0xFFA36BB5)),
+                    modifier = Modifier.weight(1f),
+                ) { onThemeModeChange(MuseThemeMode.LIGHT) }
+                ThemeChoice(
+                    label = "Dark",
+                    selected = themeMode == MuseThemeMode.DARK,
+                    swatches = listOf(Color(0xFF1E1E2E), Color(0xFF89B4FA), Color(0xFFCBA6F7)),
+                    modifier = Modifier.weight(1f),
+                ) { onThemeModeChange(MuseThemeMode.DARK) }
             }
         }
         SettingsSection("USER MEMORY", "Markdown 会作为稳定偏好注入每次新请求") {
@@ -1392,15 +1483,16 @@ private fun PersonalWorkspace(
 private fun ThemeChoice(
     label: String,
     selected: Boolean,
+    swatches: List<Color>,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
     OutlinedButton(
         onClick = onClick,
-        modifier = modifier,
+        modifier = modifier.heightIn(min = 58.dp),
         shape = CompactShape,
         colors = ButtonDefaults.outlinedButtonColors(
-            containerColor = if (selected) NeonPink.copy(alpha = 0.18f) else Color.Transparent,
+            containerColor = if (selected) NeonPink.copy(alpha = 0.16f) else SurfaceLow,
             contentColor = if (selected) NeonPink else TextSecondary,
         ),
         border = androidx.compose.foundation.BorderStroke(
@@ -1409,7 +1501,14 @@ private fun ThemeChoice(
         ),
         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
     ) {
-        Text(label, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, fontSize = 12.sp)
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                swatches.forEach { color ->
+                    Box(Modifier.size(10.dp).background(color, CircleShape).border(0.5.dp, Divider.copy(alpha = 0.5f), CircleShape))
+                }
+            }
+            Text(label, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, fontSize = 12.sp)
+        }
     }
 }
 

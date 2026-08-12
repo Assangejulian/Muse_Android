@@ -137,6 +137,35 @@ class RuntimeGuardsTest {
         assertEquals(2, ledger.cyclePeriod())
     }
 
+    @Test
+    fun structureCycleIsDetectedEvenWhenVolatileTextChurns() {
+        val ledger = RunLedger(plan)
+        fun page(pageId: String, text: String, windowId: Int) = Observation(
+            "tv.danmaku.bili",
+            listOf(
+                UiNodeSnapshot(
+                    1,
+                    text,
+                    "",
+                    "Button",
+                    true,
+                    false,
+                    "0,0,100,30",
+                    viewId = "bili:id/$pageId",
+                    treePath = listOf(0, 1),
+                    packageName = "tv.danmaku.bili",
+                    windowId = windowId,
+                ),
+            ),
+            windowIds = setOf(windowId),
+        )
+        ledger.observe(page("video", "play 1", 4))
+        ledger.observe(page("movie", "武侠", 5))
+        ledger.observe(page("video", "play 2", 4))
+        ledger.observe(page("movie", "武侠", 5))
+        assertEquals(2, ledger.cyclePeriod())
+    }
+
     private fun editable(id: Int, focused: Boolean) = UiNodeSnapshot(id, "", "", "EditText", false, true, "0,0,500,80", focused = focused)
     private fun assertTrue(value: Boolean) = org.junit.Assert.assertTrue(value)
 }

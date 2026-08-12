@@ -1412,6 +1412,7 @@ class RunLedger(private var plan: TaskPlan) {
     var currentMilestoneIndex: Int = 0
         private set
     private val fingerprints = ArrayDeque<String>()
+    private val structureFingerprints = ArrayDeque<String>()
     private val unknownDispatches = mutableSetOf<String>()
     private val traces = mutableListOf<StepTrace>()
     private val evidence = linkedMapOf<String, String>()
@@ -1426,15 +1427,22 @@ class RunLedger(private var plan: TaskPlan) {
         currentMilestoneIndex = completedMilestones.coerceIn(0, newPlan.milestones.size)
         noProgressCount = 0
         fingerprints.clear()
+        structureFingerprints.clear()
         val retainedIds = newPlan.milestones.take(currentMilestoneIndex).mapTo(mutableSetOf()) { it.id }
         evidence.keys.retainAll(retainedIds)
     }
 
     fun observe(observation: Observation) {
         val fingerprint = observation.stateFingerprint()
-        if (fingerprints.lastOrNull() == fingerprint) return
-        fingerprints.addLast(fingerprint)
-        while (fingerprints.size > 16) fingerprints.removeFirst()
+        if (fingerprints.lastOrNull() != fingerprint) {
+            fingerprints.addLast(fingerprint)
+            while (fingerprints.size > 16) fingerprints.removeFirst()
+        }
+        val structure = observation.structureFingerprint()
+        if (structureFingerprints.lastOrNull() != structure) {
+            structureFingerprints.addLast(structure)
+            while (structureFingerprints.size > 16) structureFingerprints.removeFirst()
+        }
     }
 
     /** Read-only duplicate check. Attempts are charged only by recordDispatch after execution. */
@@ -1503,10 +1511,14 @@ class RunLedger(private var plan: TaskPlan) {
         return "$completed proven: $proof"
     }
 
-    fun cyclePeriod(): Int? {
-        val trail = fingerprints.toList()
+    fun cyclePeriod(): Int? = cycleIn(structureFingerprints) ?: cycleIn(fingerprints)
+
+    private fun cycleIn(trail: ArrayDeque<String>): Int? {
+        val samples = trail.toList()
         for (period in 1..4) {
-            if (trail.size >= period * 2 && trail.takeLast(period) == trail.dropLast(period).takeLast(period)) return period
+            if (samples.size >= period * 2 &&
+                samples.takeLast(period) == samples.dropLast(period).takeLast(period)
+            ) return period
         }
         return null
     }

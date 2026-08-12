@@ -453,6 +453,14 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
             )
             if (evidence.proven) {
                 sideEffectIdentity?.let { request.sideEffects.markConfirmed(it) }
+                noteExploredRoute(
+                    request,
+                    sideEffectIdentity,
+                    action,
+                    request.executionObservation,
+                    rawSettled.observation,
+                    preflight.resolvedTarget,
+                )
                 request.bindings.markResultObserved(preparation, actionKey)
                 completeMilestone(request, evidence, rawSettled.observation, action, events)
                 return RuntimeStepEngineResult(
@@ -484,6 +492,14 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
                     },
                 ),
             )
+            noteExploredRoute(
+                request,
+                sideEffectIdentity,
+                action,
+                request.executionObservation,
+                rawSettled.observation,
+                preflight.resolvedTarget,
+            )
             return RuntimeStepEngineResult(
                 status = RuntimeStepStatus.RESULT_UNKNOWN,
                 action = action,
@@ -505,6 +521,14 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         }
 
         sideEffectIdentity?.let { request.sideEffects.markConfirmed(it) }
+        noteExploredRoute(
+            request,
+            sideEffectIdentity,
+            action,
+            request.executionObservation,
+            rawSettled.observation,
+            preflight.resolvedTarget,
+        )
         request.bindings.markResultObserved(preparation, actionKey)
         request.ledger.recordDispatch(
             action,
@@ -637,6 +661,30 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         request.ledger.advance(proof)
         request.recoveryPolicy.resetFailures(request.milestone.id)
         events += RuntimeStepEngineEvent("stop_gate", "local evidence")
+    }
+
+    private fun noteExploredRoute(
+        request: RuntimeStepRequest,
+        identity: SideEffectIdentity?,
+        action: AgentAction,
+        before: Observation,
+        after: Observation,
+        resolvedTarget: ResolvedActionTarget?,
+    ) {
+        if (identity == null) return
+        val navigated = before.packageName != after.packageName ||
+            before.structureFingerprint() != after.structureFingerprint()
+        val booleanControl = identity.targetKind == SideEffectTargetKind.BOOLEAN_CONTROL
+        if (!navigated && !booleanControl) return
+        if (identity.family != SideEffectFamily.ACTIVATE_CONTROL &&
+            identity.family != SideEffectFamily.POINT_ACTIVATION &&
+            identity.family != SideEffectFamily.SET_BOOLEAN_CONTROL
+        ) return
+        val label = resolvedTarget?.semanticNode
+            ?.let { node -> node.text.ifBlank { node.description } }
+            .orEmpty()
+            .ifBlank { TraceSanitizer.actionType(action) }
+        request.sideEffects.markActivationExplored(identity, label)
     }
 
     private fun evaluate(request: RuntimeStepRequest, observation: Observation): PredicateEvidence =
