@@ -1,7 +1,9 @@
 package com.androidagent.app.agent
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ObservationFingerprintContractTest {
@@ -40,6 +42,26 @@ class ObservationFingerprintContractTest {
         val second = observation().copy(ocrText = "Ready")
 
         assertEquals(first.observationId, second.observationId)
+    }
+
+    @Test
+    fun boundsAndFocusFlickerAreNotStructuralStale() {
+        val first = observation()
+        val second = observation().copy(
+            nodes = first.nodes.map { it.copy(bounds = "8,12,120,56", focused = true) },
+        )
+        assertNotEquals(first.observationId, second.observationId)
+        assertEquals(first.structureFingerprint(), second.structureFingerprint())
+        assertFalse(ObservationDispatchPolicy.isStale(first, second))
+    }
+
+    @Test
+    fun packageOrWindowChangeIsStructuralStale() {
+        val first = observation()
+        val otherPackage = first.copy(packageName = "other.app")
+        val otherWindow = first.copy(windowIds = setOf(9), windowPackages = mapOf(9 to "primary.app"))
+        assertTrue(ObservationDispatchPolicy.isStale(first, otherPackage))
+        assertTrue(ObservationDispatchPolicy.isStale(first, otherWindow))
     }
 
     private fun observation(text: String = "Ready") = Observation(

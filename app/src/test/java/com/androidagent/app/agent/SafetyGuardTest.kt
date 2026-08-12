@@ -1,7 +1,6 @@
 package com.androidagent.app.agent
 
 import org.junit.Assert.assertTrue
-import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class SafetyGuardTest {
@@ -19,10 +18,27 @@ class SafetyGuardTest {
     }
 
     @Test
-    fun mutatingActionsStayBlockedOnSensitivePages() {
+    fun clickingTheSensitiveControlStaysBlocked() {
         val packages = setOf("primary.app")
         assertTrue(SafetyGuard.validate(AgentAction.ClickText("payment"), sensitiveScreen, "primary.app", packages).isFailure)
-        assertTrue(SafetyGuard.validate(AgentAction.TapPoint(500, 500), sensitiveScreen, "primary.app", packages).isFailure)
+    }
+
+    @Test
+    fun nearbySafeActionsRemainAllowedWhenAPaymentLabelIsVisible() {
+        val packages = setOf("shop.app")
+        val screen = Observation(
+            "shop.app",
+            listOf(
+                UiNodeSnapshot(1, "payment", "", "TextView", false, false, "0,0,100,30", packageName = "shop.app"),
+                UiNodeSnapshot(2, "Search", "", "Button", true, false, "0,40,100,80", packageName = "shop.app"),
+                UiNodeSnapshot(3, "", "", "EditText", true, true, "0,90,200,130", focused = true, packageName = "shop.app"),
+            ),
+        )
+        assertTrue(SafetyGuard.validate(AgentAction.ClickText("Search"), screen, "shop.app", packages).isSuccess)
+        assertTrue(SafetyGuard.validate(AgentAction.TapPoint(500, 500), screen, "shop.app", packages).isSuccess)
+        assertTrue(SafetyGuard.validate(AgentAction.Swipe("up"), screen, "shop.app", packages).isSuccess)
+        assertTrue(SafetyGuard.validate(AgentAction.InputText("shoes", 3), screen, "shop.app", packages).isSuccess)
+        assertTrue(SafetyGuard.validate(AgentAction.ClickText("payment"), screen, "shop.app", packages).isFailure)
     }
 
     @Test
@@ -34,13 +50,10 @@ class SafetyGuardTest {
     }
 
     @Test
-    fun sensitivePageAllowsOnlyRecoveryOrTerminationActions() {
+    fun recoveryActionsRemainAvailableOnAPageWithSensitiveLabels() {
         val packages = setOf("primary.app")
         listOf(AgentAction.Back, AgentAction.Home, AgentAction.Wait(250), AgentAction.Finish("stop"), AgentAction.Fail("stop"))
             .forEach { assertTrue(SafetyGuard.validate(it, sensitiveScreen, "primary.app", packages).isSuccess) }
-        assertFalse(SafetyGuard.validate(AgentAction.InputText("safe"), sensitiveScreen, "primary.app", packages).isSuccess)
-        assertFalse(SafetyGuard.validate(AgentAction.Swipe("up"), sensitiveScreen, "primary.app", packages).isSuccess)
-        assertFalse(SafetyGuard.validate(AgentAction.EnsureToggle(1, true), sensitiveScreen, "primary.app", packages).isSuccess)
     }
 
     @Test

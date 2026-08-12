@@ -2,6 +2,7 @@ package com.androidagent.app.overlay
 
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Color
+import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.text.TextUtils
@@ -19,10 +20,14 @@ import com.androidagent.app.privileged.PrivilegedBackendRouter
 
 /**
  * Compact system-wide run monitor shown while Muse drives another app.
+ *
+ * Status text is a pass-through overlay so bottom app tabs stay tappable.
+ * Only the small Stop chip consumes touches.
  */
 class AgentOverlayController(private val service: AccessibilityService) {
     private val windowManager = service.getSystemService(WindowManager::class.java)
-    private var controlBar: View? = null
+    private var statusBar: View? = null
+    private var stopChip: View? = null
     private var statusText: TextView? = null
     private var summaryText: TextView? = null
     private var chainText: TextView? = null
@@ -33,7 +38,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
             hide()
             return
         }
-        if (controlBar == null) show()
+        if (statusBar == null) show()
         val route = if (PrivilegedBackendRouter.isReady()) "SHIZUKU PRIMARY" else "A11Y NODE"
         statusText?.text = service.getString(R.string.agent_overlay_status, route)
         chainText?.text = service.getString(
@@ -61,8 +66,10 @@ class AgentOverlayController(private val service: AccessibilityService) {
     }
 
     fun hide() {
-        controlBar?.let { runCatching { windowManager.removeView(it) } }
-        controlBar = null
+        statusBar?.let { runCatching { windowManager.removeView(it) } }
+        stopChip?.let { runCatching { windowManager.removeView(it) } }
+        statusBar = null
+        stopChip = null
         statusText = null
         summaryText = null
         chainText = null
@@ -71,28 +78,27 @@ class AgentOverlayController(private val service: AccessibilityService) {
 
     fun setCaptureHidden(hidden: Boolean) {
         val visibility = if (hidden) View.INVISIBLE else View.VISIBLE
-        controlBar?.visibility = visibility
+        statusBar?.visibility = visibility
+        stopChip?.visibility = visibility
     }
 
     private fun show() {
         val density = service.resources.displayMetrics.density
+        val stopWidth = (76 * density).toInt()
+        val stopHeight = (44 * density).toInt()
+
         val container = FrameLayout(service).apply {
-            setPadding((10 * density).toInt(), (6 * density).toInt(), (10 * density).toInt(), (8 * density).toInt())
+            setPadding((10 * density).toInt(), (6 * density).toInt(), stopWidth + (18 * density).toInt(), (8 * density).toInt())
         }
         val bar = LinearLayout(service).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding((14 * density).toInt(), (9 * density).toInt(), (7 * density).toInt(), (9 * density).toInt())
+            setPadding((14 * density).toInt(), (9 * density).toInt(), (14 * density).toInt(), (9 * density).toInt())
             background = GradientDrawable().apply {
                 cornerRadius = 18 * density
                 setColor(Color.rgb(24, 24, 37))
                 setStroke((1f * density).toInt(), Color.rgb(69, 71, 90))
             }
-        }
-        val progressColumn = LinearLayout(service).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         statusText = TextView(service).apply {
             setText(R.string.agent_overlay_operating)
@@ -119,9 +125,24 @@ class AgentOverlayController(private val service: AccessibilityService) {
             ellipsize = TextUtils.TruncateAt.END
             setLineSpacing(0f, 1.08f)
         }
-        progressColumn.addView(statusText)
-        progressColumn.addView(chainText)
-        progressColumn.addView(summaryText)
+        bar.addView(statusText)
+        bar.addView(chainText)
+        bar.addView(summaryText)
+        container.addView(
+            bar,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT),
+        )
+        statusBar = container
+        windowManager.addView(
+            container,
+            overlayParams(
+                width = WindowManager.LayoutParams.MATCH_PARENT,
+                height = WindowManager.LayoutParams.WRAP_CONTENT,
+                gravity = Gravity.BOTTOM,
+                touchable = false,
+            ),
+        )
+
         val stop = Button(service).apply {
             setText(R.string.agent_overlay_stop)
             isAllCaps = true
@@ -134,23 +155,37 @@ class AgentOverlayController(private val service: AccessibilityService) {
             }
             setOnClickListener { AgentController.stop() }
         }
-        bar.addView(progressColumn)
-        bar.addView(stop, LinearLayout.LayoutParams((76 * density).toInt(), (44 * density).toInt()))
-        container.addView(
-            bar,
-            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT),
-        )
-        controlBar = container
+        stopChip = stop
         windowManager.addView(
-            container,
-            WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                android.graphics.PixelFormat.TRANSLUCENT,
-            ).apply { gravity = Gravity.BOTTOM },
+            stop,
+            overlayParams(
+                width = stopWidth,
+                height = stopHeight,
+                gravity = Gravity.BOTTOM or Gravity.END,
+                touchable = true,
+            ).apply {
+                x = (10 * density).toInt()
+                y = (14 * density).toInt()
+            },
         )
+    }
+
+    private fun overlayParams(
+        width: Int,
+        height: Int,
+        gravity: Int,
+        touchable: Boolean,
+    ): WindowManager.LayoutParams {
+        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            if (touchable) 0 else WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        return WindowManager.LayoutParams(
+            width,
+            height,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            flags,
+            PixelFormat.TRANSLUCENT,
+        ).apply { this.gravity = gravity }
     }
 
     private fun statusLabel(status: String): String = when (status) {

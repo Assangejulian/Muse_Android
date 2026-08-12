@@ -560,7 +560,7 @@ data class Observation(
                     }.orEmpty()
                 }
                 "${node.packageName}:${node.windowId}:$key:${node.className}:" +
-                    "${node.clickable}:${node.editable}:${node.enabled}:${node.focused}:" +
+                    "${node.clickable}:${node.editable}:${node.enabled}:" +
                     "${node.checked}:${node.selected}:${node.scrollable}"
             }
         val topology = "windowIds=${windowIds.sorted().joinToString(",")}"
@@ -581,20 +581,20 @@ data class Observation(
         appendLine("imeVisible=$imeVisible")
         appendLine("observationComplete=$isComplete privacyFiltered=$privacyFiltered nodeCount=${nodes.size} collectionIssues=$collectionIssues")
         if (ocrText.isNotBlank()) appendLine("localOcr=${ocrText.take(2_000)}")
-        prioritizedNodes().take(120).forEach { node ->
+        prioritizedNodes().take(MAX_PROMPT_NODES).forEach { node ->
             append("#${node.id} ${node.className}")
-            if (node.text.isNotBlank() && !node.password) append(" text=${node.text.take(120)}")
-            if (node.description.isNotBlank() && !node.password) append(" description=${node.description.take(120)}")
+            if (node.text.isNotBlank() && !node.password) append(" text=${node.text.take(80)}")
+            if (node.description.isNotBlank() && !node.password) append(" description=${node.description.take(80)}")
             append(" clickable=${node.clickable} editable=${node.editable} bounds=${node.bounds}")
             if (node.packageName.isNotBlank() && node.packageName != packageName) append(" package=${node.packageName}")
             if (node.viewId.isNotBlank()) append(" viewId=${node.viewId}")
-            append(" withinKey=${node.withinWindowStableKey} enabled=${node.enabled} focused=${node.focused}")
+            append(" enabled=${node.enabled} focused=${node.focused}")
             node.checked?.let { append(" checked=$it") }
             if (node.selected) append(" selected=true")
             if (node.scrollable) append(" scrollable=true")
             appendLine()
         }
-    }.take(18_000)
+    }.take(10_000)
 
     private fun prioritizedNodes(): List<UiNodeSnapshot> = nodes
         .asSequence()
@@ -620,6 +620,26 @@ data class Observation(
         .trim()
         .replace(Regex("\\b\\d{1,4}([:/.-]\\d{1,4}){1,3}\\b"), "<dynamic>")
         .take(120)
+
+    private companion object {
+        const val MAX_PROMPT_NODES = 40
+    }
+}
+
+/**
+ * Planning can take many seconds. Bounds, clocks, and focus flicker must not
+ * discard a still-valid action. Only a real topology / actionability change is stale.
+ */
+internal object ObservationDispatchPolicy {
+    fun isStale(planning: Observation, execution: Observation): Boolean {
+        if (planning.packageName.isNotBlank() &&
+            execution.packageName.isNotBlank() &&
+            planning.packageName != execution.packageName
+        ) {
+            return true
+        }
+        return planning.structureFingerprint() != execution.structureFingerprint()
+    }
 }
 
 enum class ActionDispatchMode {

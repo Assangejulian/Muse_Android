@@ -24,11 +24,11 @@ object RuntimeStepExecutor {
         launchablePackages: Set<String>,
         goal: GoalContext,
     ): RuntimeStepPreflight {
-        if (executionObservation.observationId != planningObservation.observationId) {
+        if (ObservationDispatchPolicy.isStale(planningObservation, executionObservation)) {
             return RuntimeStepPreflight(
                 executionObservation = executionObservation,
                 stale = true,
-                guarded = GuardResult(null, "screen changed before tool dispatch; re-observe before acting"),
+                guarded = GuardResult(null, "screen structure changed before tool dispatch; re-observe before acting"),
                 action = null,
             )
         }

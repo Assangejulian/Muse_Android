@@ -75,9 +75,8 @@ object SensitiveOperationPolicy {
                 require(isSafeRecoveryAction(action)) { "Sensitive goal permits recovery or termination actions only" }
             }
         }
-        matchObservation(observation)?.let {
-            require(isSafeRecoveryAction(action)) { "Sensitive page permits recovery or termination actions only" }
-        }
+        // A payment/login *label* elsewhere on the page must not freeze the whole
+        // app. Only the action payload and the resolved target are gated.
         matchAction(action)?.let { error("Sensitive action blocked: ${it.term}") }
         targetMatch(action, observation)?.let { error("Sensitive action target blocked: ${it.term}") }
     }

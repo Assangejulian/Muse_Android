@@ -808,6 +808,65 @@ class RuntimeContractsTest {
     }
 
     @Test
+    fun boundsAndFocusFlickerDoNotStaleAStructurallyIdenticalAction() {
+        val path = listOf(0, 2)
+        fun node(bounds: String, focused: Boolean) = UiNodeSnapshot(
+            1,
+            "Search",
+            "",
+            "Button",
+            true,
+            false,
+            bounds,
+            withinWindowStableKey = AgentAccessibilityService.stableNodeKey(
+                "primary.app", 10, "primary:id/search", "Button", path,
+            ),
+            crossWindowStructureKey = AgentAccessibilityService.crossWindowStructureKey(
+                "primary.app", "primary:id/search", "Button", path,
+            ),
+            viewId = "primary:id/search",
+            treePath = path,
+            focused = focused,
+            packageName = "primary.app",
+            windowId = 10,
+        )
+        val planning = Observation(
+            "primary.app",
+            listOf(node("0,0,100,30", focused = false)),
+            windowIds = setOf(10),
+            windowPackages = mapOf(10 to "primary.app"),
+        )
+        val execution = Observation(
+            "primary.app",
+            listOf(node("4,8,108,42", focused = true)),
+            windowIds = setOf(10),
+            windowPackages = mapOf(10 to "primary.app"),
+        )
+        assertTrue(planning.observationId != execution.observationId)
+        assertFalse(ObservationDispatchPolicy.isStale(planning, execution))
+
+        val milestone = TaskMilestone(
+            "m1",
+            "open search",
+            listOf(UiPredicate(UiPredicateKind.ELEMENT_PRESENT, targetHint = "Search", description = "search present")),
+        )
+        val runtimePlan = TaskPlan("search", "primary.app", GoalContext("search"), listOf(milestone))
+        val preflight = RuntimeStepExecutor.preflight(
+            guard = ToolGuard(runtimePlan, "primary.app"),
+            ledger = RunLedger(runtimePlan),
+            proposed = AgentAction.ClickNode(1),
+            planningObservation = planning,
+            executionObservation = execution,
+            milestone = milestone,
+            packagePolicy = PackagePolicy(mutableSetOf("primary.app"), "primary.app"),
+            launchablePackages = setOf("primary.app"),
+            goal = runtimePlan.goal,
+        )
+        assertFalse(preflight.stale)
+        assertEquals(AgentAction.ClickNode(1), preflight.action)
+    }
+
+    @Test
     fun observationFingerprintIncludesWindowTopologyAndWithinWindowKey() {
         val path = listOf(0, 1)
         fun node(windowId: Int) = UiNodeSnapshot(

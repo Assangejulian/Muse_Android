@@ -22,16 +22,10 @@ object PrivacyGuard {
     fun prepare(observation: Observation): PrivacyDecision {
         val packageName = observation.packageName.lowercase()
         val packageBlocked = blockedPackages.any(packageName::startsWith)
-        val passwordField = observation.nodes.any { it.visible && it.password }
-        val matchedTerm = SensitiveOperationPolicy.matchObservation(observation)
-        // Keep model access blocked for sensitive surfaces; the runtime now degrades by
-        // recovering (back/relaunch/replan) instead of aborting the whole run immediately.
-        val reason = when {
-            packageBlocked -> "system permission or installer surface"
-            passwordField -> "password field is visible"
-            matchedTerm != null -> "sensitive screen term detected: ${matchedTerm.term}"
-            else -> null
-        }
+        // Permission/installer surfaces stay blocked. A password field or a
+        // "支付/授权" label on an otherwise ordinary page is redacted, not a
+        // hard stop — otherwise WeChat/Alipay/login sheets can never be used.
+        val reason = if (packageBlocked) "system permission or installer surface" else null
         return PrivacyDecision(
             allowed = reason == null,
             reason = reason,

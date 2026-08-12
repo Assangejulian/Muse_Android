@@ -1,4 +1,4 @@
-# Muse Android Agent 0.17.0
+# Muse Android Agent 0.17.1
 
 Muse is a private, sideloaded Android control agent. The model owns the live route: Accessibility provides fresh UI-tree observation and node actions, while Shizuku provides launch, package/device inspection, bounded shell tools, and the optional Ubuntu runtime. DeepSeek and other text models work without screenshots; vision stays off unless the user explicitly configures a vision provider.
 
@@ -84,4 +84,4 @@ Do not use Muse for payments, purchases, account-security changes, verification 
 .\gradlew.bat assembleDebug --no-daemon --console=plain
 ```
 
-The application ID remains `com.androidagent.app`; version `0.17.0` uses versionCode `53` for in-place updates. Environment setup bootstraps `ca-certificates` over an APT-signed HTTP index before switching the selected mirror back to HTTPS for all remaining packages.
+The application ID remains `com.androidagent.app`; version `0.17.1` uses versionCode `54` for in-place updates. Environment setup bootstraps `ca-certificates` over an APT-signed HTTP index before switching the selected mirror back to HTTPS for all remaining packages.

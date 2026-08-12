@@ -888,12 +888,7 @@ class AgentRuntime(
      */
     private suspend fun enrichWithLocalOcr(observation: Observation, lockedPackage: String?): Observation {
         if (lockedPackage.isNullOrBlank() || observation.packageName != lockedPackage) return observation
-        val accessibleTextChars = observation.nodes.sumOf { node ->
-            if (node.visible && !node.password && !node.isInputMethod) node.text.length + node.description.length else 0
-        }
-        if (accessibleTextChars >= MIN_ACCESSIBLE_TEXT_FOR_OCR || observation.nodes.count { it.visible } >= MIN_VISIBLE_NODES_FOR_OCR) {
-            return observation
-        }
+        if (!LocalOcrPolicy.shouldEnrich(observation)) return observation
         val fingerprint = observation.observationId
         val now = System.currentTimeMillis()
         if (cachedOcrFingerprint == fingerprint && now - cachedOcrAtMillis <= OCR_CACHE_MILLIS) {
@@ -1021,8 +1016,6 @@ class AgentRuntime(
         const val REQUIRED_STABLE_SAMPLES = 2
         const val PACKAGE_OBSERVATION_RETRIES = 4
         const val PACKAGE_OBSERVATION_RETRY_MS = 250L
-        const val MIN_ACCESSIBLE_TEXT_FOR_OCR = 24
-        const val MIN_VISIBLE_NODES_FOR_OCR = 8
         const val MAX_OCR_LINES = 80
         const val MAX_OCR_CHARS = 4_000
         const val OCR_CACHE_MILLIS = 1_000L

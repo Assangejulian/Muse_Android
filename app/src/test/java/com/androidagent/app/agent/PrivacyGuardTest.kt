@@ -6,18 +6,28 @@ import org.junit.Test
 
 class PrivacyGuardTest {
     @Test
-    fun blocksPasswordBeforeModelAccess() {
+    fun redactsPasswordWithoutBlockingTheRestOfThePage() {
         val observation = Observation("example.app", listOf(UiNodeSnapshot(1, "secret", "password", "EditText", false, true, "0,0,100,30", password = true)))
         val decision = PrivacyGuard.prepare(observation)
-        assertFalse(decision.allowed)
-        assertTrue(decision.reason.orEmpty().contains("password"))
+        assertTrue(decision.allowed)
         assertFalse(decision.observation.visibleText().contains("secret"))
     }
 
     @Test
-    fun blocksSensitiveSurfaceBeforeModelAccess() {
+    fun paymentLabelOnAnOrdinaryAppDoesNotBlockModelAccess() {
         val observation = Observation("shop.app", listOf(UiNodeSnapshot(1, "payment", "", "Button", true, false, "0,0,100,30")))
-        assertFalse(PrivacyGuard.prepare(observation).allowed)
+        assertTrue(PrivacyGuard.prepare(observation).allowed)
+    }
+
+    @Test
+    fun permissionControllerStillBlocksModelAccess() {
+        val observation = Observation(
+            "com.android.permissioncontroller",
+            listOf(UiNodeSnapshot(1, "Allow", "", "Button", true, false, "0,0,100,30")),
+        )
+        val decision = PrivacyGuard.prepare(observation)
+        assertFalse(decision.allowed)
+        assertTrue(decision.reason.orEmpty().contains("permission"))
     }
 
     @Test

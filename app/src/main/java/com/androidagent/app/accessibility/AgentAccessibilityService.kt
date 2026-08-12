@@ -426,24 +426,30 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private fun findLiveNode(snapshot: UiNodeSnapshot): AccessibilityNodeInfo? {
-        snapshot.treePath?.let { treePath ->
-            val matchingWindows = windows.filter { window ->
-                snapshot.windowId == null || snapshot.windowId == window.id
-            }
-            if (matchingWindows.size != 1) return null
-            var candidate = matchingWindows.single().root ?: return null
-            for (childIndex in treePath.drop(1)) {
-                candidate = candidate.getChild(childIndex) ?: return null
-            }
-            return candidate.takeIf { liveNodeMatchesSnapshot(it, snapshot) }
+        findLiveNodeByTreePath(snapshot)?.let { return it }
+        return findLiveNodeByIdentity(snapshot)
+    }
+
+    private fun findLiveNodeByTreePath(snapshot: UiNodeSnapshot): AccessibilityNodeInfo? {
+        val treePath = snapshot.treePath ?: return null
+        val matchingWindows = windows.filter { window ->
+            snapshot.windowId == null || snapshot.windowId == window.id
         }
+        if (matchingWindows.size != 1) return null
+        var candidate = matchingWindows.single().root ?: return null
+        for (childIndex in treePath.drop(1)) {
+            candidate = candidate.getChild(childIndex) ?: return null
+        }
+        return candidate.takeIf { liveNodeMatchesSnapshot(it, snapshot) }
+    }
+
+    private fun findLiveNodeByIdentity(snapshot: UiNodeSnapshot): AccessibilityNodeInfo? {
         val matches = mutableListOf<AccessibilityNodeInfo>()
         windows.sortedByDescending { it.layer }.forEach { window ->
             window.root?.let { root ->
                 val rootPackage = root.packageName?.toString().orEmpty()
                 if (ObservationPolicy.shouldIncludePackage(rootPackage) &&
-                    (snapshot.packageName.isBlank() || snapshot.packageName == rootPackage) &&
-                    (snapshot.windowId == null || snapshot.windowId == window.id)
+                    (snapshot.packageName.isBlank() || snapshot.packageName == rootPackage)
                 ) {
                     collectLiveIdentityMatches(root, snapshot, 0, matches)
                 }
@@ -474,8 +480,12 @@ class AgentAccessibilityService : AccessibilityService() {
         if (depth > MAX_DEPTH || output.size > 1) return
         val rect = Rect().also(node::getBoundsInScreen)
         val bounds = "${rect.left},${rect.top},${rect.right},${rect.bottom}"
+        val text = if (node.isPassword) "" else node.text?.toString().orEmpty()
+        val description = node.contentDescription?.toString().orEmpty()
         val strongIdentityMatches = liveNodeMatchesSnapshot(node, snapshot) && when {
             snapshot.viewId.isNotBlank() -> node.viewIdResourceName == snapshot.viewId
+            snapshot.text.isNotBlank() && text == snapshot.text -> true
+            snapshot.description.isNotBlank() && description == snapshot.description -> true
             snapshot.bounds.isNotBlank() -> bounds == snapshot.bounds
             else -> false
         }
@@ -501,13 +511,15 @@ class AgentAccessibilityService : AccessibilityService() {
             delay(32)
         }
         return try {
-            if (PrivilegedDeviceBackend.tap(x.toInt(), y.toInt())) return true
+            // Prefer the live accessibility node. input tap reports success even
+            // when it hits the progress overlay or a transformed coordinate.
             if (accessibilityClick?.invoke() == true) return true
             val path = Path().apply { moveTo(x, y) }
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
                 .build()
-            dispatchGestureAwait(gesture, GESTURE_TIMEOUT_MS)
+            if (dispatchGestureAwait(gesture, GESTURE_TIMEOUT_MS)) return true
+            PrivilegedDeviceBackend.tap(x.toInt(), y.toInt())
         } finally {
             if (::overlayController.isInitialized) {
                 withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(false) }

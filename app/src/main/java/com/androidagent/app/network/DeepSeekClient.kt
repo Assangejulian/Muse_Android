@@ -171,7 +171,10 @@ class DeepSeekClient(
                 // Cache a per-run compatibility fallback so every step does not repeat a rejected native request.
                 legacyPlannerModels += capabilityKey
             } catch (_: InvalidNativeToolCallException) {
-                // A malformed model turn falls back only for this step; it does not disable native tools for the run.
+                // Flash-class models often emit one malformed tool call and then
+                // keep doing it. Falling back once for the rest of the process
+                // avoids a 30s native retry on every subsequent step.
+                legacyPlannerModels += capabilityKey
             }
         }
 
