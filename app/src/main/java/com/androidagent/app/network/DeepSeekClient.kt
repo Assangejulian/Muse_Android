@@ -137,6 +137,8 @@ class DeepSeekClient(
             Preserve user-provided values. Use history as feedback; if loopDetected=true, choose a different route.
             If avoidReopening lists a control, never click it again. A control that already opened another page
             is a detour; after Back, pick a different control that still advances the remaining user goal.
+            Playing video, timers, and feed animation are not progress. If the next needed control is off-screen,
+            swipe instead of clicking the same visible node again.
             Never click IME character keys. After exact text is entered and read back, use submit_input instead of
             typing it again. Prefer controls whose text/description advances the current milestone; otherwise
             inspect with terminal, scroll, go Back, or open a relevant filter/tab.
@@ -255,6 +257,7 @@ class DeepSeekClient(
             feedback; if loopDetected=true, choose a genuinely different route.
             If avoidReopening lists a control, never click it again. After a detour, choose a different control
             that still advances the remaining user goal instead of reopening the same one.
+            Playing video and animated feeds are not progress. If the target is off-screen, swipe.
             Never click IME character keys. Prefer controls that advance the milestone; otherwise scroll, Back, or terminal inspect.
             input_text may use user-provided values, on-screen values, or short goal-implied search keywords —
             never dump the entire residual goal sentence into a field.

@@ -54,7 +54,8 @@ internal object ActorOverlayThought {
             lower.contains("sensitive") || lower.contains("safety") -> "结果：安全策略拦住了"
             lower.contains("finish_rejected") || lower.contains("not yet") -> "结果：还不能收工，继续做"
             lower.contains("stale") -> "结果：页面已切换，重新规划"
-            progressed -> "结果：页面有变化，继续"
+            lower.contains("no stable") || lower.contains("screen unchanged") -> "结果：结构没变，往下划或换控件"
+            progressed -> "结果：页面结构变了，继续"
             value.any { it in '\u4e00'..'\u9fff' } -> "结果：${clip(value, 22)}"
             else -> "结果：这一步没有推进"
         }

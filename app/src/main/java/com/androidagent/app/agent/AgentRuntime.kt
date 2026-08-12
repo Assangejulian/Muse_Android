@@ -970,7 +970,8 @@ class AgentRuntime(
         .put("action", describeAction(action))
         .put("beforeObservationId", before.observationId)
         .put("afterObservationId", after.observationId)
-        .put("changed", before.observationId != after.observationId)
+        .put("changed", before.structureFingerprint() != after.structureFingerprint() ||
+            before.packageName != after.packageName)
         .put("package", after.packageName)
         .put("detail", detail.take(if (action is AgentAction.Terminal) 8_000 else 800))
         .toString()
@@ -1017,7 +1018,7 @@ class AgentRuntime(
         const val MAX_STORED_TOOL_TURNS = 20
         const val RUN_TIMEOUT_MS = 20 * 60 * 1_000L
         const val STABILITY_POLL_MS = 250L
-        const val MAX_SETTLE_MS = 2_500L
+        const val MAX_SETTLE_MS = 1_200L
         const val LAUNCH_SETTLE_MS = 12_000L
         const val REQUIRED_STABLE_SAMPLES = 2
         const val PACKAGE_OBSERVATION_RETRIES = 4

@@ -461,6 +461,7 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
                     request.executionObservation,
                     rawSettled.observation,
                     preflight.resolvedTarget,
+                    committed = true,
                 )
                 request.bindings.markResultObserved(preparation, actionKey)
                 completeMilestone(request, evidence, rawSettled.observation, action, events)
@@ -500,6 +501,7 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
                 request.executionObservation,
                 rawSettled.observation,
                 preflight.resolvedTarget,
+                committed = false,
             )
             return RuntimeStepEngineResult(
                 status = RuntimeStepStatus.RESULT_UNKNOWN,
@@ -529,6 +531,7 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
             request.executionObservation,
             rawSettled.observation,
             preflight.resolvedTarget,
+            committed = true,
         )
         request.bindings.markResultObserved(preparation, actionKey)
         request.ledger.recordDispatch(
@@ -564,7 +567,7 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         request.ledger.observe(after)
         val evidence = evaluate(request, after)
         events += RuntimeStepEngineEvent("evaluate", if (evidence.proven) "proven" else "unknown")
-        val changed = request.executionObservation.observationId != after.observationId ||
+        val changed = request.executionObservation.packageName != after.packageName ||
             request.executionObservation.structureFingerprint() != after.structureFingerprint()
         val status = if (evidence.proven) {
             completeMilestone(request, evidence, after, action, events)
@@ -671,16 +674,21 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         before: Observation,
         after: Observation,
         resolvedTarget: ResolvedActionTarget?,
+        committed: Boolean,
     ) {
         if (identity == null) return
-        val navigated = before.packageName != after.packageName ||
-            before.structureFingerprint() != after.structureFingerprint()
-        val booleanControl = identity.targetKind == SideEffectTargetKind.BOOLEAN_CONTROL
-        if (!navigated && !booleanControl) return
         if (identity.family != SideEffectFamily.ACTIVATE_CONTROL &&
             identity.family != SideEffectFamily.POINT_ACTIVATION &&
             identity.family != SideEffectFamily.SET_BOOLEAN_CONTROL
         ) return
+        val navigated = before.packageName != after.packageName ||
+            before.structureFingerprint() != after.structureFingerprint()
+        val remember = when (identity.family) {
+            SideEffectFamily.ACTIVATE_CONTROL, SideEffectFamily.POINT_ACTIVATION -> committed || navigated
+            SideEffectFamily.SET_BOOLEAN_CONTROL -> committed
+            else -> false
+        }
+        if (!remember) return
         val label = resolvedTarget?.semanticNode
             ?.let { node -> node.text.ifBlank { node.description } }
             .orEmpty()
