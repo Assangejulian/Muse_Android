@@ -53,22 +53,21 @@ class RuntimeGuardsTest {
     }
 
     @Test
-    fun blockedAttemptsDoNotConsumeDuplicateBudget() {
+    fun confirmedActionsRemainUnderActorControl() {
         val ledger = RunLedger(plan)
         val screen = Observation("example.app", listOf(UiNodeSnapshot(1, "", "", "Button", true, false, "0,0,100,30")))
         val action = AgentAction.ClickNode(1)
         assertNull(ledger.blockRepeated(action, screen))
         assertNull(ledger.blockRepeated(action, screen))
-        // Budget is charged only by recordDispatch. Exhaust the per-screen attempt budget.
-        repeat(3) {
+        repeat(8) {
             assertNull(ledger.blockRepeated(action, screen))
             ledger.recordDispatch(action, screen)
         }
-        assertNotNull(ledger.blockRepeated(action, screen))
+        assertNull(ledger.blockRepeated(action, screen))
     }
 
     @Test
-    fun sameNoProgressActionIsBlockedAcrossReplansOnTheSameScreen() {
+    fun noProgressFeedbackDoesNotHardBlockActorRetry() {
         val ledger = RunLedger(plan)
         val screen = Observation("example.app", emptyList())
         val action = AgentAction.Terminal("cmd package resolve-activity example.app")
@@ -84,7 +83,7 @@ class RuntimeGuardsTest {
         )
         ledger.replacePlan(plan.copy(summary = "revised"), 0)
 
-        assertNotNull(ledger.blockRepeated(action, screen))
+        assertNull(ledger.blockRepeated(action, screen))
     }
 
     @Test

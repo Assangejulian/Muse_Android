@@ -78,7 +78,8 @@ interface RuntimeStepDriver {
         resolvedTarget: ResolvedActionTarget?,
     ): ActionExecutionResult = executeDetailed(action, observation)
     suspend fun settle(before: Observation, action: AgentAction): RuntimeStepSettleResult
-    suspend fun executeRecovery(decision: RecoveryDecision, observation: Observation): RuntimeStepRecoveryResult
+    suspend fun executeRecovery(decision: RecoveryDecision, observation: Observation): RuntimeStepRecoveryResult =
+        RuntimeStepRecoveryResult(false, observation, "Automatic recovery is disabled; return failure to the Actor")
 }
 
 enum class RuntimeStepStatus {
@@ -201,13 +202,30 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
             )
         }
 
-        val preparation = request.bindings.prepareActionBinding(
+        // Keep useful target/input bookkeeping when a live action uniquely maps
+        // to the advisory predicate, but never make that inferred mapping a
+        // prerequisite for an ordinary action. Explicit predicateId requests
+        // remain strict because the Actor deliberately selected that contract.
+        val inferredPreparation = request.bindings.prepareActionBinding(
             request.milestone,
             action,
             request.executionObservation,
             request.runId,
             preflight.resolvedTarget,
         )
+        val explicitBinding = action is AgentAction.BindPredicate || when (action) {
+            is AgentAction.ClickText -> action.predicateId != null
+            is AgentAction.ClickNode -> action.predicateId != null
+            is AgentAction.InputText -> action.predicateId != null
+            is AgentAction.SubmitInput -> action.predicateId != null
+            is AgentAction.EnsureToggle -> action.predicateId != null
+            else -> false
+        }
+        val preparation = if (inferredPreparation.prepared || explicitBinding) {
+            inferredPreparation
+        } else {
+            BindingPreparation(prepared = true, reason = "optional advisory binding skipped")
+        }
         events += RuntimeStepEngineEvent("prepare_binding", if (preparation.prepared) "prepared" else "rejected")
         if (!preparation.prepared) {
             val reason = if (preparation.reason.contains("ambiguous", true)) {
@@ -646,46 +664,26 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         resolvedTarget: ResolvedActionTarget? = null,
         inputGeneration: Int? = null,
     ): RuntimeStepEngineResult {
-        val decision = request.recoveryPolicy.decide(
-            RecoveryContext(
-                expectedPackage = request.targetPackage,
-                currentPackage = observation.packageName,
-                currentMilestoneId = request.milestone.id,
-                currentMilestoneKind = request.milestone.kind,
-                failedAction = action,
-                reason = reason,
-            ),
-        )
-        decisions += decision
-        val recovery = driver.executeRecovery(decision, observation)
-        events += RuntimeStepEngineEvent("recover", "${decision.action}:${recovery.detail}")
-        val status = when {
-            decision.action == RecoveryAction.REPLAN -> RuntimeStepStatus.REPLAN_REQUIRED
-            // Policy almost never emits ABORT; if it does, surface as replan so the
-            // outer Actor loop continues instead of budget-suiciding the run.
-            decision.action == RecoveryAction.ABORT -> RuntimeStepStatus.REPLAN_REQUIRED
-            !recovery.success -> if (decision.action == RecoveryAction.REOBSERVE || decision.action == RecoveryAction.WAIT) {
-                fallbackStatus
-            } else {
-                RuntimeStepStatus.REPLAN_REQUIRED
-            }
-            else -> fallbackStatus
-        }
+        // Local failures are returned to the Actor as observations. The runtime
+        // does not inject Back, relaunch, wait, or a second planning layer behind
+        // the model's decision. Safety blocks still prevent dispatch, while the
+        // next model turn owns recovery from the fresh state.
+        events += RuntimeStepEngineEvent("actor_feedback", reason.name)
         request.ledger.record(
             StepTrace(
                 request.milestone.id,
                 request.planningObservation.observationId,
                 action?.let(TraceSanitizer::action) ?: "none",
-                recovery.observation.observationId,
+                observation.observationId,
                 TransitionJudgement.NO_PROGRESS,
                 detail,
             ),
         )
         return RuntimeStepEngineResult(
-            status,
+            fallbackStatus,
             action,
             request.executionObservation,
-            recovery.observation,
+            observation,
             execution,
             reason = detail,
             dispatchResultState = dispatchResultState,

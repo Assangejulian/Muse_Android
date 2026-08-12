@@ -85,4 +85,20 @@ class SafetyGuardTest {
             ).isSuccess,
         )
     }
+
+    @Test
+    fun actorCanChooseAnotherInstalledAppDuringAValidRun() {
+        val policy = PackagePolicy(
+            allowedPackages = mutableSetOf("primary.app"),
+            primaryPackage = "primary.app",
+        )
+        assertTrue(
+            SafetyGuard.validate(
+                AgentAction.LaunchApp("secondary.app"),
+                Observation("primary.app", emptyList()),
+                policy,
+                setOf("primary.app", "secondary.app"),
+            ).isSuccess,
+        )
+    }
 }

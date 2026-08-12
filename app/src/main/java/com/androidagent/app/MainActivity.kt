@@ -61,7 +61,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -69,11 +71,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -89,6 +93,7 @@ import com.androidagent.app.chat.ChatMessage
 import com.androidagent.app.chat.ChatStore
 import com.androidagent.app.chat.Conversation
 import com.androidagent.app.data.PersonalizationStore
+import com.androidagent.app.data.MuseThemeMode
 import com.androidagent.app.data.SecureSettings
 import com.androidagent.app.network.TerminalAgentClient
 import com.androidagent.app.network.TerminalCommandPolicy
@@ -109,45 +114,119 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
-// Catppuccin Mocha. Existing semantic names are kept to avoid scattering theme wiring.
-private val Void = Color(0xFF1E1E2E)
-private val SurfaceLow = Color(0xFF181825)
-private val SurfaceHigh = Color(0xFF11111B)
-private val SurfaceRaised = Color(0xFF313244)
-private val NeonCyan = Color(0xFF89B4FA)
-private val NeonPink = Color(0xFFCBA6F7)
-private val AcidYellow = Color(0xFFFAB387)
-private val TextPrimary = Color(0xFFCDD6F4)
-private val TextSecondary = Color(0xFFA6ADC8)
-private val Divider = Color(0xFF45475A)
-private val Warning = Color(0xFFF9E2AF)
-private val Success = Color(0xFFA6E3A1)
-private val Teal = Color(0xFF94E2D5)
-private val Error = Color(0xFFF38BA8)
+private data class MusePalette(
+    val background: Color,
+    val surfaceLow: Color,
+    val surfaceHigh: Color,
+    val surfaceRaised: Color,
+    val primary: Color,
+    val accent: Color,
+    val tertiary: Color,
+    val textPrimary: Color,
+    val textSecondary: Color,
+    val divider: Color,
+    val warning: Color,
+    val success: Color,
+    val teal: Color,
+    val error: Color,
+)
+
+private val MochaPalette = MusePalette(
+    background = Color(0xFF1E1E2E), surfaceLow = Color(0xFF181825), surfaceHigh = Color(0xFF11111B),
+    surfaceRaised = Color(0xFF313244), primary = Color(0xFF89B4FA), accent = Color(0xFFCBA6F7),
+    tertiary = Color(0xFFFAB387), textPrimary = Color(0xFFCDD6F4), textSecondary = Color(0xFFA6ADC8),
+    divider = Color(0xFF45475A), warning = Color(0xFFF9E2AF), success = Color(0xFFA6E3A1),
+    teal = Color(0xFF94E2D5), error = Color(0xFFF38BA8),
+)
+
+private val LattePalette = MusePalette(
+    background = Color(0xFFF4F1F7), surfaceLow = Color(0xFFFCF8FD), surfaceHigh = Color(0xFFEDE8F1),
+    surfaceRaised = Color(0xFFE4DEEA), primary = Color(0xFF6F83C5), accent = Color(0xFF8C6BB1),
+    tertiary = Color(0xFFC98261), textPrimary = Color(0xFF4C4F69), textSecondary = Color(0xFF6C6F85),
+    divider = Color(0xFFC9C2D0), warning = Color(0xFFB7791F), success = Color(0xFF4F8B57),
+    teal = Color(0xFF4B8F8A), error = Color(0xFFB74D68),
+)
+
+private val LocalMusePalette = staticCompositionLocalOf { MochaPalette }
+private val Void: Color @Composable get() = LocalMusePalette.current.background
+private val SurfaceLow: Color @Composable get() = LocalMusePalette.current.surfaceLow
+private val SurfaceHigh: Color @Composable get() = LocalMusePalette.current.surfaceHigh
+private val SurfaceRaised: Color @Composable get() = LocalMusePalette.current.surfaceRaised
+private val NeonCyan: Color @Composable get() = LocalMusePalette.current.primary
+private val NeonPink: Color @Composable get() = LocalMusePalette.current.accent
+private val AcidYellow: Color @Composable get() = LocalMusePalette.current.tertiary
+private val TextPrimary: Color @Composable get() = LocalMusePalette.current.textPrimary
+private val TextSecondary: Color @Composable get() = LocalMusePalette.current.textSecondary
+private val Divider: Color @Composable get() = LocalMusePalette.current.divider
+private val Warning: Color @Composable get() = LocalMusePalette.current.warning
+private val Success: Color @Composable get() = LocalMusePalette.current.success
+private val Teal: Color @Composable get() = LocalMusePalette.current.teal
+private val Error: Color @Composable get() = LocalMusePalette.current.error
 private val CyberShape = RoundedCornerShape(18.dp)
 private val CompactShape = RoundedCornerShape(12.dp)
+
+@Composable
+private fun MuseTheme(mode: MuseThemeMode, content: @Composable () -> Unit) {
+    val dark = when (mode) {
+        MuseThemeMode.SYSTEM -> isSystemInDarkTheme()
+        MuseThemeMode.LIGHT -> false
+        MuseThemeMode.DARK -> true
+    }
+    val target = if (dark) MochaPalette else LattePalette
+    @Composable
+    fun animated(color: Color, label: String): Color = animateColorAsState(
+        targetValue = color,
+        animationSpec = tween(320),
+        label = label,
+    ).value
+    val palette = MusePalette(
+        background = animated(target.background, "theme-background"),
+        surfaceLow = animated(target.surfaceLow, "theme-surface-low"),
+        surfaceHigh = animated(target.surfaceHigh, "theme-surface-high"),
+        surfaceRaised = animated(target.surfaceRaised, "theme-surface-raised"),
+        primary = animated(target.primary, "theme-primary"),
+        accent = animated(target.accent, "theme-accent"),
+        tertiary = animated(target.tertiary, "theme-tertiary"),
+        textPrimary = animated(target.textPrimary, "theme-text-primary"),
+        textSecondary = animated(target.textSecondary, "theme-text-secondary"),
+        divider = animated(target.divider, "theme-divider"),
+        warning = animated(target.warning, "theme-warning"),
+        success = animated(target.success, "theme-success"),
+        teal = animated(target.teal, "theme-teal"),
+        error = animated(target.error, "theme-error"),
+    )
+    val scheme = if (dark) darkColorScheme(
+        primary = palette.primary, secondary = palette.accent, tertiary = palette.tertiary,
+        background = palette.background, surface = palette.surfaceLow, surfaceVariant = palette.surfaceRaised,
+        onBackground = palette.textPrimary, onSurface = palette.textPrimary, onPrimary = palette.surfaceHigh,
+        onSecondary = palette.surfaceHigh, error = palette.error,
+    ) else lightColorScheme(
+        primary = palette.primary, secondary = palette.accent, tertiary = palette.tertiary,
+        background = palette.background, surface = palette.surfaceLow, surfaceVariant = palette.surfaceRaised,
+        onBackground = palette.textPrimary, onSurface = palette.textPrimary, onPrimary = Color.White,
+        onSecondary = Color.White, error = palette.error,
+    )
+    CompositionLocalProvider(LocalMusePalette provides palette) {
+        MaterialTheme(colorScheme = scheme, content = content)
+    }
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ShizukuBridge.initialize(applicationContext)
         setContent {
-            MaterialTheme(
-                colorScheme = darkColorScheme(
-                    primary = NeonCyan,
-                    secondary = NeonPink,
-                    tertiary = AcidYellow,
-                    background = Void,
-                    surface = SurfaceLow,
-                    surfaceVariant = SurfaceRaised,
-                    onBackground = TextPrimary,
-                    onSurface = TextPrimary,
-                    onPrimary = SurfaceHigh,
-                    onSecondary = SurfaceHigh,
-                    error = Error,
-                ),
-            ) {
-                MuseApp()
+            val settings = remember { SecureSettings(applicationContext) }
+            var themeMode by remember { mutableStateOf(settings.themeMode) }
+            MuseTheme(themeMode) {
+                MuseApp(
+                    settings = settings,
+                    themeMode = themeMode,
+                    onThemeModeChange = { selected ->
+                        settings.themeMode = selected
+                        themeMode = selected
+                    },
+                )
             }
         }
     }
@@ -165,9 +244,12 @@ private fun CatppuccinBackdrop() {
 }
 
 @Composable
-private fun MuseApp() {
+private fun MuseApp(
+    settings: SecureSettings,
+    themeMode: MuseThemeMode,
+    onThemeModeChange: (MuseThemeMode) -> Unit,
+) {
     val context = LocalContext.current
-    val settings = remember { SecureSettings(context) }
     val memoryStore = remember { PersonalizationStore(context) }
     val chatStore = remember { ChatStore(context) }
     val scope = rememberCoroutineScope()
@@ -421,7 +503,7 @@ private fun MuseApp() {
                     shizukuConnected = shizukuState.connected,
                     accessibilityConnected = agentState.accessibilityConnected,
                     routeLabel = when {
-                        shizukuState.connected && agentState.accessibilityConnected -> "SHIZUKU PRIMARY"
+                        shizukuState.connected && agentState.accessibilityConnected -> "MODEL · A11Y + SHZ"
                         shizukuState.connected -> "SHIZUKU ONLY"
                         agentState.accessibilityConnected -> "A11Y NODE"
                         else -> "OFFLINE"
@@ -452,7 +534,7 @@ private fun MuseApp() {
                     onCheckUpdate = { checkForUpdates(manual = true) },
                     onInstallUpdate = ::installAvailableUpdate,
                 )
-                MusePage.Personal -> PersonalWorkspace(settings, memoryStore)
+                MusePage.Personal -> PersonalWorkspace(settings, memoryStore, themeMode, onThemeModeChange)
             }
             }
         }
@@ -748,7 +830,7 @@ private fun EmptyChat(shizukuConnected: Boolean, accessibilityConnected: Boolean
         verticalArrangement = Arrangement.spacedBy(13.dp),
     ) {
         Text("今天想让 Muse 做什么？", color = TextPrimary, fontSize = 27.sp, fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp)
-        Text("Shizuku 主控 · 无障碍节点补位 · DeepSeek 无视觉", color = NeonPink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text("模型自主决策 · 无障碍实时操作 · Shizuku 设备工具", color = NeonPink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         Text(
             when {
                 accessibilityConnected && shizukuConnected ->
@@ -1227,7 +1309,12 @@ private fun ToolConfigurationRow(
 }
 
 @Composable
-private fun PersonalWorkspace(settings: SecureSettings, memoryStore: PersonalizationStore) {
+private fun PersonalWorkspace(
+    settings: SecureSettings,
+    memoryStore: PersonalizationStore,
+    themeMode: MuseThemeMode,
+    onThemeModeChange: (MuseThemeMode) -> Unit,
+) {
     var memory by remember { mutableStateOf(memoryStore.loadMemory()) }
     var contextLength by remember { mutableStateOf(settings.contextLength.toString()) }
     var maxTokens by remember { mutableStateOf(settings.maxOutputTokens.toString()) }
@@ -1237,6 +1324,19 @@ private fun PersonalWorkspace(settings: SecureSettings, memoryStore: Personaliza
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
+        SettingsSection("APPEARANCE", "跟随系统，或固定使用柔和 Latte 亮色 / Mocha 暗色") {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ThemeChoice("System", themeMode == MuseThemeMode.SYSTEM, Modifier.weight(1f)) {
+                    onThemeModeChange(MuseThemeMode.SYSTEM)
+                }
+                ThemeChoice("Light", themeMode == MuseThemeMode.LIGHT, Modifier.weight(1f)) {
+                    onThemeModeChange(MuseThemeMode.LIGHT)
+                }
+                ThemeChoice("Dark", themeMode == MuseThemeMode.DARK, Modifier.weight(1f)) {
+                    onThemeModeChange(MuseThemeMode.DARK)
+                }
+            }
+        }
         SettingsSection("USER MEMORY", "Markdown 会作为稳定偏好注入每次新请求") {
             OutlinedTextField(
                 value = memory,
@@ -1285,6 +1385,31 @@ private fun PersonalWorkspace(settings: SecureSettings, memoryStore: Personaliza
             }
         }
         Spacer(Modifier.height(18.dp))
+    }
+}
+
+@Composable
+private fun ThemeChoice(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier,
+        shape = CompactShape,
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = if (selected) NeonPink.copy(alpha = 0.18f) else Color.Transparent,
+            contentColor = if (selected) NeonPink else TextSecondary,
+        ),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (selected) NeonPink else Divider,
+        ),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+    ) {
+        Text(label, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, fontSize = 12.sp)
     }
 }
 

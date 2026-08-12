@@ -84,7 +84,7 @@ class RuntimeHarnessTest {
     }
 
     @Test
-    fun executionFailureRollsBackBeforeRecovery() = runBlocking {
+    fun executionFailureReturnsToActorWithoutHiddenRecovery() = runBlocking {
         val service = FakeAccessibilityService(Observation("example.app", listOf(node(1, "Dismiss"))), executeSucceeds = false)
         var first = true
         val result = harness(service, FakePlanner {
@@ -97,8 +97,8 @@ class RuntimeHarnessTest {
         }, FakeClock()).run(disappearedPlan())
 
         assertEquals(1, service.executeCount)
-        assertTrue(service.recoveryActions.isNotEmpty())
-        assertTrue(result.events.any { it.phase == "recover" })
+        assertTrue(service.recoveryActions.isEmpty())
+        assertTrue(result.events.any { it.phase == "actor_feedback" })
         assertTrue(result.events.none { it.phase == "commit" })
     }
 
@@ -121,7 +121,7 @@ class RuntimeHarnessTest {
     }
 
     @Test
-    fun unresolvedUnknownDoesNotBudgetSuicide() = runBlocking {
+    fun unresolvedUnknownBlocksRedispatchWithoutHiddenRecovery() = runBlocking {
         val service = NoChangeAccessibilityService(Observation("example.app", listOf(node(1, "Dismiss"))))
         val result = RuntimeContractHarness(
             service = service,
@@ -132,10 +132,11 @@ class RuntimeHarnessTest {
         ).run(disappearedPlan())
 
         assertTrue(service.executeCount >= 1)
-        // Unknown settle must not relaunch or report consecutive recovery budget death.
+        // Unknown settle is dispatched once, then returned as Actor feedback.
+        assertEquals(1, service.executeCount)
         assertTrue(RecoveryAction.RELAUNCH !in service.recoveryActions)
-        assertFalse(result.reason.contains("budget exhausted", ignoreCase = true))
         assertFalse(result.reason.contains("recovery budget", ignoreCase = true))
+        assertTrue(result.events.any { it.phase == "actor_feedback" })
     }
 
     @Test

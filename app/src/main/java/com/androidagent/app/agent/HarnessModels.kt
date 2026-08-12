@@ -312,6 +312,31 @@ object TaskPlanParser {
         )
     }
 
+    /**
+     * Lightweight runtime guide. The Actor owns decomposition from the live
+     * observation, so startup never waits for or fails on a speculative static
+     * plan created without screen context.
+     */
+    fun advisory(goal: GoalContext, targetAppHint: String): TaskPlan = TaskPlan(
+        summary = goal.originalGoal.take(240),
+        targetAppHint = targetAppHint,
+        goal = goal,
+        milestones = listOf(
+            TaskMilestone(
+                id = "goal",
+                objective = goal.originalGoal,
+                successPredicates = listOf(
+                    UiPredicate(
+                        kind = UiPredicateKind.SEMANTIC_CLAIM,
+                        description = "The complete user goal is satisfied in the current device state",
+                        predicateId = "goal-state",
+                    ),
+                ),
+                kind = TaskMilestoneKind.GENERIC,
+            ),
+        ),
+    )
+
     fun fallback(goal: String, targetAppHint: String): TaskPlan = fallback(ConservativeGoalInterpreter.interpret(goal), targetAppHint)
 
     @Suppress("UNUSED_PARAMETER")

@@ -1412,7 +1412,6 @@ class RunLedger(private var plan: TaskPlan) {
     var currentMilestoneIndex: Int = 0
         private set
     private val fingerprints = ArrayDeque<String>()
-    private val attempts = mutableMapOf<String, Int>()
     private val unknownDispatches = mutableSetOf<String>()
     private val traces = mutableListOf<StepTrace>()
     private val evidence = linkedMapOf<String, String>()
@@ -1446,21 +1445,11 @@ class RunLedger(private var plan: TaskPlan) {
         sideEffectIdentity: SideEffectIdentity? = null,
     ): String? {
         val milestone = currentMilestone ?: return null
-        val lastTrace = traces.lastOrNull()
-        if (lastTrace?.judgement == TransitionJudgement.NO_PROGRESS &&
-            lastTrace.afterId == observation.observationId &&
-            lastTrace.action == TraceSanitizer.action(action)
-        ) {
-            return "the same action already produced no progress on the current screen"
-        }
         val unknownKey = unknownActionKey(milestone, action, observation, resolvedTarget, sideEffectIdentity)
         if (unknownKey in unknownDispatches) {
             return "previous dispatch result is unknown for the same milestone, action, and target"
         }
-        val key = screenActionKey(milestone, action, observation, resolvedTarget, sideEffectIdentity)
-        return if (attempts.getOrDefault(key, 0) >= MAX_ATTEMPTS_PER_SCREEN) {
-            "strategy exhausted for the same milestone and screen"
-        } else null
+        return null
     }
 
     fun repeatedRecoveryReason(
@@ -1489,8 +1478,6 @@ class RunLedger(private var plan: TaskPlan) {
         if (action is AgentAction.Wait || action is AgentAction.BindPredicate) return
         val milestone = currentMilestone ?: return
         if (resultState == DispatchResultState.FAILED) return
-        val key = screenActionKey(milestone, action, observation, resolvedTarget, sideEffectIdentity)
-        attempts[key] = attempts.getOrDefault(key, 0) + 1
         if (resultState == DispatchResultState.RESULT_UNKNOWN) {
             unknownDispatches += unknownActionKey(milestone, action, observation, resolvedTarget, sideEffectIdentity)
         }
@@ -1531,14 +1518,6 @@ class RunLedger(private var plan: TaskPlan) {
     fun planText(bindings: PredicateBindingStore? = null): String = plan.compactText(currentMilestoneIndex, bindings)
 
     fun evidenceSummary(): String = if (evidence.isEmpty()) "No milestone evidence recorded" else evidence.entries.joinToString("\n") { (id, proof) -> "$id: $proof" }
-
-    private fun screenActionKey(
-        milestone: TaskMilestone,
-        action: AgentAction,
-        observation: Observation,
-        resolvedTarget: ResolvedActionTarget?,
-        sideEffectIdentity: SideEffectIdentity?,
-    ): String = "${milestone.id}|${observation.stateFingerprint()}|${stableActionKey(action, observation, resolvedTarget, sideEffectIdentity)}"
 
     private fun unknownActionKey(
         @Suppress("UNUSED_PARAMETER") milestone: TaskMilestone,
@@ -1612,5 +1591,4 @@ class RunLedger(private var plan: TaskPlan) {
         ).joinToString("|")
     }
 
-    private companion object { const val MAX_ATTEMPTS_PER_SCREEN = 3 }
 }

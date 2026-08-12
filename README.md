@@ -1,20 +1,20 @@
-# Muse Android Agent 0.16.1
+# Muse Android Agent 0.17.0
 
-Muse is a private, sideloaded Android control agent. Chat goals use **Shizuku as the primary terminal control path**, with Accessibility providing live UI-tree observation and node-level fallback actions. DeepSeek and other text models work without screenshots; vision stays off unless the user explicitly configures a vision provider.
+Muse is a private, sideloaded Android control agent. The model owns the live route: Accessibility provides fresh UI-tree observation and node actions, while Shizuku provides launch, package/device inspection, bounded shell tools, and the optional Ubuntu runtime. DeepSeek and other text models work without screenshots; vision stays off unless the user explicitly configures a vision provider.
 
 Registered capabilities:
 
-- **Shizuku** — primary shell identity for bounded `am`/`pm`/`input`/`dumpsys` inspection and the optional Ubuntu runtime
-- **Accessibility** — live UI hierarchy, target validation, click/swipe/input fallback, and a compact progress overlay on other apps
+- **Shizuku** — shell identity for bounded `am`/`pm`/`input`/`dumpsys` inspection and the optional Ubuntu runtime
+- **Accessibility** — live UI hierarchy, target validation, click/swipe/input actions, and a compact progress overlay on other apps
 - **Tools for the model** — `launch_app`, `click_node`, `click_text`, `tap_point`, `swipe`, `input_text`, `submit_input`, `ensure_toggle`, `bind_predicate`, `terminal`, `back`, `home`, `wait`, `finish`/`fail`
 
-The Compose UI uses the Catppuccin Mocha palette: calm dark surfaces, soft Mauve/Blue/Teal accents, rounded controls, restrained transitions, and compact two-line progress both in Chat and over other apps.
+The Compose UI offers Catppuccin Mocha dark mode and a softer Latte-inspired light mode, with System / Light / Dark selection, animated palette transitions, rounded controls, and compact two-line progress both in Chat and over other apps.
 
 ## Product surfaces
 
 - **Chat** — natural-language **device tasks** (UI agent), `/ask` pure Q&A/terminal chat, and `/shell <command>` direct shell.
 - **Configure** — accessibility enablement, Shizuku, model provider, Ubuntu environment, updates.
-- **个性化** — `memory.md`, context length, max output tokens.
+- **个性化** — theme mode, `memory.md`, context length, max output tokens.
 
 ## Device agent model (default Chat)
 
@@ -22,10 +22,10 @@ Each device goal starts the hybrid `AgentRuntime` when Muse Accessibility is con
 
 1. Observe the live UI node tree (and optional OCR text).
 2. Model returns one structured action (`android_action` / JSON).
-3. Runtime prefers deterministic Shizuku terminal tools and uses Accessibility nodes when terminal state cannot reliably identify or operate the target.
-4. Re-observe and continue until verified completion, fail, cancel, or budget exhaust.
+3. The model chooses Accessibility or Shizuku for the next useful step and may switch between installed apps.
+4. Re-observe and continue until the Actor declares completion or a real blocker; completion gets one independent model verification.
 
-Manager protocol failures are retried with validator feedback instead of repeating the same invalid plan. On the final milestone, a strict whole-goal convergence check can repair an over-constrained predicate only after a confirmed Android action and current-state evidence. An identical action that already made no progress on the same screen is blocked across replans.
+The runtime uses one advisory goal instead of a speculative Manager plan. Ordinary actions do not require predicate bindings, confirmed retries remain under model control, and local failures return as Actor feedback rather than triggering hidden Back, relaunch, or replan actions. Only safety, stale-target, privacy, installed-package, and unknown-side-effect boundaries remain deterministic.
 
 A compact Catppuccin progress overlay (`TYPE_ACCESSIBILITY_OVERLAY`) and a foreground notification stay visible on other apps with route, action budget, two sanitized progress lines, and Stop.
 
@@ -84,4 +84,4 @@ Do not use Muse for payments, purchases, account-security changes, verification 
 .\gradlew.bat assembleDebug --no-daemon --console=plain
 ```
 
-The application ID remains `com.androidagent.app`; version `0.16.0` uses versionCode `51` for in-place updates. Environment setup bootstraps `ca-certificates` over an APT-signed HTTP index before switching the selected mirror back to HTTPS for all remaining packages.
+The application ID remains `com.androidagent.app`; version `0.17.0` uses versionCode `53` for in-place updates. Environment setup bootstraps `ca-certificates` over an APT-signed HTTP index before switching the selected mirror back to HTTPS for all remaining packages.

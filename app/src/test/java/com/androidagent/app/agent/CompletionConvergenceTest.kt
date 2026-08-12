@@ -1,26 +1,18 @@
 package com.androidagent.app.agent
 
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class CompletionConvergenceTest {
-    private val observation = Observation("example.app", emptyList())
-
     @Test
-    fun requiresConfirmedMutationAndCurrentObservation() {
-        val counters = StopGateEvidenceCounters(successfulMutatingActions = 1)
-        val current = ActionRecord(
-            step = 1,
-            action = AgentAction.ClickNode(1),
-            success = true,
-            afterFingerprint = observation.observationId,
-            result = "confirmed",
+    fun advisoryPlanLeavesLiveRouteToActor() {
+        val plan = TaskPlanParser.advisory(
+            GoalContext("complete the user goal"),
+            "example.app",
         )
 
-        assertTrue(canVerifyGoalConvergence(counters, current, observation))
-        assertFalse(canVerifyGoalConvergence(StopGateEvidenceCounters(), current, observation))
-        assertFalse(canVerifyGoalConvergence(counters, current.copy(success = false), observation))
-        assertFalse(canVerifyGoalConvergence(counters, current.copy(afterFingerprint = "stale"), observation))
+        assertEquals(1, plan.milestones.size)
+        assertEquals(TaskMilestoneKind.GENERIC, plan.milestones.single().kind)
+        assertEquals(UiPredicateKind.SEMANTIC_CLAIM, plan.milestones.single().successPredicates.single().kind)
     }
 }

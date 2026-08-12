@@ -18,4 +18,12 @@ class SecureSettingsTest {
     fun preservesExplicitAlternativeModels() {
         assertEquals("deepseek-v4-pro", normalizeModelName("deepseek-v4-pro"))
     }
+
+    @Test
+    fun themeModeUsesSystemForUnknownStoredValues() {
+        assertEquals(MuseThemeMode.SYSTEM, MuseThemeMode.fromStorage(null))
+        assertEquals(MuseThemeMode.SYSTEM, MuseThemeMode.fromStorage("future-mode"))
+        assertEquals(MuseThemeMode.LIGHT, MuseThemeMode.fromStorage("light"))
+        assertEquals(MuseThemeMode.DARK, MuseThemeMode.fromStorage("dark"))
+    }
 }

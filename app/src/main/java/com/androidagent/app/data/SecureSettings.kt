@@ -5,6 +5,16 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.androidagent.app.BuildConfig
 
+enum class MuseThemeMode(val storageValue: String) {
+    SYSTEM("system"),
+    LIGHT("light"),
+    DARK("dark");
+
+    companion object {
+        fun fromStorage(value: String?): MuseThemeMode = entries.firstOrNull { it.storageValue == value } ?: SYSTEM
+    }
+}
+
 class SecureSettings(context: Context) {
     private val prefs = EncryptedSharedPreferences.create(
         context,
@@ -52,6 +62,10 @@ class SecureSettings(context: Context) {
     var autoUpdateEnabled: Boolean
         get() = prefs.getBoolean("auto_update_enabled", true)
         set(value) = prefs.edit().putBoolean("auto_update_enabled", value).apply()
+
+    var themeMode: MuseThemeMode
+        get() = MuseThemeMode.fromStorage(prefs.getString("theme_mode", MuseThemeMode.SYSTEM.storageValue))
+        set(value) = prefs.edit().putString("theme_mode", value.storageValue).apply()
 
     var modelBaseUrl: String
         get() = prefs.getString("model_base_url", "https://api.deepseek.com").orEmpty()
