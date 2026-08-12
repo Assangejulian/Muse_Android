@@ -124,6 +124,7 @@ class AgentRuntime(
     private val service: AgentAccessibilityService,
     private val onPhase: (step: Int, phase: String) -> Unit,
     private val onLog: (String) -> Unit,
+    private val onThought: (List<String>) -> Unit = {},
     private val onAction: (String) -> Unit = {},
     private val onActionCount: (Int) -> Unit = {},
     private val goalOverride: String? = null,
@@ -389,6 +390,14 @@ class AgentRuntime(
                         continue
                     }
                     modelFailures = 0
+                    val plannedThought = planned?.thought.orEmpty().ifBlank { planned?.reasoningContent.orEmpty() }
+                    onThought(
+                        ActorOverlayThought.decision(
+                            modelThought = plannedThought,
+                            actionLabel = describeAction(proposed, TargetResolver.resolve(proposed, before)),
+                            observation = before,
+                        ),
+                    )
                     traceStore.event(
                         runId,
                         "TOOL_PROPOSED",
@@ -428,10 +437,12 @@ class AgentRuntime(
                         history += "STOP_GATE_REJECTED: ${verification.reason}"
                         ledger.record(StepTrace(milestone.id, before.observationId, proposed.toString(), before.observationId, TransitionJudgement.NO_PROGRESS, verification.reason))
                         onLog("Completion not yet proven: ${verification.reason.take(120)}")
+                        onThought(ActorOverlayThought.result("finish", verification.reason, progressed = false))
                         continue
                     }
 
                     if (proposed is AgentAction.Fail) {
+                        onThought(ActorOverlayThought.result("fail", proposed.reason, progressed = false))
                         val feedback = toolResultJson(false, proposed, before, before, "actor_blocked", proposed.reason)
                         recordTurn(toolTurns, planned, feedback)
                         history += "ACTOR_BLOCKED: ${proposed.reason}"
@@ -558,10 +569,12 @@ class AgentRuntime(
                             return@withTimeout finish(classifyOperationalFailure(engineResult.reason), engineResult.reason)
                         }
                         history += "TOOL_ABORTED: ${engineResult.reason}; choose another action from the live state"
+                        publishResultThought(stepAction, engineResult)
                         continue
                     }
                     if (engineResult.needsReplan) {
                         history += "TOOL_FEEDBACK: ${engineResult.reason}; choose another action from the live state"
+                        publishResultThought(stepAction, engineResult)
                         continue
                     }
                     if (engineResult.status in setOf(
@@ -603,6 +616,7 @@ class AgentRuntime(
                                 "inputGeneration" to engineResult.inputGeneration,
                             ),
                         )
+                        publishResultThought(stepAction, engineResult)
                         continue
                     }
 
@@ -680,6 +694,7 @@ class AgentRuntime(
                         ),
                     )
                     onLog("Result: ${translateJudgement(judgement)} 路 ${evidence.take(100)}")
+                    publishResultThought(stepAction, engineResult)
                     if (judgement == TransitionJudgement.MILESTONE_COMPLETE) {
                         if (!engineResult.completed) {
                             evidenceCounters.deterministicEvidenceCount += 1
@@ -962,6 +977,18 @@ class AgentRuntime(
 
     private fun observationDelta(before: Observation, after: Observation): String {
         return TraceSanitizer.observationDelta(before, after)
+    }
+
+    private fun publishResultThought(action: AgentAction, result: RuntimeStepEngineResult) {
+        onThought(
+            ActorOverlayThought.result(
+                actionLabel = describeAction(action, result.resolvedTarget?.semanticNode),
+                reason = result.reason,
+                progressed = result.status == RuntimeStepStatus.PROGRESS ||
+                    result.status == RuntimeStepStatus.MILESTONE_COMPLETE ||
+                    result.status == RuntimeStepStatus.OBSERVATION_ONLY,
+            ),
+        )
     }
 
     private fun describeAction(action: AgentAction, target: UiNodeSnapshot? = null): String =

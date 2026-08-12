@@ -21,6 +21,7 @@ data class PlannedAction(
     val reasoningContent: String = "",
     val assistantContent: String? = null,
     val native: Boolean,
+    val thought: String = "",
 )
 
 internal class NativeToolsUnsupportedException(message: String, cause: Throwable? = null) :
@@ -80,6 +81,12 @@ internal object NativePlannerProtocol {
                                                 },
                                             ),
                                         ),
+                                )
+                                .put(
+                                    "thought",
+                                    JSONObject()
+                                        .put("type", "string")
+                                        .put("description", "Optional. One or two short Chinese sentences: what is on screen and why this action."),
                                 )
                                 .put(
                                     "packageName",
@@ -293,6 +300,7 @@ internal object NativePlannerProtocol {
             reasoningContent = responseMessage.optString("reasoning_content"),
             assistantContent = responseMessage.opt("content") as? String,
             native = true,
+            thought = extractThought(arguments),
         )
     }
 
@@ -334,6 +342,10 @@ internal object NativePlannerProtocol {
                 ),
             ),
         )
+
+    fun extractThought(argumentsJson: String): String = runCatching {
+        JSONObject(argumentsJson).optString("thought").trim()
+    }.getOrDefault("")
 
     private fun message(role: String, content: Any): JSONObject =
         JSONObject().put("role", role).put("content", content)

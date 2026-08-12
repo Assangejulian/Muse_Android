@@ -47,7 +47,8 @@ class AgentOverlayController(private val service: AccessibilityService) {
             state.maxSteps,
             statusLabel(state.status),
         )
-        val summary = state.progressSummaries.takeLast(2).joinToString("\n")
+        val summary = state.thoughtLines.take(2).joinToString("\n")
+            .ifBlank { state.progressSummaries.takeLast(2).joinToString("\n") }
             .ifBlank { state.currentAction.ifBlank { "正在准备任务环境" } }
         if (summary.isNotBlank() && summary != lastSummary) {
             lastSummary = summary
@@ -120,10 +121,10 @@ class AgentOverlayController(private val service: AccessibilityService) {
             text = "正在准备任务环境"
             setTextColor(Color.rgb(205, 214, 244))
             textSize = 13f
-            typeface = Typeface.MONOSPACE
+            typeface = Typeface.SANS_SERIF
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
-            setLineSpacing(0f, 1.08f)
+            setLineSpacing(4f, 1.05f)
         }
         bar.addView(statusText)
         bar.addView(chainText)

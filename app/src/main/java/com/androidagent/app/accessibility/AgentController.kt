@@ -144,6 +144,9 @@ object AgentController {
                             copy(status = phase).withProgress(progressForPhase(phase))
                         }
                     },
+                    onThought = { lines ->
+                        updateFor(generation) { copy(thoughtLines = lines.take(2)) }
+                    },
                     onLog = { message ->
                         logFor(generation, message)
                         progressForLog(message)?.let { progress ->

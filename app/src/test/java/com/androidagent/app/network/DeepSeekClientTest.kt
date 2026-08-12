@@ -49,7 +49,7 @@ class DeepSeekClientTest {
 
     @Test
     fun parsesNativeAndroidActionAndPreservesReasoning() {
-        val arguments = """{"action":"click_node","nodeId":42}"""
+        val arguments = """{"action":"click_node","nodeId":42,"thought":"屏幕上只有这一个按钮"}"""
         val response = JSONObject()
             .put(
                 "choices",
@@ -84,6 +84,7 @@ class DeepSeekClientTest {
         assertEquals(arguments, planned.argumentsJson)
         assertEquals("The visible node is the unique target.", planned.reasoningContent)
         assertEquals("Calling the tool.", planned.assistantContent)
+        assertEquals("屏幕上只有这一个按钮", planned.thought)
         assertTrue(planned.native)
     }
 

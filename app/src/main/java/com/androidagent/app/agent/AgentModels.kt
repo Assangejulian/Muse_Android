@@ -936,6 +936,8 @@ data class AgentUiState(
     val currentAction: String = "",
     /** User-facing execution summaries only; never raw model reasoning. */
     val progressSummaries: List<String> = emptyList(),
+    /** Two Chinese overlay lines: what the Actor sees / decided / got back. */
+    val thoughtLines: List<String> = emptyList(),
     val outcome: String = "",
     val currentPackage: String = "",
     val logs: List<String> = emptyList(),

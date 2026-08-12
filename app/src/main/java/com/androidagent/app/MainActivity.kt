@@ -562,7 +562,11 @@ private fun MuseApp(
                         agentState.accessibilityConnected -> "A11Y NODE"
                         else -> "OFFLINE"
                     },
-                    progressLines = if (agentState.running) agentState.progressSummaries else emptyList(),
+                    progressLines = if (agentState.running) {
+                        agentState.thoughtLines.ifEmpty { agentState.progressSummaries }
+                    } else {
+                        emptyList()
+                    },
                     onSend = ::sendMessage,
                     onStop = {
                         AgentController.stop()
@@ -870,8 +874,7 @@ private fun ExecutionStrip(runStatus: String, routeLabel: String, progressLines:
             Text(
                 line,
                 color = TextPrimary,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
