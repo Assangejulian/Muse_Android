@@ -12,6 +12,7 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import com.androidagent.app.R
 import com.androidagent.app.accessibility.AgentController
@@ -30,6 +31,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
     private var stopChip: View? = null
     private var statusText: TextView? = null
     private var summaryText: TextView? = null
+    private var thoughtScroll: ScrollView? = null
     private var chainText: TextView? = null
     private var lastSummary = ""
 
@@ -47,22 +49,13 @@ class AgentOverlayController(private val service: AccessibilityService) {
             state.maxSteps,
             statusLabel(state.status),
         )
-        val summary = state.thoughtLines.take(2).joinToString("\n")
-            .ifBlank { state.progressSummaries.takeLast(2).joinToString("\n") }
+        val summary = state.thoughtLines.takeLast(10).joinToString("\n")
+            .ifBlank { state.progressSummaries.takeLast(6).joinToString("\n") }
             .ifBlank { state.currentAction.ifBlank { "正在准备任务环境" } }
         if (summary.isNotBlank() && summary != lastSummary) {
             lastSummary = summary
-            summaryText?.animate()?.cancel()
-            summaryText?.animate()
-                ?.alpha(0f)
-                ?.translationY(-8 * service.resources.displayMetrics.density)
-                ?.setDuration(110L)
-                ?.withEndAction {
-                    summaryText?.text = summary
-                    summaryText?.translationY = 8 * service.resources.displayMetrics.density
-                    summaryText?.animate()?.alpha(1f)?.translationY(0f)?.setDuration(180L)?.start()
-                }
-                ?.start()
+            summaryText?.text = summary
+            thoughtScroll?.post { thoughtScroll?.fullScroll(View.FOCUS_DOWN) }
         }
     }
 
@@ -73,6 +66,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
         stopChip = null
         statusText = null
         summaryText = null
+        thoughtScroll = null
         chainText = null
         lastSummary = ""
     }
@@ -120,15 +114,28 @@ class AgentOverlayController(private val service: AccessibilityService) {
         summaryText = TextView(service).apply {
             text = "正在准备任务环境"
             setTextColor(Color.rgb(205, 214, 244))
-            textSize = 13f
+            textSize = 12.5f
             typeface = Typeface.SANS_SERIF
-            maxLines = 2
+            maxLines = 12
             ellipsize = TextUtils.TruncateAt.END
-            setLineSpacing(4f, 1.05f)
+            setLineSpacing(3f, 1.06f)
         }
+        val scroll = ScrollView(service).apply {
+            isVerticalScrollBarEnabled = false
+            isFillViewport = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(
+                summaryText,
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT),
+            )
+        }
+        thoughtScroll = scroll
         bar.addView(statusText)
         bar.addView(chainText)
-        bar.addView(summaryText)
+        bar.addView(
+            scroll,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (168 * density).toInt()),
+        )
         container.addView(
             bar,
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT),

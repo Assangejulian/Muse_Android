@@ -139,6 +139,8 @@ class DeepSeekClient(
             is a detour; after Back, pick a different control that still advances the remaining user goal.
             Playing video, timers, and feed animation are not progress. If the next needed control is off-screen,
             swipe instead of clicking the same visible node again.
+            If goalTokensMissing is set, those words are not on this screen. Do not click a similar-looking tab.
+            Use searchAvailable (click the search field, then input_text with the missing token) or swipe to find them.
             Never click IME character keys. After exact text is entered and read back, use submit_input instead of
             typing it again. Prefer controls whose text/description advances the current milestone; otherwise
             inspect with terminal, scroll, go Back, or open a relevant filter/tab.
@@ -258,6 +260,7 @@ class DeepSeekClient(
             If avoidReopening lists a control, never click it again. After a detour, choose a different control
             that still advances the remaining user goal instead of reopening the same one.
             Playing video and animated feeds are not progress. If the target is off-screen, swipe.
+            If goalTokensMissing is set, use a search field or swipe; do not click a look-alike tab.
             Never click IME character keys. Prefer controls that advance the milestone; otherwise scroll, Back, or terminal inspect.
             input_text may use user-provided values, on-screen values, or short goal-implied search keywords —
             never dump the entire residual goal sentence into a field.

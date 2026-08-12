@@ -2,6 +2,7 @@ package com.androidagent.app.accessibility
 
 import android.content.Context
 import android.util.Log
+import com.androidagent.app.agent.ActorOverlayThought
 import com.androidagent.app.agent.AgentRuntime
 import com.androidagent.app.agent.AgentUiState
 import com.androidagent.app.agent.DEVICE_ACTION_TURN_LIMIT
@@ -145,7 +146,9 @@ object AgentController {
                         }
                     },
                     onThought = { lines ->
-                        updateFor(generation) { copy(thoughtLines = lines.take(2)) }
+                        updateFor(generation) {
+                            copy(thoughtLines = ActorOverlayThought.merge(thoughtLines, lines))
+                        }
                     },
                     onLog = { message ->
                         logFor(generation, message)

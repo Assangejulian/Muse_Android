@@ -1,14 +1,14 @@
 package com.androidagent.app.agent
 
-/** Two-line Chinese overlay copy so a user can see why the Actor chose a step. */
+/** Rolling Chinese overlay copy. Lines wrap in the UI; do not crop to two short fragments. */
 internal object ActorOverlayThought {
-    const val MAX_LINE_CHARS = 28
+    const val MAX_LINE_CHARS = 72
+    const val MAX_STORED_LINES = 10
 
     fun decision(modelThought: String, actionLabel: String, observation: Observation): List<String> {
         val thoughtLines = splitThought(modelThought)
         if (thoughtLines.isNotEmpty()) {
-            val second = thoughtLines.getOrNull(1)?.takeIf { it.isNotBlank() } ?: "打算：$actionLabel"
-            return listOf(clip(thoughtLines[0]), clip(second))
+            return (thoughtLines + "打算：$actionLabel").distinct().map(::clip)
         }
         val hint = screenHint(observation)
         return listOf(
@@ -22,13 +22,20 @@ internal object ActorOverlayThought {
         clip(resultLine(reason, progressed)),
     )
 
+    fun merge(existing: List<String>, incoming: List<String>): List<String> {
+        val next = existing.toMutableList()
+        incoming.map { it.trim() }.filter { it.isNotBlank() }.forEach { line ->
+            if (next.lastOrNull() != line) next += line
+        }
+        return next.takeLast(MAX_STORED_LINES)
+    }
+
     internal fun splitThought(raw: String): List<String> {
-        val cleaned = raw.replace(Regex("\\s+"), " ").trim()
+        val cleaned = raw.replace(Regex("[\\t\\r]+"), " ").trim()
         if (cleaned.isBlank()) return emptyList()
-        val sentences = cleaned.split(Regex("[。！？；!?;\\n]+")).map { it.trim() }.filter { it.isNotBlank() }
-        if (sentences.size >= 2) return listOf(clip(sentences[0]), clip(sentences.drop(1).joinToString("")))
-        if (cleaned.length <= MAX_LINE_CHARS) return listOf(cleaned)
-        return listOf(clip(cleaned.take(MAX_LINE_CHARS)), clip(cleaned.drop(MAX_LINE_CHARS)))
+        val sentences = cleaned.split(Regex("[。！？；\\n]+")).map { it.trim() }.filter { it.isNotBlank() }
+        if (sentences.isNotEmpty()) return sentences.map(::clip)
+        return listOf(clip(cleaned))
     }
 
     internal fun screenHint(observation: Observation): String {
@@ -37,7 +44,7 @@ internal object ActorOverlayThought {
             .map { it.text.ifBlank { it.description }.trim() }
             .filter { it.isNotBlank() && it.length in 1..16 }
             .distinct()
-            .take(3)
+            .take(5)
             .joinToString(" / ")
         val pkg = observation.packageName.substringAfterLast('.').take(16)
         return listOf(pkg, labels).filter { it.isNotBlank() }.joinToString(" · ")
@@ -48,6 +55,7 @@ internal object ActorOverlayThought {
         val lower = value.lowercase()
         return when {
             lower.contains("already followed") -> "结果：这个入口刚走过，换一条路"
+            lower.contains("near-miss") || lower.contains("similar tab") -> "结果：这是近似入口，不是目标词，去搜索"
             lower.contains("package changed") || lower.contains("foreground package") -> "结果：前台应用变了，重新看页"
             lower.contains("missing") || lower.contains("not in the current") -> "结果：没找到要点的控件"
             lower.contains("ambiguous") -> "结果：同名控件太多，没法点准"
@@ -56,7 +64,7 @@ internal object ActorOverlayThought {
             lower.contains("stale") -> "结果：页面已切换，重新规划"
             lower.contains("no stable") || lower.contains("screen unchanged") -> "结果：结构没变，往下划或换控件"
             progressed -> "结果：页面结构变了，继续"
-            value.any { it in '\u4e00'..'\u9fff' } -> "结果：${clip(value, 22)}"
+            value.any { it in '\u4e00'..'\u9fff' } -> "结果：${clip(value, 48)}"
             else -> "结果：这一步没有推进"
         }
     }

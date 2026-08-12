@@ -846,7 +846,7 @@ private fun ExecutionStrip(runStatus: String, routeLabel: String, progressLines:
     val maxSteps = budget.substringAfter('/', "50").trim().toIntOrNull()?.coerceAtLeast(1) ?: 50
     val step = budget.substringBefore('/').trim().toIntOrNull()?.coerceIn(0, maxSteps) ?: 0
     val fallback = runStatus.substringAfter('·', runStatus).trim()
-    val visibleLines = progressLines.filter { it.isNotBlank() }.takeLast(2).ifEmpty { listOf(fallback) }
+    val visibleLines = progressLines.filter { it.isNotBlank() }.takeLast(8).ifEmpty { listOf(fallback) }
     Column(
         Modifier
             .fillMaxWidth()
@@ -875,8 +875,7 @@ private fun ExecutionStrip(runStatus: String, routeLabel: String, progressLines:
                 line,
                 color = TextPrimary,
                 fontSize = 13.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                lineHeight = 18.sp,
             )
         }
     }
