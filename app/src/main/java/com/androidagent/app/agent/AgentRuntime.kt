@@ -15,6 +15,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
+internal const val DEVICE_ACTION_TURN_LIMIT = 50
+
 enum class RuntimeOutcome {
     SUCCESS,
     TRANSIENT_NETWORK_ERROR,
@@ -129,6 +131,7 @@ class AgentRuntime(
     private val onPhase: (step: Int, phase: String) -> Unit,
     private val onLog: (String) -> Unit,
     private val onAction: (String) -> Unit = {},
+    private val onActionCount: (Int) -> Unit = {},
     private val goalOverride: String? = null,
     private val runIdOverride: String? = null,
     private val cancellationOutcomeProvider: () -> RuntimeOutcome? = { null },
@@ -239,6 +242,7 @@ class AgentRuntime(
                 val toolTurns = mutableListOf<PlannerTurn>()
                 var replans = 0
                 var modelFailures = 0
+                var effectiveActions = 0
                 val evidenceCounters = StopGateEvidenceCounters()
                 var pendingReplanReason: String? = null
                 // After a scaffold fallback, force one Manager replan with a live screen
@@ -248,7 +252,13 @@ class AgentRuntime(
                 traceStore.event(runId, "PLAN_CREATED", mapOf("plan" to plan.compactText(0), "fallback" to usedFallbackPlan))
                 onLog("Plan ready: ${plan.milestones.size} milestones" + if (usedFallbackPlan) " (fallback scaffold)" else "")
 
-                for (step in 1..MAX_TOOL_CALLS) {
+                for (step in 1..MAX_CONTROL_CYCLES) {
+                    if (effectiveActions >= DEVICE_ACTION_TURN_LIMIT) {
+                        return@withTimeout finish(
+                            RuntimeOutcome.PERMANENT_PLAN_ERROR,
+                            "device-action budget exhausted without verified completion",
+                        )
+                    }
                     onPhase(step, "Observing")
                     onAction("")
                     val rawBefore = observeWithPackage(lockedPackage)
@@ -587,7 +597,6 @@ class AgentRuntime(
                         continue
                     }
                     modelFailures = 0
-                    onAction(describeAction(proposed))
                     traceStore.event(
                         runId,
                         "TOOL_PROPOSED",
@@ -739,6 +748,7 @@ class AgentRuntime(
                         continue
                     }
 
+                    var dispatchedByDriver = false
                     val stepEngine = RuntimeStepEngine(object : RuntimeStepDriver {
                         override suspend fun executeDetailed(
                             action: AgentAction,
@@ -749,7 +759,13 @@ class AgentRuntime(
                             action: AgentAction,
                             observation: Observation,
                             resolvedTarget: ResolvedActionTarget?,
-                        ): ActionExecutionResult = service.executeDetailed(action, observation, resolvedTarget)
+                        ): ActionExecutionResult {
+                            dispatchedByDriver = true
+                            onPhase(step, "Acting")
+                            onAction(describeAction(action))
+                            onLog("Tool: ${describeAction(action)}")
+                            return service.executeDetailed(action, observation, resolvedTarget)
+                        }
 
                         override suspend fun settle(
                             before: Observation,
@@ -776,9 +792,6 @@ class AgentRuntime(
                             return RuntimeStepRecoveryResult(recovered.success, recovered.observation, recovered.detail)
                         }
                     })
-                    onPhase(step, "Acting")
-                    onAction(describeAction(proposed))
-                    onLog("Tool: ${describeAction(proposed)}")
                     val engineResult = stepEngine.execute(
                         RuntimeStepRequest(
                             step = step,
@@ -802,6 +815,13 @@ class AgentRuntime(
                             screenshotFingerprint = screenshotFingerprint,
                         ),
                     )
+                    if (engineResult.execution != null) {
+                        effectiveActions += 1
+                        onActionCount(effectiveActions)
+                        if (!dispatchedByDriver) {
+                            engineResult.action?.let { onAction(describeAction(it)) }
+                        }
+                    }
                     val stepAction = engineResult.action ?: proposed
 
                     engineResult.recoveryDecisions.forEach { decision ->
@@ -1065,7 +1085,7 @@ class AgentRuntime(
                     }
                 }
 
-                finish(RuntimeOutcome.PERMANENT_PLAN_ERROR, "tool-call budget exhausted without verified completion")
+                finish(RuntimeOutcome.PERMANENT_PLAN_ERROR, "control-cycle budget exhausted without verified completion")
         }
         } catch (timeout: TimeoutCancellationException) {
             activeBindings?.rollbackRun(runId)
@@ -1595,7 +1615,7 @@ class AgentRuntime(
     }
 
     private companion object {
-        const val MAX_TOOL_CALLS = 120
+        const val MAX_CONTROL_CYCLES = 200
         const val MAX_REPLANS = 12
         const val MAX_NO_PROGRESS = 6
         const val MAX_MODEL_FAILURES = 5

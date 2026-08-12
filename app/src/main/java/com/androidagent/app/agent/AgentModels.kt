@@ -854,7 +854,7 @@ data class AgentUiState(
     val running: Boolean = false,
     val accessibilityConnected: Boolean = false,
     val step: Int = 0,
-    val maxSteps: Int = 80,
+    val maxSteps: Int = DEVICE_ACTION_TURN_LIMIT,
     val status: String = "Idle",
     val goal: String = "",
     val currentAction: String = "",

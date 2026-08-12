@@ -7,17 +7,26 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,12 +46,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.CutCornerShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -64,8 +72,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -103,18 +109,23 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
-private val Void = Color(0xFF010408)
-private val SurfaceLow = Color(0xE8071018)
-private val SurfaceHigh = Color(0xF20A1720)
-private val NeonCyan = Color(0xFF00F0FF)
-private val NeonPink = Color(0xFFFF3DF2)
-private val AcidYellow = Color(0xFFF2FF59)
-private val TextPrimary = Color(0xFFE9FCFF)
-private val TextSecondary = Color(0xFF7E9BA6)
-private val Divider = Color(0xFF123746)
-private val Warning = Color(0xFFF2FF59)
-private val Error = Color(0xFFFF416C)
-private val CyberShape = CutCornerShape(topStart = 0.dp, topEnd = 12.dp, bottomEnd = 0.dp, bottomStart = 12.dp)
+// Catppuccin Mocha. Existing semantic names are kept to avoid scattering theme wiring.
+private val Void = Color(0xFF1E1E2E)
+private val SurfaceLow = Color(0xFF181825)
+private val SurfaceHigh = Color(0xFF11111B)
+private val SurfaceRaised = Color(0xFF313244)
+private val NeonCyan = Color(0xFF89B4FA)
+private val NeonPink = Color(0xFFCBA6F7)
+private val AcidYellow = Color(0xFFFAB387)
+private val TextPrimary = Color(0xFFCDD6F4)
+private val TextSecondary = Color(0xFFA6ADC8)
+private val Divider = Color(0xFF45475A)
+private val Warning = Color(0xFFF9E2AF)
+private val Success = Color(0xFFA6E3A1)
+private val Teal = Color(0xFF94E2D5)
+private val Error = Color(0xFFF38BA8)
+private val CyberShape = RoundedCornerShape(18.dp)
+private val CompactShape = RoundedCornerShape(12.dp)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -128,8 +139,12 @@ class MainActivity : ComponentActivity() {
                     tertiary = AcidYellow,
                     background = Void,
                     surface = SurfaceLow,
+                    surfaceVariant = SurfaceRaised,
                     onBackground = TextPrimary,
                     onSurface = TextPrimary,
+                    onPrimary = SurfaceHigh,
+                    onSecondary = SurfaceHigh,
+                    error = Error,
                 ),
             ) {
                 MuseApp()
@@ -139,44 +154,14 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class MusePage(val label: String) {
-    Chat("CHAT://"),
-    Configure("CONFIG://"),
-    Personal("PERSONA://"),
+    Chat("Chat"),
+    Configure("Configure"),
+    Personal("Personalization"),
 }
 
 @Composable
-private fun CyberBackdrop() {
-    val transition = rememberInfiniteTransition(label = "hud-scan")
-    val scan by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(4_800, easing = LinearEasing), RepeatMode.Restart),
-        label = "scan-position",
-    )
-    Canvas(Modifier.fillMaxSize()) {
-        val grid = 42.dp.toPx()
-        var x = 0f
-        while (x <= size.width) {
-            drawLine(Divider.copy(alpha = 0.18f), Offset(x, 0f), Offset(x, size.height), 1f)
-            x += grid
-        }
-        var y = 0f
-        while (y <= size.height) {
-            drawLine(Divider.copy(alpha = 0.14f), Offset(0f, y), Offset(size.width, y), 1f)
-            y += grid
-        }
-        val scanY = size.height * scan
-        drawRect(
-            brush = Brush.verticalGradient(
-                listOf(Color.Transparent, NeonCyan.copy(alpha = 0.08f), Color.Transparent),
-                startY = scanY - 32.dp.toPx(),
-                endY = scanY + 32.dp.toPx(),
-            ),
-            topLeft = Offset(0f, scanY - 32.dp.toPx()),
-            size = androidx.compose.ui.geometry.Size(size.width, 64.dp.toPx()),
-        )
-        drawLine(NeonCyan.copy(alpha = 0.22f), Offset(0f, scanY), Offset(size.width, scanY), 1.dp.toPx())
-    }
+private fun CatppuccinBackdrop() {
+    Box(Modifier.fillMaxSize().background(Void))
 }
 
 @Composable
@@ -201,7 +186,7 @@ private fun MuseApp() {
     val updater = remember { GitHubUpdater(context.applicationContext) }
     var autoUpdateEnabled by remember { mutableStateOf(settings.autoUpdateEnabled) }
     var availableUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
-    var updateStatus by remember { mutableStateOf(if (autoUpdateEnabled) "AUTO CHECK // READY" else "AUTO CHECK // OFF") }
+    var updateStatus by remember { mutableStateOf(if (autoUpdateEnabled) "Auto update ready" else "Auto update off") }
     var checkingUpdate by remember { mutableStateOf(false) }
     var installingUpdate by remember { mutableStateOf(false) }
     var updateProgress by remember { mutableStateOf<DownloadProgress?>(null) }
@@ -214,7 +199,7 @@ private fun MuseApp() {
             runCatching { updater.check(settings.githubRepository) }
                 .onSuccess { update ->
                     availableUpdate = update
-                    updateStatus = if (update == null) "CURRENT // 已是最新版本" else "UPDATE // v${update.version} 可用"
+                    updateStatus = if (update == null) "当前已是最新版本" else "发现 v${update.version} 更新"
                 }
                 .onFailure { error ->
                     updateStatus = "检查失败：${error.message ?: error::class.java.simpleName}"
@@ -267,6 +252,24 @@ private fun MuseApp() {
         persist(conversations.map { if (it.id == conversation.id) conversation else it })
     }
 
+    suspend fun terminalAgentReply(question: String, conversation: Conversation): String =
+        TerminalAgentClient().respond(
+            apiKey = settings.apiKey,
+            baseUrl = settings.modelBaseUrl,
+            model = settings.modelName,
+            provider = settings.currentProvider,
+            input = question,
+            history = conversation.messages.map { it.role to it.content },
+            memoryMarkdown = memoryStore.loadMemory(),
+            contextLength = settings.contextLength,
+            maxOutputTokens = settings.maxOutputTokens,
+            environment = TerminalEnvironmentConfig.from(settings),
+            environmentStatus = environmentStatus,
+            terminalAvailable = shizukuState.connected,
+            execute = PrivilegedBackendRouter::execute,
+            onProgress = { progress -> runStatus = progress },
+        )
+
     fun sendMessage() {
         val text = input.trim()
         if (text.isBlank() || activeJob?.isActive == true || agentState.running) return
@@ -287,7 +290,7 @@ private fun MuseApp() {
                     val summary = state.progressSummaries.lastOrNull()
                         ?: state.currentAction.takeIf { it.isNotBlank() }
                         ?: state.status
-                    runStatus = "${state.step}/120 · $summary"
+                    runStatus = "${state.step}/${state.maxSteps} · $summary"
                 }
             }
             val reply = runCatching {
@@ -304,53 +307,41 @@ private fun MuseApp() {
                     text.startsWith("/ask ", ignoreCase = true) || text.startsWith("/chat ", ignoreCase = true) -> {
                         val question = text.substringAfter(' ').trim()
                         require(question.isNotBlank()) { "请在 /ask 后输入问题" }
-                        TerminalAgentClient().respond(
-                            apiKey = settings.apiKey,
-                            baseUrl = settings.modelBaseUrl,
-                            model = settings.modelName,
-                            provider = settings.currentProvider,
-                            input = question,
-                            history = current.messages.map { it.role to it.content },
-                            memoryMarkdown = memoryStore.loadMemory(),
-                            contextLength = settings.contextLength,
-                            maxOutputTokens = settings.maxOutputTokens,
-                            environment = TerminalEnvironmentConfig.from(settings),
-                            environmentStatus = environmentStatus,
-                            terminalAvailable = shizukuState.connected,
-                            execute = PrivilegedBackendRouter::execute,
-                            onProgress = { progress -> runStatus = progress },
-                        )
+                        terminalAgentReply(question, current)
                     }
                     else -> {
-                        // Node-only device agent (DeepSeek has no vision). UI tree tools only.
-                        settings.visionEnabled = false
-                        settings.taskGoal = text
-                        PrivilegedBackendRouter.configure(context, settings.privilegedBackendEnabled)
-                        when (val start = AgentController.start(context, settings, goalOverride = text)) {
-                            is AgentStartResult.Started -> {
-                                val result = AgentController.awaitAndConsumeResult(
-                                    start.runId,
-                                    TimeUnit.MINUTES.toMillis(30),
-                                )
-                                when {
-                                    result == null -> "任务超时或结果未返回。可拆小目标后重试。"
-                                    result.succeeded -> "任务完成：${result.reason}"
-                                    result.outcome == RuntimeOutcome.USER_CANCELLED -> "已停止当前任务。"
-                                    result.outcome == RuntimeOutcome.ACCESSIBILITY_DISCONNECTED ->
-                                        "无障碍服务已断开。请到 Configure 重新开启 Muse 无障碍后重试。"
-                                    result.outcome == RuntimeOutcome.SAFETY_BLOCKED ->
-                                        "安全策略阻止了该任务：${result.reason}"
-                                    else -> "任务未完成（${result.outcome.name}）：${result.reason}"
+                        if (!agentState.accessibilityConnected) {
+                            require(shizukuState.connected) { "Shizuku 与无障碍均未连接，无法控制设备" }
+                            terminalAgentReply(text, current)
+                        } else {
+                            settings.taskGoal = text
+                            PrivilegedBackendRouter.configure(context, settings.privilegedBackendEnabled)
+                            when (val start = AgentController.start(context, settings, goalOverride = text)) {
+                                is AgentStartResult.Started -> {
+                                    val result = AgentController.awaitAndConsumeResult(
+                                        start.runId,
+                                        TimeUnit.MINUTES.toMillis(30),
+                                    )
+                                    when {
+                                        result == null -> "任务超时或结果未返回。可拆小目标后重试。"
+                                        result.succeeded -> "任务完成：${result.reason}"
+                                        result.outcome == RuntimeOutcome.USER_CANCELLED -> "已停止当前任务。"
+                                        result.outcome == RuntimeOutcome.ACCESSIBILITY_DISCONNECTED ->
+                                            "无障碍服务已断开。请到 Configure 重新开启 Muse 无障碍后重试。"
+                                        result.outcome == RuntimeOutcome.SAFETY_BLOCKED ->
+                                            "安全策略阻止了该任务：${result.reason}"
+                                        else -> "任务未完成（${result.outcome.name}）：${result.reason}"
+                                    }
                                 }
+                                is AgentStartResult.Busy ->
+                                    "已有任务在执行（run ${start.activeRunId.take(8)}）。请先 ABORT 再发新目标。"
+                                is AgentStartResult.SafetyBlocked ->
+                                    "安全策略阻止了该任务：${start.reason}"
+                                AgentStartResult.InvalidGoal ->
+                                    "请先在 Configure 填写 API Key，并发送非空任务目标。"
+                                AgentStartResult.AccessibilityDisconnected ->
+                                    "无障碍刚刚断开；Shizuku 仍在线时可重发任务并走终端模式。"
                             }
-                            is AgentStartResult.Busy ->
-                                "已有任务在执行（run ${start.activeRunId.take(8)}）。请先 ABORT 再发新目标。"
-                            is AgentStartResult.SafetyBlocked ->
-                                "安全策略阻止了该任务：${start.reason}"
-                            AgentStartResult.InvalidGoal ->
-                                "请先在 Configure 填写 API Key，并发送非空任务目标。"
-                            AgentStartResult.AccessibilityDisconnected ->
-                                "设备 UI 工具需要无障碍服务。请到 Configure → ACCESSIBILITY 开启 Muse，再返回重试。"
                         }
                     }
                 }
@@ -403,8 +394,17 @@ private fun MuseApp() {
                 .padding(padding)
                 .imePadding(),
         ) {
-            CyberBackdrop()
-            when (page) {
+            CatppuccinBackdrop()
+            AnimatedContent(
+                targetState = page,
+                transitionSpec = {
+                    val direction = if (targetState.ordinal > initialState.ordinal) 1 else -1
+                    (fadeIn(tween(220)) + slideInHorizontally(tween(280)) { direction * it / 12 }) togetherWith
+                        (fadeOut(tween(150)) + slideOutHorizontally(tween(220)) { -direction * it / 16 })
+                },
+                label = "workspace-transition",
+            ) { targetPage ->
+            when (targetPage) {
                 MusePage.Chat -> ChatWorkspace(
                     conversation = conversations.firstOrNull { it.id == selectedId } ?: conversations.first(),
                     input = input,
@@ -412,7 +412,7 @@ private fun MuseApp() {
                     runStatus = runStatus.ifBlank {
                         if (agentState.running) {
                             val summary = agentState.progressSummaries.lastOrNull() ?: agentState.status
-                            "${agentState.step}/120 · $summary"
+                            "${agentState.step}/${agentState.maxSteps} · $summary"
                         } else {
                             ""
                         }
@@ -420,6 +420,13 @@ private fun MuseApp() {
                     running = activeJob?.isActive == true || agentState.running,
                     shizukuConnected = shizukuState.connected,
                     accessibilityConnected = agentState.accessibilityConnected,
+                    routeLabel = when {
+                        shizukuState.connected && agentState.accessibilityConnected -> "SHIZUKU PRIMARY"
+                        shizukuState.connected -> "SHIZUKU ONLY"
+                        agentState.accessibilityConnected -> "A11Y NODE"
+                        else -> "OFFLINE"
+                    },
+                    progressLines = if (agentState.running) agentState.progressSummaries else emptyList(),
                     onSend = ::sendMessage,
                     onStop = {
                         AgentController.stop()
@@ -435,7 +442,7 @@ private fun MuseApp() {
                     onAutoUpdateEnabledChange = { enabled ->
                         autoUpdateEnabled = enabled
                         settings.autoUpdateEnabled = enabled
-                        if (enabled) checkForUpdates(manual = true) else updateStatus = "AUTO CHECK // OFF"
+                        if (enabled) checkForUpdates(manual = true) else updateStatus = "Auto update off"
                     },
                     availableUpdate = availableUpdate,
                     updateStatus = updateStatus,
@@ -446,6 +453,7 @@ private fun MuseApp() {
                     onInstallUpdate = ::installAvailableUpdate,
                 )
                 MusePage.Personal -> PersonalWorkspace(settings, memoryStore)
+            }
             }
         }
     }
@@ -464,33 +472,26 @@ private fun MuseHeader(
     Column(
         Modifier
             .fillMaxWidth()
-            .background(
-                Brush.horizontalGradient(
-                    listOf(SurfaceHigh, Color(0xF2060B12), SurfaceHigh),
-                ),
-            ),
+            .background(SurfaceHigh),
     ) {
-        Box(Modifier.fillMaxWidth().height(2.dp).background(Brush.horizontalGradient(listOf(NeonCyan, NeonPink))))
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
-                    "MUSE//OS",
-                    color = NeonCyan,
-                    fontSize = 21.sp,
+                    "Muse",
+                    color = TextPrimary,
+                    fontSize = 23.sp,
                     fontWeight = FontWeight.Black,
-                    fontFamily = FontFamily.Monospace,
-                    letterSpacing = 2.sp,
+                    letterSpacing = (-0.4).sp,
                 )
                 Text(
-                    "${page.label}  NEURAL TERMINAL · V${BuildConfig.VERSION_NAME}",
+                    "${page.label}  ·  v${BuildConfig.VERSION_NAME}",
                     color = NeonPink,
-                    fontSize = 9.sp,
-                    fontFamily = FontFamily.Monospace,
-                    letterSpacing = 0.7.sp,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -506,7 +507,7 @@ private fun MuseHeader(
                 )
                 if (page == MusePage.Chat) {
                     TextButton(onClick = onNewChat) {
-                        Text("＋NEW", color = NeonPink, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                        Text("New chat", color = NeonPink, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -514,7 +515,7 @@ private fun MuseHeader(
         AnimatedVisibility(updateVersion != null) {
             UpdateStrip(version = updateVersion.orEmpty(), onClick = onUpdateClick)
         }
-        HorizontalDivider(color = NeonCyan.copy(alpha = 0.32f))
+        HorizontalDivider(color = Divider.copy(alpha = 0.7f))
     }
 }
 
@@ -530,23 +531,22 @@ private fun UpdateStrip(version: String, onClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .background(NeonPink.copy(alpha = 0.08f))
+            .background(SurfaceLow)
             .clickable(onClick = onClick)
             .padding(horizontal = 18.dp, vertical = 7.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(6.dp).alpha(pulse).background(NeonPink, CircleShape))
+            Box(Modifier.size(6.dp).alpha(pulse).background(Success, CircleShape))
             Text(
-                "UPDATE//READY · v$version",
-                color = NeonPink,
+                "Update available · v$version",
+                color = Success,
                 fontSize = 10.sp,
-                fontWeight = FontWeight.Black,
-                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
             )
         }
-        Text("OPEN CONFIG >", color = TextPrimary, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+        Text("Open", color = NeonPink, fontSize = 10.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -559,13 +559,13 @@ private fun ConnectionPill(label: String, connected: Boolean, onClick: () -> Uni
         animationSpec = infiniteRepeatable(tween(1_200, easing = LinearEasing), RepeatMode.Reverse),
         label = "connection-alpha-$label",
     )
-    val accent = if (connected) NeonCyan else Warning
+    val accent = if (connected) Success else Warning
     Row(
         Modifier
-            .border(1.dp, accent, CyberShape)
-            .background(accent.copy(alpha = 0.08f), CyberShape)
+            .border(1.dp, if (connected) accent.copy(alpha = 0.55f) else Divider, RoundedCornerShape(50))
+            .background(SurfaceRaised.copy(alpha = 0.82f), RoundedCornerShape(50))
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 7.dp),
+            .padding(horizontal = 9.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -576,11 +576,10 @@ private fun ConnectionPill(label: String, connected: Boolean, onClick: () -> Uni
                 .background(accent, CircleShape),
         )
         Text(
-            if (connected) "$label//ON" else "$label//OFF",
+            if (connected) label else "$label off",
             color = accent,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Black,
-            fontFamily = FontFamily.Monospace,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
         )
     }
 }
@@ -590,33 +589,35 @@ private fun MuseNavigation(selected: MusePage, onSelect: (MusePage) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .background(SurfaceLow)
-            .border(width = 1.dp, color = NeonCyan.copy(alpha = 0.18f))
+            .background(SurfaceHigh)
             .navigationBarsPadding()
-            .padding(horizontal = 8.dp, vertical = 7.dp),
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         MusePage.entries.forEach { page ->
-            val color by animateColorAsState(if (selected == page) NeonCyan else TextSecondary, label = "nav-color")
+            val active = selected == page
+            val color by animateColorAsState(if (active) NeonPink else TextSecondary, label = "nav-color")
+            val background by animateColorAsState(if (active) SurfaceRaised else Color.Transparent, label = "nav-background")
+            val markerWidth by animateDpAsState(if (active) 24.dp else 5.dp, spring(dampingRatio = 0.72f), label = "nav-marker")
             Column(
                 Modifier
                     .weight(1f)
                     .clickable { onSelect(page) }
-                    .padding(vertical = 7.dp),
+                    .background(background, CompactShape)
+                    .padding(vertical = 9.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 Box(
                     Modifier
-                        .size(width = if (selected == page) 34.dp else 6.dp, height = 2.dp)
-                        .background(if (selected == page) Brush.horizontalGradient(listOf(NeonCyan, NeonPink)) else Brush.linearGradient(listOf(color, color))),
+                        .size(width = markerWidth, height = 3.dp)
+                        .background(color, RoundedCornerShape(50)),
                 )
                 Text(
                     page.label,
                     color = color,
                     fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = if (selected == page) FontWeight.Black else FontWeight.Normal,
-                    letterSpacing = 0.5.sp,
+                    fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                 )
             }
         }
@@ -632,6 +633,8 @@ private fun ChatWorkspace(
     running: Boolean,
     shizukuConnected: Boolean,
     accessibilityConnected: Boolean,
+    routeLabel: String,
+    progressLines: List<String>,
     onSend: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -641,13 +644,13 @@ private fun ChatWorkspace(
     }
     Column(Modifier.fillMaxSize()) {
         AnimatedVisibility(runStatus.isNotBlank()) {
-            ExecutionStrip(runStatus)
+            ExecutionStrip(runStatus, routeLabel, progressLines)
         }
         LazyColumn(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             state = listState,
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             if (conversation.messages.isEmpty()) {
                 item {
@@ -659,13 +662,12 @@ private fun ChatWorkspace(
             }
             items(conversation.messages) { message -> MessageBubble(message) }
         }
-        HorizontalDivider(color = Divider)
+        HorizontalDivider(color = Divider.copy(alpha = 0.65f))
         Row(
             Modifier
                 .fillMaxWidth()
-                .background(SurfaceLow)
-                .border(1.dp, NeonCyan.copy(alpha = 0.2f))
-                .padding(12.dp),
+                .background(SurfaceHigh)
+                .padding(horizontal = 12.dp, vertical = 11.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
@@ -677,69 +679,76 @@ private fun ChatWorkspace(
                     Text(
                         "> 设备任务 · /ask 问答 · /shell …",
                         color = TextSecondary,
-                        fontFamily = FontFamily.Monospace,
                     )
                 },
-                label = { Text("COMMAND_INPUT", color = NeonCyan, fontFamily = FontFamily.Monospace, fontSize = 10.sp) },
+                label = { Text("Message or device task", color = NeonPink, fontSize = 11.sp) },
                 maxLines = 5,
                 shape = CyberShape,
-                textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, color = TextPrimary),
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary),
             )
             Button(
                 onClick = if (running) onStop else onSend,
                 modifier = Modifier.height(54.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = if (running) Error else NeonCyan),
-                shape = CyberShape,
+                colors = ButtonDefaults.buttonColors(containerColor = if (running) Error else NeonPink),
+                shape = CompactShape,
             ) {
-                Text(if (running) "ABORT" else "SEND", color = Void, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+                Text(if (running) "Stop" else "Send", color = SurfaceHigh, fontWeight = FontWeight.Bold)
             }
         }
     }
 }
 
 @Composable
-private fun ExecutionStrip(runStatus: String) {
-    val maxSteps = 120
-    val step = runStatus.substringBefore('/').trim().toIntOrNull()?.coerceIn(0, maxSteps) ?: 0
+private fun ExecutionStrip(runStatus: String, routeLabel: String, progressLines: List<String>) {
+    val budget = runStatus.substringBefore('·').trim()
+    val maxSteps = budget.substringAfter('/', "50").trim().toIntOrNull()?.coerceAtLeast(1) ?: 50
+    val step = budget.substringBefore('/').trim().toIntOrNull()?.coerceIn(0, maxSteps) ?: 0
+    val fallback = runStatus.substringAfter('·', runStatus).trim()
+    val visibleLines = progressLines.filter { it.isNotBlank() }.takeLast(2).ifEmpty { listOf(fallback) }
     Column(
         Modifier
             .fillMaxWidth()
-            .background(NeonCyan.copy(alpha = 0.07f))
-            .border(1.dp, NeonCyan.copy(alpha = 0.35f))
-            .padding(horizontal = 18.dp, vertical = 9.dp),
-        verticalArrangement = Arrangement.spacedBy(7.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .background(SurfaceLow, CyberShape)
+            .border(1.dp, Divider, CyberShape)
+            .animateContentSize(animationSpec = spring(dampingRatio = 0.78f))
+            .padding(horizontal = 15.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp, color = NeonPink)
-                Text("EXEC_CHAIN", color = NeonPink, fontSize = 10.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+                Box(Modifier.size(7.dp).background(Teal, CircleShape))
+                Text("Muse is running · $routeLabel", color = Teal, fontSize = 10.sp, fontWeight = FontWeight.Bold)
             }
             Text(
-                step.toString().padStart(2, '0') + " / $maxSteps",
-                color = AcidYellow,
+                step.toString().padStart(2, '0') + " / $maxSteps ACTIONS",
+                color = NeonPink,
                 fontSize = 10.sp,
-                fontWeight = FontWeight.Black,
+                fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace,
             )
         }
-        LinearProgressIndicator(
-            progress = { step.toFloat() / maxSteps },
-            modifier = Modifier.fillMaxWidth().height(2.dp),
-            color = NeonCyan,
-            trackColor = Divider,
-        )
-        Text(runStatus.substringAfter('·', runStatus).trim(), color = TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        visibleLines.forEach { line ->
+            Text(
+                line,
+                color = TextPrimary,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
 @Composable
 private fun EmptyChat(shizukuConnected: Boolean, accessibilityConnected: Boolean) {
     Column(
-        Modifier.fillMaxWidth().padding(top = 54.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        Modifier.fillMaxWidth().padding(top = 46.dp),
+        verticalArrangement = Arrangement.spacedBy(13.dp),
     ) {
-        Text("NEURAL CONTROL", color = NeonCyan, fontSize = 29.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace, letterSpacing = 1.sp)
-        Text("A11Y // UI-TREE // SHIZUKU // DEEPSEEK", color = NeonPink, fontSize = 11.sp, fontFamily = FontFamily.Monospace, letterSpacing = 1.sp)
+        Text("今天想让 Muse 做什么？", color = TextPrimary, fontSize = 27.sp, fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp)
+        Text("Shizuku 主控 · 无障碍节点补位 · DeepSeek 无视觉", color = NeonPink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         Text(
             when {
                 accessibilityConnected && shizukuConnected ->
@@ -747,17 +756,17 @@ private fun EmptyChat(shizukuConnected: Boolean, accessibilityConnected: Boolean
                 accessibilityConnected ->
                     "无障碍已连接，UI 工具可用。建议再到 Configure 连接 Shizuku 以获得启动应用与终端能力。"
                 shizukuConnected ->
-                    "Shizuku 已连接，但设备 UI 任务需要无障碍。请到 Configure → ACCESSIBILITY 开启 Muse。"
+                    "Shizuku 终端主控已连接，可执行终端能够完成的设备任务；开启无障碍后还能识别并操作页面控件。"
                 else ->
                     "先到 Configure 开启无障碍（UI 工具）并连接 Shizuku。可用 /ask 纯问答，/shell 直接命令。"
             },
             color = TextSecondary,
             lineHeight = 22.sp,
         )
-        Text("> 例: 打开B站给热搜第一个视频的第一个评论点赞", color = AcidYellow, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-        Text("> /ask 解释一下这段日志", color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-        Text("> /shell id", color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-        Text("TOOLS: launch · click_node · tap · swipe · input · terminal · …", color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+        Text("试试：打开 B 站，找到热搜第一个视频并点赞第一条评论", color = AcidYellow, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Text("/ask 解释一下这段日志", color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text("/shell id", color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text("launch · click · swipe · input · terminal", color = TextSecondary, fontSize = 11.sp)
     }
 }
 
@@ -768,19 +777,17 @@ private fun MessageBubble(message: ChatMessage) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
         Column(
             Modifier
-                .fillMaxWidth(if (user) 0.84f else 0.94f)
-                .border(1.dp, accent.copy(alpha = 0.72f), CyberShape)
-                .background(accent.copy(alpha = if (user) 0.1f else 0.06f), CyberShape)
-                .padding(horizontal = 15.dp, vertical = 13.dp),
+                .fillMaxWidth(if (user) 0.86f else 0.94f)
+                .border(1.dp, if (user) NeonPink.copy(alpha = 0.5f) else Divider, CyberShape)
+                .background(if (user) NeonPink.copy(alpha = 0.13f) else SurfaceLow, CyberShape)
+                .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(5.dp),
         ) {
             Text(
-                if (user) "[ OPERATOR ]" else "[ MUSE_CORE ]",
+                if (user) "You" else "Muse",
                 color = accent,
                 fontSize = 10.sp,
-                fontWeight = FontWeight.Black,
-                fontFamily = FontFamily.Monospace,
-                letterSpacing = 1.sp,
+                fontWeight = FontWeight.Bold,
             )
             Text(message.content, color = TextPrimary, lineHeight = 21.sp)
         }
@@ -857,8 +864,8 @@ private fun ConfigureWorkspace(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("CURRENT // v${BuildConfig.VERSION_NAME}", color = NeonCyan, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
-                    Text("AUTO CHECK", color = TextSecondary, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                    Text("Current · v${BuildConfig.VERSION_NAME}", color = NeonCyan, fontWeight = FontWeight.Bold)
+                    Text("Automatic checks", color = TextSecondary, fontSize = 10.sp)
                 }
                 Switch(checked = autoUpdateEnabled, onCheckedChange = onAutoUpdateEnabledChange)
             }
@@ -878,7 +885,7 @@ private fun ConfigureWorkspace(
                     trackColor = Divider,
                 )
                 Text(
-                    "DOWNLOAD // ${progress.percent}% · ${progress.downloadedBytes / 1_024 / 1_024} / ${progress.totalBytes / 1_024 / 1_024} MiB",
+                    "Download ${progress.percent}% · ${progress.downloadedBytes / 1_024 / 1_024} / ${progress.totalBytes / 1_024 / 1_024} MiB",
                     color = NeonPink,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
@@ -896,7 +903,7 @@ private fun ConfigureWorkspace(
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     val update = availableUpdate
                     if (update != null) {
-                        Text("TARGET // v${update.version}", color = NeonPink, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+                        Text("Available · v${update.version}", color = NeonPink, fontWeight = FontWeight.Bold)
                         if (update.notes.isNotBlank()) {
                             Text(
                                 update.notes.take(1_200),
@@ -908,7 +915,7 @@ private fun ConfigureWorkspace(
                             )
                         }
                         Text(
-                            "SHA256 // ${update.sha256.take(12)}…${update.sha256.takeLast(8)}",
+                            "SHA-256 · ${update.sha256.take(12)}…${update.sha256.takeLast(8)}",
                             color = AcidYellow,
                             fontSize = 10.sp,
                             fontFamily = FontFamily.Monospace,
@@ -943,7 +950,7 @@ private fun ConfigureWorkspace(
                 if (accessibilityConnected) {
                     "无障碍已连接。发送自然语言设备任务时，模型可使用 launch_app / click_node / tap_point / swipe / input_text / terminal 等工具；DeepSeek 默认仅用节点树（无截图视觉）。"
                 } else {
-                    "请开启系统设置中的 Muse 无障碍服务。开启后，在其它 App 上层会显示赛博朋克进度条（STEP / 当前动作 / ABORT）。"
+                    "请开启系统设置中的 Muse 无障碍服务。开启后，在其它 App 上层会显示柔和的运行状态浮层与停止按钮。"
                 },
                 color = TextSecondary,
                 fontSize = 12.sp,
@@ -1017,7 +1024,10 @@ private fun ConfigureWorkspace(
                             }
                             apiKey = settings.apiKeyFor(id)
                         },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = if (provider == id) NeonCyan else TextSecondary),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (provider == id) NeonPink.copy(alpha = 0.13f) else Color.Transparent,
+                            contentColor = if (provider == id) NeonPink else TextSecondary,
+                        ),
                         shape = CyberShape,
                     ) { Text(label) }
                 }
@@ -1038,7 +1048,7 @@ private fun ConfigureWorkspace(
         SettingsSection("INITIAL ENVIRONMENT", "安装 Ubuntu ARM64，并把运行时接入 Shizuku 控制终端") {
             val installed = installedEnvironment
             Text(
-                if (installed == null) "STATUS // 未安装" else "STATUS // Ubuntu ${installed.version} · ${installed.tools.sorted().joinToString(" / ")}",
+                if (installed == null) "尚未安装" else "Ubuntu ${installed.version} · ${installed.tools.sorted().joinToString(" / ")}",
                 color = if (installed == null) Warning else NeonCyan,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
@@ -1051,6 +1061,7 @@ private fun ConfigureWorkspace(
                     enabled = !installing,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = if (selectedMirrorId == mirror.id) NeonCyan.copy(alpha = 0.1f) else Color.Transparent,
                         contentColor = if (selectedMirrorId == mirror.id) NeonCyan else TextSecondary,
                     ),
                     shape = CyberShape,
@@ -1176,8 +1187,8 @@ private fun ConfigureWorkspace(
             }
         }
 
-        if (feedback.isNotBlank()) {
-            Text(feedback, color = if (feedback.startsWith("未") || feedback.contains("失败")) Error else NeonCyan, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+        AnimatedVisibility(feedback.isNotBlank()) {
+            Text(feedback, color = if (feedback.startsWith("未") || feedback.contains("失败")) Error else Success, fontSize = 12.sp)
         }
         Spacer(Modifier.height(18.dp))
     }
@@ -1267,8 +1278,11 @@ private fun PersonalWorkspace(settings: SecureSettings, memoryStore: Personaliza
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = NeonCyan),
                 shape = CyberShape,
+                modifier = Modifier.fillMaxWidth(),
             ) { Text("保存个性化", color = Void, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace) }
-            if (feedback.isNotBlank()) Text(feedback, color = NeonCyan, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+            AnimatedVisibility(feedback.isNotBlank()) {
+                Text(feedback, color = Success, fontSize = 12.sp)
+            }
         }
         Spacer(Modifier.height(18.dp))
     }
@@ -1283,19 +1297,16 @@ private fun SettingsSection(
     Column(
         Modifier
             .fillMaxWidth()
-            .border(1.dp, Divider, CyberShape)
+            .border(1.dp, Divider.copy(alpha = 0.82f), CyberShape)
             .background(SurfaceLow, CyberShape)
-            .padding(horizontal = 14.dp, vertical = 15.dp),
-        verticalArrangement = Arrangement.spacedBy(13.dp),
+            .padding(horizontal = 16.dp, vertical = 17.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
-            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text("// $title", color = NeonCyan, fontSize = 12.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace, letterSpacing = 1.2.sp)
-                Text(subtitle, color = TextSecondary, fontSize = 11.sp)
-            }
-            Text("◆", color = NeonPink, fontSize = 10.sp)
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Text(subtitle, color = TextSecondary, fontSize = 11.sp, lineHeight = 16.sp)
         }
-        HorizontalDivider(color = NeonCyan.copy(alpha = 0.22f))
+        HorizontalDivider(color = Divider.copy(alpha = 0.7f))
         content()
     }
 }
@@ -1303,8 +1314,17 @@ private fun SettingsSection(
 @Composable
 private fun StatusLine(label: String, ready: Boolean) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Text("> $label", color = TextPrimary, fontFamily = FontFamily.Monospace)
-        Text(if (ready) "[ ONLINE ]" else "[ STANDBY ]", color = if (ready) NeonCyan else Warning, fontSize = 10.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+        Text(label, color = TextPrimary, fontWeight = FontWeight.Medium)
+        Text(
+            if (ready) "Online" else "Standby",
+            modifier = Modifier.background(
+                if (ready) Success.copy(alpha = 0.13f) else Warning.copy(alpha = 0.1f),
+                RoundedCornerShape(50),
+            ).padding(horizontal = 10.dp, vertical = 5.dp),
+            color = if (ready) Success else Warning,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+        )
     }
 }
 

@@ -151,7 +151,7 @@ class DeepSeekClient(
             invent visual geometry — use click_node / click_text / bounds from the node list. tap_point only when a
             screenshot is supplied and the exact non-sensitive target is clear without a usable node mark.
             Coordinates are normalized over the full screenshot from 0 to 1000.
-            ${if (terminalAvailable) "Shizuku terminal is available for dumpsys/am/input and launch helpers. Prefer accessibility node tools (click_node, click_text, swipe, input_text) for UI work; use terminal when nodes are insufficient. Terminal output is planning evidence only — completion still needs UI predicates / Stop Gate." else "Shizuku is offline; use accessibility actions. Prefer node/text tools."}
+            ${if (terminalAvailable) "Shizuku terminal is the primary control path. Prefer bounded dumpsys/cmd/pm/am inspection, launch, and deterministic device operations. Use accessibility node tools when a UI element cannot be identified or controlled reliably from terminal state. Without a screenshot, never invent geometry or use tap_point. Terminal results may support execution evidence, but finish still requires the runtime Stop Gate." else "Shizuku is offline; use accessibility node/text actions only. Without a screenshot, never invent geometry or use tap_point."}
         """.trimIndent()
         val taskContext = packageContext(primaryPackage, currentPackage, allowedPackages) +
             "\nGoal: ${goal.take(8_000)}\nINSTALLED APPS:\n$appCatalog"
@@ -266,7 +266,7 @@ class DeepSeekClient(
             Node-only mode is default: use Screen node ids/text/description/bounds. Without a screenshot do not invent
             geometry; prefer click_node / click_text. tap_point only with a supplied screenshot when no usable node mark exists.
             Coordinates are normalized over the full screenshot from 0 to 1000.
-            ${if (terminalAvailable) "Shizuku terminal is available for inspection, launch, and input helpers. Prefer accessibility node tools for UI; terminal is support. Terminal output is not task-completion proof." else "Shizuku offline — use accessibility tools."}
+            ${if (terminalAvailable) "Shizuku terminal is the primary control path. Prefer bounded dumpsys/cmd/pm/am inspection, launch, and deterministic device operations. Use accessibility node tools only when terminal state cannot identify or control the UI target reliably. Without a screenshot, never invent geometry or use tap_point. Finish still requires the runtime Stop Gate." else "Shizuku is offline; use accessibility node/text actions only. Without a screenshot, never invent geometry or use tap_point."}
         """.trimIndent()
         val user = "Goal: ${goal.take(8_000)}\n${packageContext(primaryPackage, currentPackage, allowedPackages)}\nHARNESS STATE: $harnessState\nINSTALLED APPS:\n$appCatalog\nRecent actions: ${history.takeLast(16)}\nScreen:\n${observation.compactText()}"
         val userContent: Any = if (screenshotDataUrl == null) user else JSONArray()

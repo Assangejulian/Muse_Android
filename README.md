@@ -1,14 +1,14 @@
-# Muse Android Agent 0.15.0
+# Muse Android Agent 0.16.0
 
-Muse is a private, sideloaded Android control agent. Chat goals run through an **Accessibility UI-tree agent** (observe → plan → act) with optional **Shizuku** shell tools. DeepSeek and other text models use node lists by default; vision/screenshots stay off unless the user enables a vision provider.
+Muse is a private, sideloaded Android control agent. Chat goals use **Shizuku as the primary terminal control path**, with Accessibility providing live UI-tree observation and node-level fallback actions. DeepSeek and other text models work without screenshots; vision stays off unless the user explicitly configures a vision provider.
 
 Registered capabilities:
 
-- **Accessibility** — live UI hierarchy, click/swipe/input gestures, system-wide cyberpunk progress overlay on other apps
-- **Shizuku** — shell identity for `am`/`pm`/`input`/`dumpsys` and the optional Ubuntu runtime
+- **Shizuku** — primary shell identity for bounded `am`/`pm`/`input`/`dumpsys` inspection and the optional Ubuntu runtime
+- **Accessibility** — live UI hierarchy, target validation, click/swipe/input fallback, and a compact progress overlay on other apps
 - **Tools for the model** — `launch_app`, `click_node`, `click_text`, `tap_point`, `swipe`, `input_text`, `submit_input`, `ensure_toggle`, `bind_predicate`, `terminal`, `back`, `home`, `wait`, `finish`/`fail`
 
-The Compose UI keeps the cyberpunk terminal look: near-black HUD, cyan/magenta accents, cut-corner controls, scan beam, and `EXEC_CHAIN` progress both in-chat and as an overlay on other pages.
+The Compose UI uses the Catppuccin Mocha palette: calm dark surfaces, soft Mauve/Blue/Teal accents, rounded controls, restrained transitions, and compact two-line progress both in Chat and over other apps.
 
 ## Product surfaces
 
@@ -18,14 +18,16 @@ The Compose UI keeps the cyberpunk terminal look: near-black HUD, cyan/magenta a
 
 ## Device agent model (default Chat)
 
-Each device goal starts `AgentRuntime` when Muse Accessibility is connected:
+Each device goal starts the hybrid `AgentRuntime` when Muse Accessibility is connected. If Accessibility is offline but Shizuku remains connected, Muse falls back to the terminal agent instead of rejecting the task.
 
 1. Observe the live UI node tree (and optional OCR text).
 2. Model returns one structured action (`android_action` / JSON).
-3. Runtime executes via Accessibility gestures and/or Shizuku.
+3. Runtime prefers deterministic Shizuku terminal tools and uses Accessibility nodes when terminal state cannot reliably identify or operate the target.
 4. Re-observe and continue until verified completion, fail, cancel, or budget exhaust.
 
-A cyberpunk progress overlay (`TYPE_ACCESSIBILITY_OVERLAY`) and a foreground notification stay visible on other apps with step, phase, and ABORT.
+A compact Catppuccin progress overlay (`TYPE_ACCESSIBILITY_OVERLAY`) and a foreground notification stay visible on other apps with route, action budget, two sanitized progress lines, and Stop.
+
+The 50-turn limit counts only real tool actions. Observation, planning, verification, and replanning use a separate internal control-cycle guard and do not consume the displayed action budget.
 
 Vision stays **off** by default so DeepSeek and other text models work on the node list only.
 
@@ -80,4 +82,4 @@ Do not use Muse for payments, purchases, account-security changes, verification 
 .\gradlew.bat assembleDebug --no-daemon --console=plain
 ```
 
-The application ID remains `com.androidagent.app`; version `0.14.7` uses versionCode `49` for in-place updates. Environment setup now bootstraps `ca-certificates` over an APT-signed HTTP index before switching the selected mirror back to HTTPS for all remaining packages.
+The application ID remains `com.androidagent.app`; version `0.16.0` uses versionCode `51` for in-place updates. Environment setup bootstraps `ca-certificates` over an APT-signed HTTP index before switching the selected mirror back to HTTPS for all remaining packages.

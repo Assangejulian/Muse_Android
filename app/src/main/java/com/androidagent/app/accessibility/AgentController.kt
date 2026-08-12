@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.androidagent.app.agent.AgentRuntime
 import com.androidagent.app.agent.AgentUiState
+import com.androidagent.app.agent.DEVICE_ACTION_TURN_LIMIT
 import com.androidagent.app.agent.RuntimeOutcome
 import com.androidagent.app.agent.RuntimeResult
 import com.androidagent.app.agent.SensitiveOperationPolicy
@@ -114,11 +115,11 @@ object AgentController {
             copy(
                 running = false,
                 step = 0,
-                maxSteps = 120,
+                maxSteps = DEVICE_ACTION_TURN_LIMIT,
                 status = "Preparing",
                 goal = effectiveGoal,
                 currentAction = "",
-                progressSummaries = listOf("正在准备任务环境"),
+                progressSummaries = listOf(progressForPhase("Preparing")),
                 outcome = "",
                 logs = emptyList(),
             )
@@ -138,16 +139,24 @@ object AgentController {
                     context = context.applicationContext,
                     settings = settings,
                     service = service,
-                    onPhase = { step, phase ->
+                    onPhase = { _, phase ->
                         updateFor(generation) {
-                            copy(step = step, status = phase).withProgress(progressForPhase(phase))
+                            copy(status = phase).withProgress(progressForPhase(phase))
                         }
                     },
-                    onLog = { message -> logFor(generation, message) },
+                    onLog = { message ->
+                        logFor(generation, message)
+                        progressForLog(message)?.let { progress ->
+                            updateFor(generation) { withProgress(progress) }
+                        }
+                    },
                     onAction = { action ->
                         updateFor(generation) {
                             copy(currentAction = action).withProgress(progressForAction(action))
                         }
+                    },
+                    onActionCount = { count ->
+                        updateFor(generation) { copy(step = count.coerceAtMost(maxSteps)) }
                     },
                     goalOverride = goalOverride,
                     runIdOverride = runId,
@@ -156,10 +165,16 @@ object AgentController {
                 storeResult(runId, result)
                 if (result.succeeded) {
                     logFor(generation, "Verified completion: ${result.reason}")
-                    updateFor(generation) { copy(status = "Succeeded: ${result.reason}", outcome = result.reason) }
+                    updateFor(generation) {
+                        copy(status = "Succeeded: ${result.reason}", outcome = result.reason)
+                            .withProgress("✓ 任务完成证据已验证")
+                    }
                 } else {
                     logFor(generation, "Failed: ${result.reason}")
-                    updateFor(generation) { copy(status = "Failed", outcome = result.reason) }
+                    updateFor(generation) {
+                        copy(status = "Failed", outcome = result.reason)
+                            .withProgress("! 任务停止：${userFacingFailure(result.reason)}")
+                    }
                 }
             } catch (_: CancellationException) {
                 val cause = runResults.stopCauseFor(runId) ?: AgentStopCause.APP_SHUTDOWN
@@ -262,31 +277,51 @@ private fun AgentUiState.withProgress(message: String): AgentUiState {
 }
 
 private fun progressForPhase(phase: String): String = when (phase) {
-    "Preparing" -> "正在准备任务环境"
-    "Compiling" -> "正在快速拆解目标"
-    "Observing" -> "正在读取当前页面"
-    "Planning" -> "正在选择下一步工具"
-    "Acting" -> "正在执行已确认的操作"
-    "Critiquing" -> "正在检查页面变化"
-    "Verifying" -> "正在核验任务结果"
-    "Replanning" -> "当前路径受阻，正在切换策略"
+    "Preparing" -> "· 正在准备任务环境"
+    "Compiling" -> "· 正在快速拆解目标"
+    "Observing" -> "· 正在读取当前页面"
+    "Planning" -> "· 正在选择下一步工具"
+    "Acting" -> "→ 正在执行已确认的操作"
+    "Critiquing" -> "· 正在检查页面变化"
+    "Verifying" -> "· 正在核验任务结果"
+    "Replanning" -> "↻ 当前路径受阻，正在切换策略"
     else -> phase.substringBefore(':').take(64)
 }
 
 private fun progressForAction(action: String): String = when {
-    action.startsWith("terminal(") -> "Shizuku 正在执行终端操作"
-    action.startsWith("launch_app(") -> "正在启动目标应用"
-    action.startsWith("click_") || action.startsWith("tap_point(") -> "已定位目标，正在点击"
-    action.startsWith("input_text(") -> "正在填写目标内容"
-    action.startsWith("submit_input(") -> "正在提交已核对的内容"
-    action.startsWith("swipe(") -> "正在浏览页面中的更多内容"
-    action.startsWith("ensure_toggle(") -> "正在核对并调整开关状态"
-    action.startsWith("bind_predicate(") -> "正在绑定可验证的页面目标"
-    action.startsWith("wait(") -> "正在等待页面稳定"
-    action == "back" -> "正在返回上一层"
-    action == "home" -> "正在返回桌面"
-    action == "finish" -> "证据已齐，正在完成验收"
-    else -> "正在执行下一步操作"
+    action.isBlank() -> ""
+    action.startsWith("terminal(") -> "→ Shizuku 正在执行终端操作"
+    action.startsWith("launch_app(") -> "→ 正在启动目标应用"
+    action.startsWith("click_") || action.startsWith("tap_point(") -> "→ 无障碍已定位目标，正在点击"
+    action.startsWith("input_text(") -> "→ 无障碍正在填写目标内容"
+    action.startsWith("submit_input(") -> "→ 无障碍正在提交已核对的内容"
+    action.startsWith("swipe(") -> "→ 无障碍正在浏览页面中的更多内容"
+    action.startsWith("ensure_toggle(") -> "→ 无障碍正在核对并调整开关状态"
+    action.startsWith("bind_predicate(") -> "· 正在绑定可验证的页面目标"
+    action.startsWith("wait(") -> "· 正在等待页面稳定"
+    action == "back" -> "→ 无障碍正在返回上一层"
+    action == "home" -> "→ 无障碍正在返回桌面"
+    action == "finish" -> "· 证据已齐，正在完成验收"
+    else -> "→ 正在执行下一步操作"
+}
+
+private fun progressForLog(message: String): String? = when {
+    message.startsWith("Plan ready:") -> "✓ 已生成可验证执行计划"
+    message.startsWith("Observation replan ready:") -> "↻ 已根据当前页面更新路径"
+    message.startsWith("Milestone ") && message.endsWith(" verified locally") -> "✓ 已验证当前子目标"
+    message.startsWith("Completion not yet proven:") -> "· 完成证据不足，继续执行"
+    message.startsWith("planner error:") -> "! 模型响应异常，正在恢复"
+    message.startsWith("Result:") -> "✓ 已执行操作并检查设备状态"
+    message.startsWith("Settle timeout;") -> "· 页面状态未稳定，正在重新观察"
+    else -> null
+}
+
+private fun userFacingFailure(reason: String): String = when {
+    reason.contains("device-action budget exhausted", ignoreCase = true) -> "50 次真实动作预算已用完"
+    reason.contains("control-cycle budget exhausted", ignoreCase = true) -> "内部观察循环已达到保护上限"
+    reason.contains("network", ignoreCase = true) || reason.contains("HTTP", ignoreCase = true) -> "模型网络异常"
+    reason.contains("accessibility", ignoreCase = true) -> "无障碍服务已断开"
+    else -> "未取得可验证的完成证据"
 }
 
 object AgentStopCausePolicy {

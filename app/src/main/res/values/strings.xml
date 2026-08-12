@@ -2,10 +2,12 @@
     <string name="app_name">Muse</string>
     <string name="accessibility_service_description">Muse 通过无障碍读取当前界面控件树，并执行点击、滑动、输入等设备操作。进度浮层会在其它应用上层显示当前步骤。不上传截图给无视觉模型时，仅使用节点文本与结构。</string>
     <string name="accessibility_service_summary">设备 UI 控制 · 控件树观察 · 跨页进度浮层</string>
-    <string name="agent_overlay_status">STEP %1$d · %2$s</string>
-    <string name="agent_overlay_operating">MUSE // EXEC</string>
+    <string name="agent_overlay_status">Muse is running · %1$s</string>
+    <string name="agent_overlay_budget">%1$02d / %2$d · %3$s</string>
+    <string name="agent_overlay_operating">Muse is running</string>
+    <string name="agent_overlay_budget_initial">00 / 50 · Preparing</string>
     <string name="agent_overlay_stop">ABORT</string>
     <string name="agent_channel_name">Muse 任务执行中</string>
     <string name="agent_channel_description">Muse 正在通过无障碍与 Shizuku 操作设备时显示。</string>
-    <string name="agent_notification_title">MUSE EXEC · 第 %1$d 步</string>
+    <string name="agent_notification_title">Muse 正在执行 · 第 %1$d 次动作</string>
 </resources>
