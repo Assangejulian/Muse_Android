@@ -1114,7 +1114,7 @@ private fun ConfigureWorkspace(
             StatusLine("Live instance", AgentAccessibilityService.current() != null)
             Text(
                 if (accessibilityConnected) {
-                    "无障碍已连接。发送自然语言设备任务时，模型可使用 launch_app / click_node / tap_point / swipe / input_text / terminal 等工具；DeepSeek 默认仅用节点树（无截图视觉）。"
+                    "无障碍已连接。发送自然语言设备任务时，模型可使用 find_nodes / read_node / scroll_until / click_node / swipe / input_text / terminal 等工具；DeepSeek 默认仅用节点树（无截图视觉）。"
                 } else {
                     "请开启系统设置中的 Muse 无障碍服务。开启后，在其它 App 上层会显示柔和的运行状态浮层与停止按钮。"
                 },

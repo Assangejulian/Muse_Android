@@ -82,6 +82,26 @@ class ActionParserTest {
     }
 
     @Test
+    fun parsesFindAndScrollUntilFromFlatOrNestedQuery() {
+        assertEquals(
+            AgentAction.FindNodes(NodeQuery(text = "评论", clickable = true, limit = 8)),
+            ActionParser.parse("""{"action":"find_nodes","text":"评论","clickable":true}"""),
+        )
+        assertEquals(
+            AgentAction.ScrollUntil("up", NodeQuery(description = "like"), 5),
+            ActionParser.parse("""{"action":"scroll_until","direction":"up","query":{"description":"like"},"maxSwipes":5}"""),
+        )
+        assertEquals(
+            AgentAction.ReadNode(9),
+            ActionParser.parse("""{"nodeId":9}""", toolName = "read_node"),
+        )
+        assertEquals(
+            AgentAction.WaitUntil(NodeQuery(text = "完成"), 2_000L),
+            ActionParser.parse("""{"action":"wait_until","text":"完成","milliseconds":2000}"""),
+        )
+    }
+
+    @Test
     fun parsesTerminalWithBoundedTimeout() {
         assertEquals(
             AgentAction.Terminal("pm list packages", 3_000L),

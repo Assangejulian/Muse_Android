@@ -62,6 +62,10 @@ internal object ActorOverlayThought {
             lower.contains("finish_rejected") || lower.contains("not yet") -> "结果：还不能收工，继续做"
             lower.contains("stale") -> "结果：页面已切换，重新规划"
             lower.contains("no stable") || lower.contains("screen unchanged") -> "结果：结构没变，往下划或换控件"
+            lower.contains("matches=") || lower.contains("already on screen") || lower.contains("found after") ->
+                "结果：查询到了控件，继续操作"
+            lower.contains("no match") || lower.contains("query not observed") || lower.contains("query_empty") ->
+                "结果：树上没找到，换查询或往下划"
             progressed -> "结果：页面结构变了，继续"
             value.any { it in '\u4e00'..'\u9fff' } -> "结果：${clip(value, 48)}"
             else -> "结果：这一步没有推进"

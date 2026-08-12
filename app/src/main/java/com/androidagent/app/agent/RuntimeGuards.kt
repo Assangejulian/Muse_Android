@@ -1363,6 +1363,27 @@ class ToolGuard(
                 resolveRequiredTarget("bind_predicate")?.let { return it }
             }
 
+            is AgentAction.ReadNode -> {
+                resolveRequiredTarget("read_node")?.let { return it }
+            }
+
+            is AgentAction.FindNodes -> if (!action.query.hasConstraint()) {
+                return GuardResult(null, "find_nodes requires at least one identifying field")
+            }
+
+            is AgentAction.ScrollUntil -> {
+                if (action.direction !in setOf("up", "down", "left", "right")) {
+                    return GuardResult(null, "scroll_until requires a valid direction")
+                }
+                if (!action.query.hasConstraint()) {
+                    return GuardResult(null, "scroll_until requires at least one identifying field")
+                }
+            }
+
+            is AgentAction.WaitUntil -> if (!action.query.hasConstraint()) {
+                return GuardResult(null, "wait_until requires at least one identifying field")
+            }
+
             is AgentAction.TapPoint -> if (observation.imeVisible) {
                 return GuardResult(null, "visual point taps are forbidden while the IME is visible")
             }
@@ -1483,7 +1504,10 @@ class RunLedger(private var plan: TaskPlan) {
         resolvedTarget: ResolvedActionTarget? = null,
         sideEffectIdentity: SideEffectIdentity? = null,
     ) {
-        if (action is AgentAction.Wait || action is AgentAction.BindPredicate) return
+        if (action is AgentAction.Wait || action is AgentAction.WaitUntil ||
+            action is AgentAction.BindPredicate || action is AgentAction.FindNodes ||
+            action is AgentAction.ReadNode
+        ) return
         val milestone = currentMilestone ?: return
         if (resultState == DispatchResultState.FAILED) return
         if (resultState == DispatchResultState.RESULT_UNKNOWN) {
@@ -1577,6 +1601,10 @@ class RunLedger(private var plan: TaskPlan) {
             is AgentAction.SubmitInput -> ""
             is AgentAction.EnsureToggle -> action.desired.toString()
             is AgentAction.BindPredicate -> action.predicateId
+            is AgentAction.FindNodes -> action.query.signature()
+            is AgentAction.ReadNode -> action.nodeId?.toString().orEmpty()
+            is AgentAction.ScrollUntil -> "${action.direction}:${action.query.signature()}:${action.maxSwipes}"
+            is AgentAction.WaitUntil -> "${action.query.signature()}:${action.milliseconds}"
             is AgentAction.LaunchApp -> action.packageName
             is AgentAction.Swipe -> action.direction
             is AgentAction.Terminal -> "${action.command.length}:${TraceSanitizer.digest(action.command)}:${action.timeoutMillis}"

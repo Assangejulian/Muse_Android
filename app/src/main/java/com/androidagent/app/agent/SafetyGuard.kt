@@ -34,6 +34,14 @@ object SafetyGuard {
                 Unit
             }
             is AgentAction.Swipe -> require(action.direction in setOf("up", "down", "left", "right")) { "Invalid direction" }
+            is AgentAction.ScrollUntil -> {
+                require(action.direction in setOf("up", "down", "left", "right")) { "Invalid direction" }
+                require(action.query.hasConstraint()) { "scroll_until requires a query" }
+                require(action.maxSwipes in 1..12) { "Invalid scroll_until budget" }
+            }
+            is AgentAction.FindNodes -> require(action.query.hasConstraint()) { "find_nodes requires a query" }
+            is AgentAction.WaitUntil -> require(action.query.hasConstraint()) { "wait_until requires a query" }
+            is AgentAction.ReadNode -> require(action.nodeId != null || action.selector != null) { "read_node requires a target" }
             is AgentAction.Terminal -> {
                 require(action.command.isNotBlank() && action.command.length <= 16_000) { "Invalid terminal command" }
                 require(action.timeoutMillis in 250L..30_000L) { "Invalid terminal timeout" }

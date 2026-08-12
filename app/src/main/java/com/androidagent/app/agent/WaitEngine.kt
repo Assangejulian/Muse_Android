@@ -40,7 +40,16 @@ object WaitEngine {
         pollMillis: Long = 120L,
         observe: suspend () -> Observation,
     ): WaitResult<Observation> = waitUntil(timeoutMillis, pollMillis, "text was not observed", observe) {
-        it.nodes.any { node -> node.visible && (node.text == text || node.description == text) }
+        it.nodes.any { node -> node.text == text || node.description == text }
+    }
+
+    suspend fun waitForQuery(
+        query: NodeQuery,
+        timeoutMillis: Long = 3_000L,
+        pollMillis: Long = 120L,
+        observe: suspend () -> Observation,
+    ): WaitResult<Observation> = waitUntil(timeoutMillis, pollMillis, "query was not observed", observe) {
+        NodeQueryMatcher.find(it, query).isNotEmpty()
     }
 
     suspend fun waitForElement(

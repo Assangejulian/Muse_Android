@@ -56,11 +56,13 @@ object SensitiveOperationPolicy {
         is AgentAction.SubmitInput -> selectorMatch(action.target, "submit")
         is AgentAction.BindPredicate -> selectorMatch(action.selector, "bind_predicate")
         is AgentAction.Finish, is AgentAction.Fail -> null
+        is AgentAction.FindNodes, is AgentAction.ReadNode, is AgentAction.WaitUntil -> null
         else -> null
     }
 
     fun isSafeRecoveryAction(action: AgentAction): Boolean = when (action) {
-        AgentAction.Back, AgentAction.Home, is AgentAction.Wait, is AgentAction.Finish, is AgentAction.Fail,
+        AgentAction.Back, AgentAction.Home, is AgentAction.Wait, is AgentAction.WaitUntil,
+        is AgentAction.FindNodes, is AgentAction.ReadNode, is AgentAction.Finish, is AgentAction.Fail,
         is AgentAction.LaunchApp -> true
         else -> false
     }
@@ -99,6 +101,7 @@ object SensitiveOperationPolicy {
                 observation.nodes.singleOrNull { it.visible && it.focused && it.editable }
             }
             is AgentAction.BindPredicate -> NodeSelector.resolve(observation, action.nodeId, action.selector)
+            is AgentAction.ReadNode -> NodeSelector.resolve(observation, action.nodeId, action.selector)
             else -> null
         }
         val values = node?.let { listOf(it.text, it.description, it.viewIdResourceName, it.className) }.orEmpty()

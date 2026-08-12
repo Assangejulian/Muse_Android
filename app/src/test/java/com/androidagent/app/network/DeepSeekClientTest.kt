@@ -1,6 +1,7 @@
 package com.androidagent.app.network
 
 import com.androidagent.app.agent.AgentAction
+import com.androidagent.app.agent.NodeQuery
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -113,7 +114,7 @@ class DeepSeekClientTest {
 
     @Test
     fun rebuildsCompleteAssistantAndToolMessagePair() {
-        val arguments = """{"action":"swipe","direction":"up"}"""
+        val arguments = """{"direction":"up"}"""
         val messages = NativePlannerProtocol.buildMessages(
             systemPrompt = "system",
             taskContext = "goal",
@@ -125,6 +126,7 @@ class DeepSeekClientTest {
                     resultJson = """{"ok":true,"screen":"next"}""",
                     reasoningContent = "Need more results.",
                     assistantContent = "Calling the tool.",
+                    toolName = "swipe",
                 ),
             ),
         )
@@ -139,7 +141,7 @@ class DeepSeekClientTest {
         assertEquals("Need more results.", assistant.getString("reasoning_content"))
         val toolCall = assistant.getJSONArray("tool_calls").getJSONObject(0)
         assertEquals("call_1", toolCall.getString("id"))
-        assertEquals("android_action", toolCall.getJSONObject("function").getString("name"))
+        assertEquals("swipe", toolCall.getJSONObject("function").getString("name"))
         assertEquals(arguments, toolCall.getJSONObject("function").getString("arguments"))
 
         val tool = messages.getJSONObject(3)
@@ -150,33 +152,53 @@ class DeepSeekClientTest {
     }
 
     @Test
-    fun exposesOneClosedAndroidActionSchemaAndForcesItsChoice() {
-        val definition = NativePlannerProtocol.toolDefinition()
-        val function = definition.getJSONObject("function")
-        val parameters = function.getJSONObject("parameters")
-        val actionEnum = parameters.getJSONObject("properties").getJSONObject("action").getJSONArray("enum")
+    fun exposesDiscreteToolsAndRequiresAToolCall() {
+        val tools = NativePlannerProtocol.toolDefinitions()
+        val names = (0 until tools.length()).map { tools.getJSONObject(it).getJSONObject("function").getString("name") }
+        assertTrue(names.containsAll(listOf("find_nodes", "read_node", "scroll_until", "wait_until", "click_node", "finish")))
+        assertFalse(names.contains("android_action"))
+        assertFalse(names.contains("terminal"))
+        assertEquals("required", NativePlannerProtocol.toolChoice())
 
-        assertEquals("function", definition.getString("type"))
-        assertEquals("android_action", function.getString("name"))
-        assertFalse(parameters.getBoolean("additionalProperties"))
-        assertTrue((0 until actionEnum.length()).any { actionEnum.getString(it) == "ensure_toggle" })
-        assertTrue((0 until actionEnum.length()).any { actionEnum.getString(it) == "finish" })
-        assertFalse((0 until actionEnum.length()).any { actionEnum.getString(it) == "terminal" })
-        assertEquals("string", parameters.getJSONObject("properties").getJSONObject("reason").getString("type"))
-        assertEquals(
-            "android_action",
-            NativePlannerProtocol.toolChoice().getJSONObject("function").getString("name"),
-        )
-        val selector = parameters.getJSONObject("properties").getJSONObject("selector")
-        assertTrue(selector.getJSONArray("anyOf").length() >= 5)
+        val click = tools.getJSONObject(names.indexOf("click_node")).getJSONObject("function").getJSONObject("parameters")
+        assertFalse(click.getBoolean("additionalProperties"))
+        assertTrue(click.getJSONObject("properties").has("nodeId"))
 
-        val terminalEnum = NativePlannerProtocol.toolDefinition(terminalAvailable = true)
-            .getJSONObject("function")
-            .getJSONObject("parameters")
-            .getJSONObject("properties")
-            .getJSONObject("action")
-            .getJSONArray("enum")
-        assertTrue((0 until terminalEnum.length()).any { terminalEnum.getString(it) == "terminal" })
+        val withTerminal = NativePlannerProtocol.toolDefinitions(terminalAvailable = true)
+        val terminalNames = (0 until withTerminal.length()).map {
+            withTerminal.getJSONObject(it).getJSONObject("function").getString("name")
+        }
+        assertTrue(terminalNames.contains("terminal"))
+    }
+
+    @Test
+    fun parsesDiscreteNativeFindNodesWithoutAnActionEnvelope() {
+        val arguments = """{"text":"评论","clickable":true,"thought":"屏幕上没有赞"}"""
+        val response = JSONObject()
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject().put(
+                        "message",
+                        JSONObject().put(
+                            "tool_calls",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("id", "call_find")
+                                    .put("type", "function")
+                                    .put(
+                                        "function",
+                                        JSONObject().put("name", "find_nodes").put("arguments", arguments),
+                                    ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        val planned = NativePlannerProtocol.parseActionResponse(response.toString())
+        assertEquals(AgentAction.FindNodes(NodeQuery(text = "评论", clickable = true)), planned.action)
+        assertEquals("find_nodes", planned.toolName)
+        assertEquals("屏幕上没有赞", planned.thought)
     }
 
     @Test

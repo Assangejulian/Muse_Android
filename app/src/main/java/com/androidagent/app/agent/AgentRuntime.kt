@@ -462,7 +462,11 @@ class AgentRuntime(
                         continue
                     }
 
-                    if (lockedPackage == null && proposed !is AgentAction.LaunchApp) {
+                    if (lockedPackage == null &&
+                        proposed !is AgentAction.LaunchApp &&
+                        proposed !is AgentAction.FindNodes &&
+                        proposed !is AgentAction.ReadNode
+                    ) {
                         val reason = "launch_app must select one installed target before any screen-dependent tool"
                         recordTurn(toolTurns, planned, toolResultJson(false, proposed, before, before, "target_required", reason))
                         history += "PRE_TOOL_BLOCKED: $proposed because $reason"
@@ -527,7 +531,11 @@ class AgentRuntime(
                             screenshotFingerprint = screenshotFingerprint,
                         ),
                     )
-                    if (engineResult.execution != null) {
+                    val stepAction = engineResult.action ?: proposed
+                    if (engineResult.execution != null &&
+                        stepAction !is AgentAction.FindNodes &&
+                        stepAction !is AgentAction.ReadNode
+                    ) {
                         effectiveActions += 1
                         onActionCount(effectiveActions)
                         if (!dispatchedByDriver) {
@@ -536,7 +544,6 @@ class AgentRuntime(
                             }
                         }
                     }
-                    val stepAction = engineResult.action ?: proposed
 
                     engineResult.recoveryDecisions.forEach { decision ->
                         traceStore.event(
@@ -804,6 +811,15 @@ class AgentRuntime(
             val observation = (WaitEngine.waitForDuration(action.milliseconds, service::observe) as WaitResult.Satisfied).value
             return RuntimeStepSettleResult(DispatchResultState.CONFIRMED, observation, "wait duration completed")
         }
+        if (action is AgentAction.WaitUntil || action is AgentAction.ScrollUntil ||
+            action is AgentAction.FindNodes || action is AgentAction.ReadNode
+        ) {
+            return RuntimeStepSettleResult(
+                DispatchResultState.CONFIRMED,
+                service.observe(),
+                "local query/loop already observed the live tree",
+            )
+        }
         if (action is AgentAction.Terminal) {
             return RuntimeStepSettleResult(
                 DispatchResultState.CONFIRMED,
@@ -954,6 +970,7 @@ class AgentRuntime(
             reasoningContent = planned.reasoningContent,
             assistantContent = planned.assistantContent,
             native = planned.native,
+            toolName = planned.toolName,
         )
         while (turns.size > MAX_STORED_TOOL_TURNS) turns.removeAt(0)
     }
@@ -974,7 +991,14 @@ class AgentRuntime(
         .put("changed", before.structureFingerprint() != after.structureFingerprint() ||
             before.packageName != after.packageName)
         .put("package", after.packageName)
-        .put("detail", detail.take(if (action is AgentAction.Terminal) 8_000 else 800))
+        .put("detail", detail.take(
+            when (action) {
+                is AgentAction.Terminal, is AgentAction.FindNodes, is AgentAction.ReadNode,
+                is AgentAction.ScrollUntil, is AgentAction.WaitUntil,
+                -> 4_000
+                else -> 800
+            },
+        ))
         .toString()
 
     private fun observationDelta(before: Observation, after: Observation): String {

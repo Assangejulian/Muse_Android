@@ -586,6 +586,7 @@ data class Observation(
             if (node.text.isNotBlank() && !node.password) append(" text=${node.text.take(80)}")
             if (node.description.isNotBlank() && !node.password) append(" description=${node.description.take(80)}")
             append(" clickable=${node.clickable} editable=${node.editable} bounds=${node.bounds}")
+            if (!node.visible) append(" occluded=true")
             if (node.packageName.isNotBlank() && node.packageName != packageName) append(" package=${node.packageName}")
             if (node.viewId.isNotBlank()) append(" viewId=${node.viewId}")
             append(" enabled=${node.enabled} focused=${node.focused}")
@@ -598,13 +599,14 @@ data class Observation(
 
     private fun prioritizedNodes(): List<UiNodeSnapshot> = nodes
         .asSequence()
-        .filter { it.visible && !it.password && !it.isInputMethod }
+        .filter { !it.password && !it.isInputMethod }
         .sortedWith(
             compareByDescending<UiNodeSnapshot> { node ->
                 when {
                     node.focused -> 100
                     node.editable -> 90
-                    node.clickable -> 80
+                    node.clickable && node.visible -> 80
+                    node.clickable -> 75
                     node.checked != null -> 70
                     node.scrollable -> 60
                     node.text.isNotBlank() || node.description.isNotBlank() -> 40
@@ -622,7 +624,7 @@ data class Observation(
         .take(120)
 
     private companion object {
-        const val MAX_PROMPT_NODES = 40
+        const val MAX_PROMPT_NODES = 48
     }
 }
 
@@ -655,6 +657,11 @@ internal object ObservationDispatchPolicy {
             is AgentAction.SubmitInput -> action.nodeId?.let { nodeId ->
                 relocate(planning, execution, nodeId)?.let { live ->
                     action.copy(nodeId = live.id, target = action.target ?: NodeSelector.from(live))
+                }
+            } ?: action
+            is AgentAction.ReadNode -> action.nodeId?.let { nodeId ->
+                relocate(planning, execution, nodeId)?.let { live ->
+                    action.copy(nodeId = live.id, selector = action.selector ?: NodeSelector.from(live))
                 }
             } ?: action
             else -> action
@@ -739,7 +746,7 @@ object TargetResolver {
             is AgentAction.EnsureToggle -> {
                 val candidates = nodeCandidates(observation, action.nodeId, action.selector)
                 val semantic = unique(candidates) ?: return failed(candidates)
-                if (!semantic.visible || !semantic.enabled || semantic.password || !isBooleanControl(semantic)) {
+                if (!semantic.enabled || semantic.password || !isBooleanControl(semantic)) {
                     ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
                 } else {
                     val current = semantic.checked ?: semantic.selected
@@ -767,6 +774,11 @@ object TargetResolver {
                 val semantic = unique(candidates) ?: return failed(candidates)
                 resolved(semantic, semantic, ActionDispatchMode.OBSERVATION_ONLY)
             }
+            is AgentAction.ReadNode -> {
+                val candidates = nodeCandidates(observation, action.nodeId, action.selector)
+                val semantic = unique(candidates) ?: return failed(candidates)
+                resolved(semantic, semantic, ActionDispatchMode.OBSERVATION_ONLY)
+            }
             else -> ActionTargetResolution()
         }
     }
@@ -784,7 +796,7 @@ object TargetResolver {
     fun editableCandidates(observation: Observation): List<UiNodeSnapshot> = observation.nodes.filter(::isEditableCandidate)
 
     fun clickableTextMatches(observation: Observation, text: String): List<UiNodeSnapshot> = observation.nodes.filter { node ->
-        node.visible && node.enabled && !node.editable &&
+        node.enabled && !node.editable &&
             (node.text.equals(text, true) || node.description.equals(text, true))
     }
 
@@ -808,7 +820,7 @@ object TargetResolver {
         observation: Observation,
     ): ActionTargetResolution {
         val semantic = unique(semanticCandidates) ?: return failed(semanticCandidates)
-        if (!semantic.visible || !semantic.enabled || semantic.password || semantic.isInputMethod) {
+        if (!semantic.enabled || semantic.password || semantic.isInputMethod) {
             return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
         }
         if (semantic.clickable) return resolved(semantic, semantic, ActionDispatchMode.ACCESSIBILITY_CLICK)
@@ -824,7 +836,7 @@ object TargetResolver {
             if (candidates.size > 1) return ActionTargetResolution(failure = ActionTargetFailure.AMBIGUOUS)
             val parent = candidates.singleOrNull() ?: continue
             if (!parent.clickable) continue
-            if (!parent.visible || !parent.enabled || parent.password || parent.isInputMethod) {
+            if (!parent.enabled || parent.password || parent.isInputMethod) {
                 return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
             }
             return resolved(semantic, parent, ActionDispatchMode.ACCESSIBILITY_CLICK)
@@ -894,7 +906,7 @@ object TargetResolver {
     )
 
     private fun isEditableCandidate(node: UiNodeSnapshot): Boolean =
-        node.visible && node.enabled && node.editable && !node.isInputMethod
+        node.enabled && node.editable && !node.isInputMethod
 
     private const val MAX_CLICKABLE_PARENT_DEPTH = 4
 }
@@ -916,6 +928,10 @@ sealed interface AgentAction {
     data class SubmitInput(val nodeId: Int? = null, val target: ElementSelector? = null, val predicateId: String? = null) : AgentAction
     data class EnsureToggle(val nodeId: Int, val desired: Boolean, val selector: ElementSelector? = null, val predicateId: String? = null) : AgentAction
     data class BindPredicate(val predicateId: String, val nodeId: Int? = null, val selector: ElementSelector? = null) : AgentAction
+    data class FindNodes(val query: NodeQuery) : AgentAction
+    data class ReadNode(val nodeId: Int? = null, val selector: ElementSelector? = null) : AgentAction
+    data class ScrollUntil(val direction: String, val query: NodeQuery, val maxSwipes: Int = 6) : AgentAction
+    data class WaitUntil(val query: NodeQuery, val milliseconds: Long = 3_000L) : AgentAction
     data class Terminal(val command: String, val timeoutMillis: Long = 5_000L) : AgentAction
     data class Wait(val milliseconds: Long) : AgentAction
     data object Back : AgentAction

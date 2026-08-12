@@ -609,6 +609,15 @@ object SideEffectIdentityFactory {
                 irreversiblePayloadDigest = TraceSanitizer.digest(action.direction.trim().lowercase()),
                 family = SideEffectFamily.SCROLL,
             )
+            is AgentAction.ScrollUntil -> SideEffectIdentity(
+                actionType = SideEffectFamily.SCROLL.name,
+                targetPackage = targetPackage,
+                targetCrossWindowStructureKey = null,
+                irreversiblePayloadDigest = TraceSanitizer.digest(
+                    "${action.direction.trim().lowercase()}|${action.query.signature()}",
+                ),
+                family = SideEffectFamily.SCROLL,
+            )
             AgentAction.Back -> SideEffectIdentity(
                 actionType = SideEffectFamily.NAVIGATE_BACK.name,
                 targetPackage = targetPackage,
@@ -631,6 +640,9 @@ object SideEffectIdentityFactory {
                 family = SideEffectFamily.TERMINAL,
             )
             is AgentAction.BindPredicate,
+            is AgentAction.FindNodes,
+            is AgentAction.ReadNode,
+            is AgentAction.WaitUntil,
             is AgentAction.Wait,
             is AgentAction.Finish,
             is AgentAction.Fail,
@@ -644,6 +656,7 @@ object SideEffectIdentityFactory {
         is AgentAction.ClickNode,
         is AgentAction.TapPoint,
         is AgentAction.Swipe,
+        is AgentAction.ScrollUntil,
         is AgentAction.InputText,
         is AgentAction.SubmitInput,
         is AgentAction.EnsureToggle,
@@ -652,6 +665,9 @@ object SideEffectIdentityFactory {
         is AgentAction.Terminal,
         -> true
         is AgentAction.BindPredicate,
+        is AgentAction.FindNodes,
+        is AgentAction.ReadNode,
+        is AgentAction.WaitUntil,
         is AgentAction.Wait,
         is AgentAction.Finish,
         is AgentAction.Fail,

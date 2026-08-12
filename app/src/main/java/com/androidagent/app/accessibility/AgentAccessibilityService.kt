@@ -26,6 +26,7 @@ import com.androidagent.app.agent.Observation
 import com.androidagent.app.agent.UiNodeSnapshot
 import com.androidagent.app.agent.InputMode
 import com.androidagent.app.agent.InputActionResultPolicy
+import com.androidagent.app.agent.LocalAgentLoops
 import com.androidagent.app.agent.NodeIdentityKeys
 import com.androidagent.app.agent.ResolvedActionTarget
 import com.androidagent.app.overlay.AgentOverlayController
@@ -184,11 +185,27 @@ class AgentAccessibilityService : AccessibilityService() {
             className = className,
             treePath = path,
         )
-        val meaningful = node.isVisibleToUser && (
-            node.isClickable || node.isEditable || node.isScrollable || node.isCheckable || node.isSelected ||
-                text.isNotBlank() || description.isNotBlank() || viewId.isNotBlank()
-            )
-        if (meaningful) {
+        val onScreen = ObservationNodePolicy.isOnScreen(
+            left = rect.left,
+            top = rect.top,
+            right = rect.right,
+            bottom = rect.bottom,
+            screenWidth = resources.displayMetrics.widthPixels,
+            screenHeight = resources.displayMetrics.heightPixels,
+        )
+        val collect = ObservationNodePolicy.shouldCollect(
+            visibleToUser = node.isVisibleToUser,
+            onScreen = onScreen,
+            clickable = node.isClickable,
+            editable = node.isEditable,
+            scrollable = node.isScrollable,
+            checkable = node.isCheckable,
+            selected = node.isSelected,
+            hasText = text.isNotBlank(),
+            hasDescription = description.isNotBlank(),
+            hasViewId = viewId.isNotBlank(),
+        )
+        if (collect) {
             output += UiNodeSnapshot(
                 id = nextId.getAndIncrement(),
                 text = text,
@@ -207,7 +224,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 selected = node.isSelected,
                 scrollable = node.isScrollable,
                 packageName = node.packageName?.toString().orEmpty(),
-                visible = true,
+                visible = node.isVisibleToUser,
                 password = node.isPassword,
                 windowId = windowId,
             )
@@ -250,6 +267,10 @@ class AgentAccessibilityService : AccessibilityService() {
         is AgentAction.SubmitInput -> submitInputDetailed(resolvedTarget)
         is AgentAction.EnsureToggle -> result(ensureToggle(action, resolvedTarget), "toggle_updated", "ensure_toggle")
         is AgentAction.BindPredicate -> ActionExecutionResult(false, "not_executable", "bind_predicate is runtime-only")
+        is AgentAction.FindNodes, is AgentAction.ReadNode ->
+            ActionExecutionResult(false, "not_executable", "query tools are runtime-only")
+        is AgentAction.ScrollUntil -> executeScrollUntil(action)
+        is AgentAction.WaitUntil -> executeWaitUntil(action)
         is AgentAction.Terminal -> executeTerminal(action)
         is AgentAction.Back -> result(globalActionOrPrivileged(GLOBAL_ACTION_BACK, KeyEvent.KEYCODE_BACK), "back", "back")
         is AgentAction.Home -> result(globalActionOrPrivileged(GLOBAL_ACTION_HOME, KeyEvent.KEYCODE_HOME), "home", "home")
@@ -410,8 +431,11 @@ class AgentAccessibilityService : AccessibilityService() {
         if (resolvedTarget?.dispatchMode != ActionDispatchMode.ACCESSIBILITY_CLICK) return false
         val snapshot = resolvedTarget?.effectiveActionNode ?: return false
         val liveNode = findLiveNode(snapshot) ?: return false
-        if (!liveNode.isVisibleToUser || !liveNode.isEnabled || !liveNode.isClickable) return false
+        if (!liveNode.isEnabled) return false
         val bounds = Rect().also(liveNode::getBoundsInScreen)
+        val accessibilityClick = {
+            liveNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
         if (!NodeClickPolicy.isSafeBounds(
                 left = bounds.left,
                 top = bounds.top,
@@ -419,10 +443,8 @@ class AgentAccessibilityService : AccessibilityService() {
                 bottom = bounds.bottom,
                 screenWidth = resources.displayMetrics.widthPixels,
                 screenHeight = resources.displayMetrics.heightPixels,
-            )) return liveNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        return tap(bounds.exactCenterX(), bounds.exactCenterY()) {
-            liveNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        }
+            )) return accessibilityClick()
+        return tap(bounds.exactCenterX(), bounds.exactCenterY(), accessibilityClick)
     }
 
     private fun findLiveNode(snapshot: UiNodeSnapshot): AccessibilityNodeInfo? {
@@ -708,6 +730,36 @@ class AgentAccessibilityService : AccessibilityService() {
             ToggleState.OFF -> if (action.desired) clickResolvedTarget(resolvedTarget) else true
             ToggleState.UNKNOWN -> false
         }
+    }
+
+    private suspend fun executeScrollUntil(action: AgentAction.ScrollUntil): ActionExecutionResult {
+        val report = LocalAgentLoops.scrollUntil(
+            query = action.query,
+            direction = action.direction,
+            maxSwipes = action.maxSwipes,
+            observe = { observe() },
+            swipe = { swipe(it) },
+        )
+        return ActionExecutionResult(
+            success = report.ok,
+            status = when {
+                report.alreadyPresent -> "already_present"
+                report.ok -> "scrolled"
+                report.swipes == 0 -> "swipe_failed"
+                else -> "not_found"
+            },
+            detail = report.summary,
+            mutationAccepted = report.swipes > 0 || report.ok,
+        )
+    }
+
+    private suspend fun executeWaitUntil(action: AgentAction.WaitUntil): ActionExecutionResult {
+        val report = LocalAgentLoops.waitUntil(
+            query = action.query,
+            timeoutMillis = action.milliseconds,
+            observe = { observe() },
+        )
+        return ActionExecutionResult(true, if (report.ok) "waited" else "wait_timeout", report.summary)
     }
 
     private suspend fun swipe(direction: String): Boolean {

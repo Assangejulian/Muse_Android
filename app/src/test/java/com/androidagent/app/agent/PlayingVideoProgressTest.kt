@@ -66,10 +66,55 @@ class PlayingVideoProgressTest {
 
         val first = RuntimeStepEngine(driver).execute(request(live))
         assertEquals(RuntimeStepStatus.NO_PROGRESS, first.status)
-        assertFalse(sideEffects.check(first.resolvedTarget.let { SideEffectIdentityFactory.create(AgentAction.ClickNode(1), live, resolvedTarget = it) }!!).allowed)
+        val identity = first.resolvedTarget.let {
+            SideEffectIdentityFactory.create(AgentAction.ClickNode(1), live, resolvedTarget = it)
+        }!!
+        // Same-page clicks stay retryable; only a page-leaving activation is explored.
+        assertTrue(sideEffects.check(identity).allowed)
 
         val second = RuntimeStepEngine(driver).execute(request(live))
-        assertTrue(second.reason.contains("already followed"))
-        assertFalse(second.status in setOf(RuntimeStepStatus.PROGRESS, RuntimeStepStatus.MILESTONE_COMPLETE))
+        assertEquals(RuntimeStepStatus.NO_PROGRESS, second.status)
+        assertFalse(second.reason.contains("already followed"))
+    }
+
+    @Test
+    fun checkedStateChangeOnTheSamePageCountsAsProgress() = runBlocking {
+        val node = UiNodeSnapshot(
+            1, "", "toggle", "Switch", true, false, "0,400,80,440",
+            viewId = "app:id/like", treePath = listOf(0, 2), checked = false,
+            packageName = "primary.app", windowId = 3,
+        )
+        var live = Observation("primary.app", listOf(node), windowIds = setOf(3), windowPackages = mapOf(3 to "primary.app"))
+        val milestone = TaskMilestone("goal", "toggle", listOf(UiPredicate(UiPredicateKind.SEMANTIC_CLAIM, description = "on")))
+        val plan = TaskPlan("toggle", "primary.app", GoalContext("toggle it"), listOf(milestone))
+        val driver = object : RuntimeStepDriver {
+            override suspend fun executeDetailed(action: AgentAction, observation: Observation): ActionExecutionResult =
+                ActionExecutionResult(true, "clicked", "accepted")
+
+            override suspend fun settle(before: Observation, action: AgentAction): RuntimeStepSettleResult {
+                live = live.copy(nodes = live.nodes.map { it.copy(checked = true) })
+                return RuntimeStepSettleResult(DispatchResultState.CONFIRMED, live, "checked flipped")
+            }
+        }
+        val result = RuntimeStepEngine(driver).execute(
+            RuntimeStepRequest(
+                step = 1,
+                proposed = AgentAction.ClickNode(1),
+                planningObservation = live,
+                executionObservation = live,
+                plan = plan,
+                milestone = milestone,
+                guard = ToolGuard(plan, PackagePolicy(mutableSetOf("primary.app"), "primary.app")),
+                ledger = RunLedger(plan),
+                bindings = PredicateBindingStore(),
+                recoveryPolicy = RecoveryPolicy(),
+                packagePolicy = PackagePolicy(mutableSetOf("primary.app"), "primary.app"),
+                launchablePackages = setOf("primary.app"),
+                goal = plan.goal,
+                targetPackage = "primary.app",
+                evidenceCounters = StopGateEvidenceCounters(),
+            ),
+        )
+        assertEquals(RuntimeStepStatus.PROGRESS, result.status)
     }
 }

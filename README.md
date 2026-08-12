@@ -1,4 +1,4 @@
-# Muse Android Agent 0.17.7
+# Muse Android Agent 0.18.0
 
 Muse is a private, sideloaded Android control agent. The model owns the live route: Accessibility provides fresh UI-tree observation and node actions, while Shizuku provides launch, package/device inspection, bounded shell tools, and the optional Ubuntu runtime. DeepSeek and other text models work without screenshots; vision stays off unless the user explicitly configures a vision provider.
 
@@ -6,7 +6,7 @@ Registered capabilities:
 
 - **Shizuku** — shell identity for bounded `am`/`pm`/`input`/`dumpsys` inspection and the optional Ubuntu runtime
 - **Accessibility** — live UI hierarchy, target validation, click/swipe/input actions, and a compact progress overlay on other apps
-- **Tools for the model** — `launch_app`, `click_node`, `click_text`, `tap_point`, `swipe`, `input_text`, `submit_input`, `ensure_toggle`, `bind_predicate`, `terminal`, `back`, `home`, `wait`, `finish`/`fail`
+- **Tools for the model** — `find_nodes`, `read_node`, `scroll_until`, `wait_until`, `launch_app`, `click_node`, `click_text`, `tap_point`, `swipe`, `input_text`, `submit_input`, `ensure_toggle`, `bind_predicate`, `terminal`, `back`, `home`, `wait`, `finish`/`fail`
 
 The Compose UI offers Catppuccin Mocha dark mode and a sun-warmed Latte light mode, with System / Light / Dark selection, animated palette transitions, rounded controls, and compact two-line progress both in Chat and over other apps.
 
@@ -25,11 +25,11 @@ Each device goal starts the hybrid `AgentRuntime` when Muse Accessibility is con
 3. The model chooses Accessibility or Shizuku for the next useful step and may switch between installed apps.
 4. Re-observe and continue until the Actor declares completion or a real blocker; completion gets one independent model verification.
 
-The runtime uses one advisory goal instead of a speculative Manager plan. Ordinary actions do not require predicate bindings, confirmed retries remain under model control, and local failures return as Actor feedback rather than triggering hidden Back, relaunch, or replan actions. Only safety, stale-target, privacy, installed-package, and unknown-side-effect boundaries remain deterministic.
+The runtime uses one advisory goal instead of a speculative Manager plan. The Actor calls discrete tools (`find_nodes`, `read_node`, `scroll_until`, `click_*`, …) instead of a single scripted mega-action. Query tools search the full accessibility tree, including nodes covered by the progress overlay. `scroll_until` / `wait_until` loop locally so one model turn can cover many swipes. Same-page checked/selected changes count as progress; a click that does not leave the page stays retryable. Ordinary actions do not require predicate bindings, and local failures return as Actor feedback rather than triggering hidden Back, relaunch, or replan actions. Only safety, stale-target, privacy, installed-package, and unknown-side-effect boundaries remain deterministic.
 
 A compact Catppuccin progress overlay (`TYPE_ACCESSIBILITY_OVERLAY`) and a foreground notification stay visible on other apps with route, action budget, two sanitized progress lines, and Stop.
 
-The 50-turn limit counts only real tool actions. Observation, planning, verification, and replanning use a separate internal control-cycle guard and do not consume the displayed action budget.
+The 50-turn limit counts only mutating tool actions. `find_nodes` / `read_node` are observation-only and do not consume the displayed action budget. Planning, verification, and replanning use a separate internal control-cycle guard.
 
 Vision stays **off** by default so DeepSeek and other text models work on the node list only.
 
@@ -84,4 +84,4 @@ Do not use Muse for payments, purchases, account-security changes, verification 
 .\gradlew.bat assembleDebug --no-daemon --console=plain
 ```
 
-The application ID remains `com.androidagent.app`; version `0.17.7` uses versionCode `60` for in-place updates. Environment setup bootstraps `ca-certificates` over an APT-signed HTTP index before switching the selected mirror back to HTTPS for all remaining packages.
+The application ID remains `com.androidagent.app`; version `0.18.0` uses versionCode `61` for in-place updates. Environment setup bootstraps `ca-certificates` over an APT-signed HTTP index before switching the selected mirror back to HTTPS for all remaining packages.

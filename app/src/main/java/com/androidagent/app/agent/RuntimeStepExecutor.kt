@@ -246,6 +246,26 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
             )
         }
 
+        if (action is AgentAction.FindNodes || action is AgentAction.ReadNode) {
+            val report = NodeQueryMatcher.execute(action, request.executionObservation)
+            events += RuntimeStepEngineEvent("commit", "QUERY")
+            request.evidenceCounters.successfulObservationActions++
+            val evidence = evaluate(request, request.executionObservation)
+            val execution = ActionExecutionResult(report.ok, if (report.ok) "query" else "query_empty", report.summary)
+            val status = completeOrObserve(request, evidence, request.executionObservation, action, report.summary, events)
+            return RuntimeStepEngineResult(
+                status = status,
+                action = action,
+                before = request.executionObservation,
+                after = request.executionObservation,
+                execution = execution,
+                evidence = evidence,
+                reason = report.summary,
+                events = events,
+                resolvedTarget = preflight.resolvedTarget,
+            )
+        }
+
         if (preflight.guarded.shortCircuit != null || action is AgentAction.BindPredicate) {
             val origin = if (preflight.guarded.shortCircuit?.status == "already_satisfied") {
                 BindingOrigin.ALREADY_SATISFIED
@@ -568,7 +588,12 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         val evidence = evaluate(request, after)
         events += RuntimeStepEngineEvent("evaluate", if (evidence.proven) "proven" else "unknown")
         val changed = request.executionObservation.packageName != after.packageName ||
-            request.executionObservation.structureFingerprint() != after.structureFingerprint()
+            request.executionObservation.structureFingerprint() != after.structureFingerprint() ||
+            InPlaceProgress.changed(
+                request.executionObservation,
+                after,
+                resolvedTarget?.semanticNode,
+            )
         val status = if (evidence.proven) {
             completeMilestone(request, evidence, after, action, events)
             RuntimeStepStatus.MILESTONE_COMPLETE
@@ -684,8 +709,10 @@ class RuntimeStepEngine(private val driver: RuntimeStepDriver) {
         val navigated = before.packageName != after.packageName ||
             before.structureFingerprint() != after.structureFingerprint()
         val remember = when (identity.family) {
-            SideEffectFamily.ACTIVATE_CONTROL, SideEffectFamily.POINT_ACTIVATION -> committed || navigated
-            SideEffectFamily.SET_BOOLEAN_CONTROL -> committed
+            // Only remember activations that actually left the page. Same-page
+            // clicks (toggles, likes, expanders) must remain retryable.
+            SideEffectFamily.ACTIVATE_CONTROL, SideEffectFamily.POINT_ACTIVATION -> navigated
+            SideEffectFamily.SET_BOOLEAN_CONTROL -> false
             else -> false
         }
         if (!remember) return
