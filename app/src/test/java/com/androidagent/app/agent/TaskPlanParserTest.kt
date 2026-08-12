@@ -31,6 +31,24 @@ class TaskPlanParserTest {
     }
 
     @Test
+    fun parserDropsUnknownValueRefWhenExactLiteralIsPresent() {
+        val raw = """{"summary":"compatible","milestones":[{"id":"m1","objective":"verify","successPredicates":[{"kind":"TEXT_PRESENT","valueRef":"invented_symbol","literal":"ready","description":"ready is visible"}]}]}"""
+        val predicate = TaskPlanParser.parse(raw, GoalContext("complete task"))
+            .milestones.single().successPredicates.single()
+
+        assertEquals(null, predicate.valueRef)
+        assertEquals("ready", predicate.literal)
+    }
+
+    @Test
+    fun parserRejectsUnknownValueRefWithoutLiteral() {
+        val raw = """{"summary":"invalid","milestones":[{"id":"m1","objective":"verify","successPredicates":[{"kind":"TEXT_PRESENT","valueRef":"invented_symbol","description":"ready is visible"}]}]}"""
+        assertThrows(TaskPlanException::class.java) {
+            TaskPlanParser.parse(raw, GoalContext("complete task"))
+        }
+    }
+
+    @Test
     fun replanKeepsProvenPrefix() {
         val previous = validPlan()
         val repair = TaskMilestone("repair", "Repair missing proof", listOf(UiPredicate(UiPredicateKind.TEXT_PRESENT, literal = "proof", description = "proof")))

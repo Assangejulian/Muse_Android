@@ -321,11 +321,13 @@ class DeepSeekClient(
             {"summary":"...","targetAppHint":"...","allowedPackages":["optional explicit package ids"],"milestones":[
               {"id":"m1","kind":"LAUNCH_APP|INPUT|INTERACTION|VERIFICATION|GENERIC","objective":"...","successPredicates":[
                 {"predicateId":"m1-p1","kind":"PACKAGE_FOREGROUND|TEXT_PRESENT|EDITABLE_EQUALS|IME_HIDDEN|ELEMENT_PRESENT|ELEMENT_DISAPPEARED|ELEMENT_ENABLED|ELEMENT_SELECTED|ELEMENT_CHECKED|ELEMENT_TEXT_EQUALS|TOGGLE_STATE|SEMANTIC_CLAIM",
-                 "valueRef":"goal_text","literal":"optional","expectedChecked":true,"targetPackage":"explicit.package.for-package-predicate",
+                 "literal":"optional exact value","expectedChecked":true,"targetPackage":"explicit.package.for-package-predicate",
                  "targetHint":"abstract description of the target control","target":{"packageName":"optional-after-binding","viewIdResourceName":"optional-after-binding","text":"optional-after-binding","className":"optional","bounds":"optional"},"description":"observable fact"}
               ]}
             ]}
             Use deterministic local predicates whenever possible. A dispatched action is never proof by itself.
+            valueRef is optional and its only valid value is the exact string goal_text, meaning the complete immutable
+            goal verbatim. Omit valueRef for all other values and use literal only for an exact value supplied by the user.
             You do not see the current Accessibility observation. Do not guess view IDs, tree paths, bounds, or exact selectors.
             predicateId is required, non-empty, and must match ^[A-Za-z0-9_-]+$; it is unique across the entire plan and must be preserved when revising a plan with unchanged predicate semantics.
             Predicate IDs are stable milestone-local contracts; the runtime may complete binding only from a fresh observation.
@@ -354,6 +356,7 @@ class DeepSeekClient(
             ${failureContext.ifBlank { "none" }.take(8_000)}
         """.trimIndent()
         var lastFailure: Throwable? = null
+        var repairFeedback = ""
         repeat(MAX_MANAGER_PLAN_ATTEMPTS) { attempt ->
             try {
                 val raw = executeStructuredRequest(
@@ -361,7 +364,12 @@ class DeepSeekClient(
                     baseUrl,
                     model,
                     JSONArray().put(message("system", "Create auditable GUI task plans. Return JSON only."))
-                        .put(message("user", prompt)),
+                        .put(
+                            message(
+                                "user",
+                                prompt + repairFeedback,
+                            ),
+                        ),
                     0.1,
                     3_000,
                     "manager",
@@ -373,6 +381,12 @@ class DeepSeekClient(
             } catch (failure: Throwable) {
                 lastFailure = failure
                 if (attempt + 1 < MAX_MANAGER_PLAN_ATTEMPTS) {
+                    repairFeedback = buildString {
+                        append("\n\nYour previous plan was rejected by the local protocol validator. ")
+                        append("Correct the JSON contract; do not repeat the invalid field or value.\n")
+                        append("Validator feedback: ")
+                        append(failure.message.orEmpty().take(500))
+                    }
                     delay(ModelRetryPolicy.delayMillis(attempt))
                 }
             }
@@ -465,6 +479,9 @@ class DeepSeekClient(
         val prompt = """
             Verify whether the Android task is fully complete now. App launch or navigation alone is not success
             for a multi-step goal. Require direct evidence on the current screen and in successful action history.
+            A successful command exit or a repeated action is never completion evidence by itself. An unproven plan
+            predicate is not itself proof of failure when the current observable state plus a confirmed tool result
+            directly proves the entire immutable goal; explain that direct evidence precisely.
             Return {"done":true,"reason":"evidence"} or {"done":false,"reason":"missing step"}.
 
             Goal: ${goal.originalGoal.take(8_000)}

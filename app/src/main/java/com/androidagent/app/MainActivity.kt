@@ -330,7 +330,7 @@ private fun MuseApp() {
                                             "无障碍服务已断开。请到 Configure 重新开启 Muse 无障碍后重试。"
                                         result.outcome == RuntimeOutcome.SAFETY_BLOCKED ->
                                             "安全策略阻止了该任务：${result.reason}"
-                                        else -> "任务未完成（${result.outcome.name}）：${result.reason}"
+                                        else -> runtimeFailureMessage(result.outcome, result.reason)
                                     }
                                 }
                                 is AgentStartResult.Busy ->
@@ -1339,4 +1339,21 @@ private fun openAccessibilitySettings(context: Context): Boolean {
         if (launched) return true
     }
     return false
+}
+
+private fun runtimeFailureMessage(outcome: RuntimeOutcome, reason: String): String {
+    val detail = reason.lowercase()
+    return when {
+        outcome == RuntimeOutcome.PERMANENT_PLAN_ERROR &&
+            ("manager plan" in detail || "predicate" in detail || "valueref" in detail) ->
+            "任务规划未通过协议校验，Muse 已安全停止，没有继续操作设备。"
+        outcome == RuntimeOutcome.PERMANENT_PLAN_ERROR &&
+            ("control-cycle" in detail || "without verified completion" in detail) ->
+            "任务没有取得可验证的完成证据，Muse 已停止以避免重复执行。"
+        outcome == RuntimeOutcome.TRANSIENT_NETWORK_ERROR ->
+            "模型服务暂时不可用，本次任务未继续执行。"
+        outcome == RuntimeOutcome.TIMEOUT ->
+            "任务运行超时，Muse 已停止当前执行。"
+        else -> "任务未完成，Muse 已安全停止。可在运行记录中查看诊断信息。"
+    }
 }

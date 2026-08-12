@@ -124,6 +124,14 @@ internal fun classifyOperationalFailure(reason: String): RuntimeOutcome {
     }
 }
 
+internal fun canVerifyGoalConvergence(
+    evidenceCounters: StopGateEvidenceCounters,
+    latestAction: ActionRecord?,
+    observation: Observation,
+): Boolean = evidenceCounters.successfulMutatingActions > 0 &&
+    latestAction?.success == true &&
+    latestAction.afterFingerprint == observation.observationId
+
 class AgentRuntime(
     private val context: Context,
     private val settings: SecureSettings,
@@ -245,6 +253,7 @@ class AgentRuntime(
                 var effectiveActions = 0
                 val evidenceCounters = StopGateEvidenceCounters()
                 var pendingReplanReason: String? = null
+                val completionProbeStates = mutableSetOf<String>()
                 // After a scaffold fallback, force one Manager replan with a live screen
                 // so the Actor is not stuck on a launch-only plan.
                 var forceObservationReplan = usedFallbackPlan
@@ -974,14 +983,10 @@ class AgentRuntime(
                         )
                     }
 
-                    val engineJudgement = when {
-                        stepAction is AgentAction.Terminal && engineResult.execution?.success == true ->
-                            TransitionJudgement.PROGRESS
-                        else -> when (engineResult.status) {
+                    val engineJudgement = when (engineResult.status) {
                         RuntimeStepStatus.MILESTONE_COMPLETE -> TransitionJudgement.MILESTONE_COMPLETE
                         RuntimeStepStatus.PROGRESS, RuntimeStepStatus.OBSERVATION_ONLY -> TransitionJudgement.PROGRESS
                         else -> TransitionJudgement.NO_PROGRESS
-                        }
                     }
                     var judgement = engineJudgement
                     var evidence = if (stepAction is AgentAction.Terminal) {
@@ -1083,6 +1088,38 @@ class AgentRuntime(
                     } else if (judgement == TransitionJudgement.PROGRESS) {
                         recoveryPolicy.resetFailures()
                     }
+                    val isFinalMilestone = ledger.currentMilestoneIndex == plan.milestones.lastIndex
+                    val completionProbeKey = after.stateFingerprint()
+                    if (judgement != TransitionJudgement.MILESTONE_COMPLETE &&
+                        isFinalMilestone &&
+                        engineResult.execution?.success == true &&
+                        completionProbeStates.add(completionProbeKey)
+                    ) {
+                        val convergence = verifyGoalConvergence(
+                            step = step,
+                            goal = goalContext,
+                            observation = after,
+                            history = history,
+                            plan = plan,
+                            ledger = ledger,
+                            useVision = useVision,
+                            apiKey = actorKey,
+                            baseUrl = actorBaseUrl,
+                            model = actorModel,
+                            evidenceCounters = evidenceCounters,
+                            lockedPackage = lockedPackage,
+                            packagePolicy = packagePolicy,
+                        )
+                        if (convergence.done) {
+                            traceStore.event(
+                                runId,
+                                "GOAL_CONVERGENCE_PROVEN",
+                                mapOf("reason" to convergence.reason),
+                            )
+                            return@withTimeout finish(RuntimeOutcome.SUCCESS, convergence.reason)
+                        }
+                        history += "COMPLETION_PROBE_REJECTED: ${convergence.reason}"
+                    }
                 }
 
                 finish(RuntimeOutcome.PERMANENT_PLAN_ERROR, "control-cycle budget exhausted without verified completion")
@@ -1141,8 +1178,27 @@ class AgentRuntime(
         preDispatchSnapshots: PreDispatchEvidenceStore? = null,
     ): VerificationResult {
         onPhase(step, "Verifying")
-        ledger.currentMilestone?.let {
-            return VerificationResult(false, "Milestone ${it.id} is not proven yet: ${it.objective}")
+        ledger.currentMilestone?.let { current ->
+            val convergence = verifyGoalConvergence(
+                step = step,
+                goal = goal,
+                observation = observation,
+                history = history,
+                plan = plan,
+                ledger = ledger,
+                useVision = useVision,
+                apiKey = apiKey,
+                baseUrl = baseUrl,
+                model = model,
+                evidenceCounters = evidenceCounters,
+                lockedPackage = lockedPackage,
+                packagePolicy = packagePolicy,
+            )
+            if (convergence.done) return convergence
+            return VerificationResult(
+                false,
+                "Milestone ${current.id} is not proven yet: ${current.objective}; ${convergence.reason}",
+            )
         }
         if (!evidenceCounters.hasLocalEvidence()) {
             return VerificationResult(false, "No deterministic local predicate evidence exists")
@@ -1200,6 +1256,66 @@ class AgentRuntime(
             if (!local.proven) return VerificationResult(false, "Toggle completion lacks a deterministic ON state")
         }
         return verification
+    }
+
+    /**
+     * Goal-level repair gate for an over-constrained milestone contract.
+     * It remains app-agnostic and requires both an accepted Android action and
+     * a successful execution record tied to the current observation. A model
+     * claim or command exit on its own can never close a run.
+     */
+    private suspend fun verifyGoalConvergence(
+        step: Int,
+        goal: GoalContext,
+        observation: Observation,
+        history: List<String>,
+        plan: TaskPlan,
+        ledger: RunLedger,
+        useVision: Boolean,
+        apiKey: String,
+        baseUrl: String,
+        model: String,
+        evidenceCounters: StopGateEvidenceCounters,
+        lockedPackage: String?,
+        packagePolicy: PackagePolicy,
+    ): VerificationResult {
+        val latest = executionHistory.all().lastOrNull()
+        if (!canVerifyGoalConvergence(evidenceCounters, latest, observation)) {
+            return VerificationResult(false, "Latest confirmed action is not tied to the current observation")
+        }
+        onPhase(step, "Verifying")
+        val screenshotCapture = if (useVision && lockedPackage != null) {
+            captureBoundScreenshot(observation, lockedPackage, packagePolicy)
+        } else {
+            ScreenshotCapture()
+        }
+        if (screenshotCapture.failure != null) return VerificationResult(false, screenshotCapture.failure)
+        val verification = try {
+            client.verifyCompletion(
+                apiKey = apiKey,
+                baseUrl = baseUrl,
+                model = model,
+                goal = goal,
+                observation = observation,
+                history = (
+                    history + executionHistory.promptLines() +
+                        "CONVERGENCE_CHECK: judge the complete immutable goal from current observable state and confirmed tool results; the plan may be over-constrained"
+                    ).takeLast(24),
+                screenshotDataUrl = screenshotCapture.dataUrl,
+                taskPlan = plan,
+                evidenceLedger = ledger.evidenceSummary(),
+                provider = settings.currentProvider,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            return VerificationResult(false, "Completion verifier unavailable: ${error.message.orEmpty()}")
+        }
+        return if (verification.done) {
+            VerificationResult(true, "Whole goal verified from current state: ${verification.reason}")
+        } else {
+            verification
+        }
     }
 
     private suspend fun replan(

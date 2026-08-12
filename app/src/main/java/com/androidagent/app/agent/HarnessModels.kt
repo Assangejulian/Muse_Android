@@ -364,9 +364,21 @@ object TaskPlanParser {
                 }
                 val legacyToggle = rawKind == UiPredicateKind.TOGGLE_ON
                 val kind = if (legacyToggle) UiPredicateKind.TOGGLE_STATE else rawKind
-                val valueRef = predicate.optString("valueRef").trim().ifBlank { null }
+                val rawValueRef = predicate.optString("valueRef").trim().ifBlank { null }
                 val literal = predicate.optString("literal").trim().ifBlank { null }
-                require(valueRef == null || valueRef == "goal_text") { "Unknown predicate valueRef" }
+                // `valueRef` is a deliberately tiny protocol surface. Some
+                // OpenAI-compatible models still invent symbolic references
+                // even when an explicit literal is present. In that case the
+                // literal is self-contained, so discard the unknown reference
+                // instead of rejecting an otherwise auditable plan. Never map
+                // an unknown reference to user data or guess its value.
+                val valueRef = when {
+                    rawValueRef == null || rawValueRef == "goal_text" -> rawValueRef
+                    literal != null -> null
+                    else -> throw TaskPlanException(
+                        "Unsupported predicate valueRef; use literal or the exact valueRef goal_text",
+                    )
+                }
                 if (kind in setOf(UiPredicateKind.TEXT_PRESENT, UiPredicateKind.EDITABLE_EQUALS, UiPredicateKind.ELEMENT_TEXT_EQUALS)) {
                     require(valueRef != null || literal != null) { "$kind requires a value" }
                 }

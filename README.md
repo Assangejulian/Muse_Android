@@ -1,4 +1,4 @@
-# Muse Android Agent 0.16.0
+# Muse Android Agent 0.16.1
 
 Muse is a private, sideloaded Android control agent. Chat goals use **Shizuku as the primary terminal control path**, with Accessibility providing live UI-tree observation and node-level fallback actions. DeepSeek and other text models work without screenshots; vision stays off unless the user explicitly configures a vision provider.
 
@@ -24,6 +24,8 @@ Each device goal starts the hybrid `AgentRuntime` when Muse Accessibility is con
 2. Model returns one structured action (`android_action` / JSON).
 3. Runtime prefers deterministic Shizuku terminal tools and uses Accessibility nodes when terminal state cannot reliably identify or operate the target.
 4. Re-observe and continue until verified completion, fail, cancel, or budget exhaust.
+
+Manager protocol failures are retried with validator feedback instead of repeating the same invalid plan. On the final milestone, a strict whole-goal convergence check can repair an over-constrained predicate only after a confirmed Android action and current-state evidence. An identical action that already made no progress on the same screen is blocked across replans.
 
 A compact Catppuccin progress overlay (`TYPE_ACCESSIBILITY_OVERLAY`) and a foreground notification stay visible on other apps with route, action budget, two sanitized progress lines, and Stop.
 

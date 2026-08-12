@@ -60,10 +60,30 @@ class RuntimeGuardsTest {
         assertNull(ledger.blockRepeated(action, screen))
         assertNull(ledger.blockRepeated(action, screen))
         // Budget is charged only by recordDispatch. Exhaust the per-screen attempt budget.
-        repeat(6) {
+        repeat(3) {
             assertNull(ledger.blockRepeated(action, screen))
             ledger.recordDispatch(action, screen)
         }
+        assertNotNull(ledger.blockRepeated(action, screen))
+    }
+
+    @Test
+    fun sameNoProgressActionIsBlockedAcrossReplansOnTheSameScreen() {
+        val ledger = RunLedger(plan)
+        val screen = Observation("example.app", emptyList())
+        val action = AgentAction.Terminal("cmd package resolve-activity example.app")
+        ledger.record(
+            StepTrace(
+                milestoneId = "verify",
+                beforeId = screen.observationId,
+                action = TraceSanitizer.action(action),
+                afterId = screen.observationId,
+                judgement = TransitionJudgement.NO_PROGRESS,
+                evidence = "No stable UI state change",
+            ),
+        )
+        ledger.replacePlan(plan.copy(summary = "revised"), 0)
+
         assertNotNull(ledger.blockRepeated(action, screen))
     }
 

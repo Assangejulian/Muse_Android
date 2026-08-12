@@ -1446,6 +1446,13 @@ class RunLedger(private var plan: TaskPlan) {
         sideEffectIdentity: SideEffectIdentity? = null,
     ): String? {
         val milestone = currentMilestone ?: return null
+        val lastTrace = traces.lastOrNull()
+        if (lastTrace?.judgement == TransitionJudgement.NO_PROGRESS &&
+            lastTrace.afterId == observation.observationId &&
+            lastTrace.action == TraceSanitizer.action(action)
+        ) {
+            return "the same action already produced no progress on the current screen"
+        }
         val unknownKey = unknownActionKey(milestone, action, observation, resolvedTarget, sideEffectIdentity)
         if (unknownKey in unknownDispatches) {
             return "previous dispatch result is unknown for the same milestone, action, and target"
@@ -1605,5 +1612,5 @@ class RunLedger(private var plan: TaskPlan) {
         ).joinToString("|")
     }
 
-    private companion object { const val MAX_ATTEMPTS_PER_SCREEN = 6 }
+    private companion object { const val MAX_ATTEMPTS_PER_SCREEN = 3 }
 }
