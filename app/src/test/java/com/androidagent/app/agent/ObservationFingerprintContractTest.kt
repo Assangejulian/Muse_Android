@@ -56,12 +56,31 @@ class ObservationFingerprintContractTest {
     }
 
     @Test
-    fun packageOrWindowChangeIsStructuralStale() {
+    fun onlyAPackageChangeIsHardStale() {
         val first = observation()
         val otherPackage = first.copy(packageName = "other.app")
+        val extraCard = first.copy(
+            nodes = first.nodes + first.nodes.single().copy(
+                id = 2,
+                text = "New card",
+                viewId = "primary:id/card",
+                bounds = "0,80,100,140",
+            ),
+        )
         val otherWindow = first.copy(windowIds = setOf(9), windowPackages = mapOf(9 to "primary.app"))
         assertTrue(ObservationDispatchPolicy.isStale(first, otherPackage))
-        assertTrue(ObservationDispatchPolicy.isStale(first, otherWindow))
+        assertFalse(ObservationDispatchPolicy.isStale(first, extraCard))
+        assertFalse(ObservationDispatchPolicy.isStale(first, otherWindow))
+    }
+
+    @Test
+    fun clickNodeRemapsAcrossARecycledFeedId() {
+        val planned = observation()
+        val live = planned.copy(
+            nodes = planned.nodes.map { it.copy(id = 9, bounds = "12,16,140,60") },
+        )
+        val remapped = ObservationDispatchPolicy.retarget(AgentAction.ClickNode(1), planned, live)
+        assertEquals(9, (remapped as AgentAction.ClickNode).nodeId)
     }
 
     private fun observation(text: String = "Ready") = Observation(

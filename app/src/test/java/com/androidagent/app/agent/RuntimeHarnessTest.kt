@@ -55,13 +55,25 @@ class RuntimeHarnessTest {
     @Test
     fun staleObservationIsRecoveredBeforeBindingOrExecution() = runBlocking {
         val initial = Observation("example.app", listOf(node(1, "Dismiss")))
-        val changed = Observation("example.app", emptyList())
+        val changed = Observation("other.app", emptyList())
         val service = FakeAccessibilityService(initial, observationQueue = listOf(initial, changed))
         val result = harness(service, FakePlanner { AgentAction.ClickNode(1) }, FakeClock()).run(disappearedPlan())
 
         assertEquals(0, service.executeCount)
         assertTrue(result.events.any { it.phase == "stale_observation" })
         assertTrue(result.events.none { it.phase == "prepare_binding" })
+    }
+
+    @Test
+    fun refreshedSamePackageMissingTargetDoesNotExecute() = runBlocking {
+        val initial = Observation("example.app", listOf(node(1, "Dismiss")))
+        val changed = Observation("example.app", emptyList())
+        val service = FakeAccessibilityService(initial, observationQueue = listOf(initial, changed))
+        val result = harness(service, FakePlanner { AgentAction.ClickNode(1) }, FakeClock()).run(disappearedPlan())
+
+        assertEquals(0, service.executeCount)
+        assertTrue(result.events.none { it.phase == "stale_observation" })
+        assertTrue(result.events.any { it.phase == "tool_guard" && it.detail == "rejected" })
     }
 
     @Test

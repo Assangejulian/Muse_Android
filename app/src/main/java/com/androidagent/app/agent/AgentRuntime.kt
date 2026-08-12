@@ -312,21 +312,10 @@ class AgentRuntime(
 
                     val cycle = ledger.cyclePeriod()
                     if (ledger.noProgressCount >= MAX_NO_PROGRESS || (cycle != null && ledger.noProgressCount >= 2)) {
-                        // Model-first: stuck loops replan; do not abort the run here.
+                        // Tell the Actor it is looping, but never skip planning.
+                        // Skipping here used to spin Observing forever at 01/50.
                         val reason = if (cycle != null) "ABAB_LOOP" else "SCREEN_UNCHANGED"
-                        history += "STUCK_SIGNAL: $reason (noProgress=${ledger.noProgressCount}); Actor must choose a different live action"
-                        recoveryPolicy.noteSuccessfulDispatch()
-                        ledger.record(
-                            StepTrace(
-                                milestone.id,
-                                before.observationId,
-                                "stuck_signal",
-                                before.observationId,
-                                TransitionJudgement.NO_PROGRESS,
-                                reason,
-                            ),
-                        )
-                        continue
+                        history += "STUCK_SIGNAL: $reason (noProgress=${ledger.noProgressCount}); choose a genuinely different live action"
                     }
 
                     onPhase(step, "Planning")

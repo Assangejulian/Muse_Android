@@ -804,7 +804,8 @@ class RuntimeContractsTest {
             launchablePackages = setOf("primary.app"),
             goal = runtimePlan.goal,
         )
-        assertTrue(preflight.stale)
+        assertFalse(preflight.stale)
+        assertEquals(2, (preflight.action as AgentAction.ClickNode).nodeId)
     }
 
     @Test
@@ -863,7 +864,7 @@ class RuntimeContractsTest {
             goal = runtimePlan.goal,
         )
         assertFalse(preflight.stale)
-        assertEquals(AgentAction.ClickNode(1), preflight.action)
+        assertEquals(1, (preflight.action as AgentAction.ClickNode).nodeId)
     }
 
     @Test

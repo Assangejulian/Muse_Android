@@ -28,11 +28,12 @@ object RuntimeStepExecutor {
             return RuntimeStepPreflight(
                 executionObservation = executionObservation,
                 stale = true,
-                guarded = GuardResult(null, "screen structure changed before tool dispatch; re-observe before acting"),
+                guarded = GuardResult(null, "foreground package changed before tool dispatch; re-observe before acting"),
                 action = null,
             )
         }
-        val guarded = guard.normalizeAndValidate(proposed, executionObservation, milestone)
+        val liveAction = ObservationDispatchPolicy.retarget(proposed, planningObservation, executionObservation)
+        val guarded = guard.normalizeAndValidate(liveAction, executionObservation, milestone)
         val action = guarded.action ?: guarded.shortCircuit?.let { proposed }
         if (action == null) {
             return RuntimeStepPreflight(executionObservation, false, guarded, null)

@@ -627,18 +627,74 @@ data class Observation(
 }
 
 /**
- * Planning can take many seconds. Bounds, clocks, and focus flicker must not
- * discard a still-valid action. Only a real topology / actionability change is stale.
+ * Planning can take many seconds. Live feeds add cards, recycle windows, and
+ * animate banners. That is not a reason to throw the planned action away.
+ * Only a package change is hard-stale; node actions are remapped onto the
+ * fresh tree by stable identity.
  */
 internal object ObservationDispatchPolicy {
     fun isStale(planning: Observation, execution: Observation): Boolean {
-        if (planning.packageName.isNotBlank() &&
-            execution.packageName.isNotBlank() &&
-            planning.packageName != execution.packageName
-        ) {
-            return true
+        if (planning.packageName.isBlank() || execution.packageName.isBlank()) return false
+        return planning.packageName != execution.packageName
+    }
+
+    fun retarget(action: AgentAction, planning: Observation, execution: Observation): AgentAction {
+        if (planning.observationId == execution.observationId) return action
+        return when (action) {
+            is AgentAction.ClickNode -> relocate(planning, execution, action.nodeId)?.let { live ->
+                action.copy(nodeId = live.id, selector = action.selector ?: NodeSelector.from(live))
+            } ?: action
+            is AgentAction.EnsureToggle -> relocate(planning, execution, action.nodeId)?.let { live ->
+                action.copy(nodeId = live.id, selector = action.selector ?: NodeSelector.from(live))
+            } ?: action
+            is AgentAction.InputText -> action.nodeId?.let { nodeId ->
+                relocate(planning, execution, nodeId)?.let { live ->
+                    action.copy(nodeId = live.id, target = action.target ?: NodeSelector.from(live))
+                }
+            } ?: action
+            is AgentAction.SubmitInput -> action.nodeId?.let { nodeId ->
+                relocate(planning, execution, nodeId)?.let { live ->
+                    action.copy(nodeId = live.id, target = action.target ?: NodeSelector.from(live))
+                }
+            } ?: action
+            else -> action
         }
-        return planning.structureFingerprint() != execution.structureFingerprint()
+    }
+
+    internal fun relocate(planning: Observation, execution: Observation, nodeId: Int): UiNodeSnapshot? {
+        val planned = planning.nodes.firstOrNull { it.id == nodeId } ?: return execution.nodes.firstOrNull { it.id == nodeId }
+        val plannedKey = structureKey(planned)
+        val byKey = execution.nodes.filter { node ->
+            val key = structureKey(node)
+            key.isNotBlank() && key == plannedKey
+        }
+        if (byKey.size == 1) return byKey.single()
+        val scored = execution.nodes.map { node ->
+            node to ElementMatchPolicy.score(
+                snapshot = node,
+                packageName = planned.packageName,
+                viewId = planned.viewId,
+                text = planned.text,
+                description = planned.description,
+                className = planned.className,
+                bounds = planned.bounds,
+                editable = planned.editable,
+                clickable = planned.clickable,
+                treePath = planned.treePath,
+            )
+        }.filter { it.second >= ElementMatchPolicy.minimumScore(planned) }
+        val best = scored.maxByOrNull { it.second } ?: return null
+        if (scored.count { it.second == best.second } != 1) return null
+        return best.first
+    }
+
+    private fun structureKey(node: UiNodeSnapshot): String = node.crossWindowStructureKey.ifBlank {
+        NodeIdentityKeys.crossWindowStructureKey(
+            node.packageName,
+            node.viewId,
+            node.className,
+            node.treePath.orEmpty(),
+        )
     }
 }
 
