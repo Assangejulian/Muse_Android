@@ -23,17 +23,19 @@ import com.androidagent.app.privileged.PrivilegedBackendRouter
  * Compact system-wide run monitor shown while Muse drives another app.
  *
  * Status text is a pass-through overlay so bottom app tabs stay tappable.
- * Only the small Stop chip consumes touches.
+ * Only the control chips consume touches.
  */
 class AgentOverlayController(private val service: AccessibilityService) {
     private val windowManager = service.getSystemService(WindowManager::class.java)
     private var statusBar: View? = null
-    private var stopChip: View? = null
+    private var controlChips: View? = null
+    private var pauseChip: Button? = null
     private var statusText: TextView? = null
     private var summaryText: TextView? = null
     private var thoughtScroll: ScrollView? = null
     private var chainText: TextView? = null
     private var lastSummary = ""
+    private var lastPaused: Boolean? = null
 
     fun render(state: AgentUiState) {
         if (!state.running) {
@@ -49,7 +51,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
             state.maxSteps,
             statusLabel(state.status),
         )
-        val summary = state.thoughtLines.takeLast(10).joinToString("\n")
+        val summary = state.thoughtLines.takeLast(16).joinToString("\n")
             .ifBlank { state.progressSummaries.takeLast(6).joinToString("\n") }
             .ifBlank { state.currentAction.ifBlank { "正在准备任务环境" } }
         if (summary.isNotBlank() && summary != lastSummary) {
@@ -57,33 +59,39 @@ class AgentOverlayController(private val service: AccessibilityService) {
             summaryText?.text = summary
             thoughtScroll?.post { thoughtScroll?.fullScroll(View.FOCUS_DOWN) }
         }
+        if (lastPaused != state.paused) {
+            lastPaused = state.paused
+            pauseChip?.setText(if (state.paused) R.string.agent_overlay_resume else R.string.agent_overlay_pause)
+        }
     }
 
     fun hide() {
         statusBar?.let { runCatching { windowManager.removeView(it) } }
-        stopChip?.let { runCatching { windowManager.removeView(it) } }
+        controlChips?.let { runCatching { windowManager.removeView(it) } }
         statusBar = null
-        stopChip = null
+        controlChips = null
+        pauseChip = null
         statusText = null
         summaryText = null
         thoughtScroll = null
         chainText = null
         lastSummary = ""
+        lastPaused = null
     }
 
     fun setCaptureHidden(hidden: Boolean) {
         val visibility = if (hidden) View.INVISIBLE else View.VISIBLE
         statusBar?.visibility = visibility
-        stopChip?.visibility = visibility
+        controlChips?.visibility = visibility
     }
 
     private fun show() {
         val density = service.resources.displayMetrics.density
-        val stopWidth = (76 * density).toInt()
-        val stopHeight = (44 * density).toInt()
+        val chipWidth = (76 * density).toInt()
+        val chipHeight = (36 * density).toInt()
 
         val container = FrameLayout(service).apply {
-            setPadding((10 * density).toInt(), (6 * density).toInt(), stopWidth + (18 * density).toInt(), (8 * density).toInt())
+            setPadding((10 * density).toInt(), (6 * density).toInt(), chipWidth + (18 * density).toInt(), (8 * density).toInt())
         }
         val bar = LinearLayout(service).apply {
             orientation = LinearLayout.VERTICAL
@@ -116,7 +124,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
             setTextColor(Color.rgb(205, 214, 244))
             textSize = 12.5f
             typeface = Typeface.SANS_SERIF
-            maxLines = 12
+            maxLines = 20
             ellipsize = TextUtils.TruncateAt.END
             setLineSpacing(3f, 1.06f)
         }
@@ -134,7 +142,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
         bar.addView(chainText)
         bar.addView(
             scroll,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (168 * density).toInt()),
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (200 * density).toInt()),
         )
         container.addView(
             bar,
@@ -151,24 +159,34 @@ class AgentOverlayController(private val service: AccessibilityService) {
             ),
         )
 
-        val stop = Button(service).apply {
-            setText(R.string.agent_overlay_stop)
+        fun chip(label: Int, fill: Int, onClick: () -> Unit): Button = Button(service).apply {
+            setText(label)
             isAllCaps = true
             setTextColor(Color.rgb(17, 17, 27))
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            textSize = 11f
+            textSize = 10f
             background = GradientDrawable().apply {
-                cornerRadius = 14 * density
-                setColor(Color.rgb(243, 139, 168))
+                cornerRadius = 12 * density
+                setColor(fill)
             }
-            setOnClickListener { AgentController.stop() }
+            setOnClickListener { onClick() }
         }
-        stopChip = stop
+        val skip = chip(R.string.agent_overlay_skip, Color.rgb(249, 226, 175)) { AgentController.skipCurrentApproach() }
+        val pause = chip(R.string.agent_overlay_pause, Color.rgb(137, 180, 250)) { AgentController.togglePause() }
+        val stop = chip(R.string.agent_overlay_stop, Color.rgb(243, 139, 168)) { AgentController.stop() }
+        pauseChip = pause
+        val chips = LinearLayout(service).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(skip, LinearLayout.LayoutParams(chipWidth, chipHeight).apply { bottomMargin = (6 * density).toInt() })
+            addView(pause, LinearLayout.LayoutParams(chipWidth, chipHeight).apply { bottomMargin = (6 * density).toInt() })
+            addView(stop, LinearLayout.LayoutParams(chipWidth, chipHeight))
+        }
+        controlChips = chips
         windowManager.addView(
-            stop,
+            chips,
             overlayParams(
-                width = stopWidth,
-                height = stopHeight,
+                width = chipWidth,
+                height = WindowManager.LayoutParams.WRAP_CONTENT,
                 gravity = Gravity.BOTTOM or Gravity.END,
                 touchable = true,
             ).apply {

@@ -190,8 +190,24 @@ class ResolvedActionTargetTest {
 
         val fiveLevels = labelNode(3, "Five", listOf(0, 0, 0, 0, 0, 0))
         val rejected = TargetResolver.resolveActionTarget(AgentAction.ClickText("Five"), Observation("primary.app", listOf(parent, fiveLevels)))
-        assertNull(rejected.target)
-        assertEquals(ActionTargetFailure.NOT_ACTIONABLE, rejected.failure)
+        assertEquals(ActionDispatchMode.GESTURE_CLICK, rejected.target?.dispatchMode)
+        assertEquals(3, rejected.target?.effectiveActionNode?.id)
+    }
+
+    @Test
+    fun clickNodeOnANonClickableLeafTapsItsOwnBounds() {
+        val row = labelNode(1, "user", listOf(0)).copy(clickable = true, className = "LinearLayout")
+        val icon = labelNode(2, "", listOf(0, 1)).copy(
+            clickable = false,
+            description = "like",
+            className = "ImageView",
+            bounds = "600,800,680,860",
+        )
+        val screen = Observation("primary.app", listOf(row, icon))
+        val resolved = TargetResolver.resolveActionTarget(AgentAction.ClickNode(2), screen).target!!
+        assertEquals(2, resolved.semanticNode.id)
+        assertEquals(2, resolved.effectiveActionNode.id)
+        assertEquals(ActionDispatchMode.GESTURE_CLICK, resolved.dispatchMode)
     }
 
     @Test

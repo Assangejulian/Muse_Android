@@ -1,26 +1,36 @@
 package com.androidagent.app.agent
 
-/** Rolling Chinese overlay copy. Lines wrap in the UI; do not crop to two short fragments. */
+/**
+ * Overlay / chat COT. Pass the model text through. Do not rewrite it into a
+ * scripted 看见/打算/结果 template — that hid the real chain of thought.
+ */
 internal object ActorOverlayThought {
-    const val MAX_LINE_CHARS = 72
-    const val MAX_STORED_LINES = 10
+    const val MAX_LINE_CHARS = 240
+    const val MAX_STORED_LINES = 16
 
     fun decision(modelThought: String, actionLabel: String, observation: Observation): List<String> {
         val thoughtLines = splitThought(modelThought)
-        if (thoughtLines.isNotEmpty()) {
-            return (thoughtLines + "打算：$actionLabel").distinct().map(::clip)
+        val action = actionLabel.trim()
+        return when {
+            thoughtLines.isNotEmpty() && action.isNotBlank() ->
+                (thoughtLines + "[$action]").distinct().map(::clip)
+            thoughtLines.isNotEmpty() -> thoughtLines.map(::clip)
+            action.isNotBlank() -> listOf("[no model thought]", "[$action]")
+            else -> {
+                val hint = screenHint(observation)
+                listOf(if (hint.isBlank()) "[no model thought]" else hint)
+            }
         }
-        val hint = screenHint(observation)
-        return listOf(
-            clip(if (hint.isBlank()) "正在看当前页面" else "看见：$hint"),
-            clip("打算：$actionLabel"),
-        )
     }
 
-    fun result(actionLabel: String, reason: String, progressed: Boolean): List<String> = listOf(
-        clip("动作：$actionLabel"),
-        clip(resultLine(reason, progressed)),
-    )
+    fun result(actionLabel: String, reason: String, @Suppress("UNUSED_PARAMETER") progressed: Boolean): List<String> {
+        val action = actionLabel.trim()
+        val raw = reason.trim()
+        return buildList {
+            if (action.isNotBlank()) add("→ $action")
+            if (raw.isNotBlank()) addAll(splitThought(raw))
+        }.map(::clip)
+    }
 
     fun merge(existing: List<String>, incoming: List<String>): List<String> {
         val next = existing.toMutableList()
@@ -31,16 +41,16 @@ internal object ActorOverlayThought {
     }
 
     internal fun splitThought(raw: String): List<String> {
-        val cleaned = raw.replace(Regex("[\\t\\r]+"), " ").trim()
+        val cleaned = raw.replace("\r\n", "\n").replace('\r', '\n').trim()
         if (cleaned.isBlank()) return emptyList()
-        val sentences = cleaned.split(Regex("[。！？；\\n]+")).map { it.trim() }.filter { it.isNotBlank() }
-        if (sentences.isNotEmpty()) return sentences.map(::clip)
+        val lines = cleaned.split('\n').map { it.trim() }.filter { it.isNotBlank() }
+        if (lines.size > 1) return lines.map(::clip)
         return listOf(clip(cleaned))
     }
 
     internal fun screenHint(observation: Observation): String {
         val labels = observation.nodes.asSequence()
-            .filter { it.visible && !it.password && !it.isInputMethod }
+            .filter { !it.password && !it.isInputMethod }
             .map { it.text.ifBlank { it.description }.trim() }
             .filter { it.isNotBlank() && it.length in 1..16 }
             .distinct()
@@ -48,28 +58,6 @@ internal object ActorOverlayThought {
             .joinToString(" / ")
         val pkg = observation.packageName.substringAfterLast('.').take(16)
         return listOf(pkg, labels).filter { it.isNotBlank() }.joinToString(" · ")
-    }
-
-    internal fun resultLine(reason: String, progressed: Boolean): String {
-        val value = reason.trim()
-        val lower = value.lowercase()
-        return when {
-            lower.contains("already followed") -> "结果：这个入口刚走过，换一条路"
-            lower.contains("package changed") || lower.contains("foreground package") -> "结果：前台应用变了，重新看页"
-            lower.contains("missing") || lower.contains("not in the current") -> "结果：没找到要点的控件"
-            lower.contains("ambiguous") -> "结果：同名控件太多，没法点准"
-            lower.contains("sensitive") || lower.contains("safety") -> "结果：安全策略拦住了"
-            lower.contains("finish_rejected") || lower.contains("not yet") -> "结果：还不能收工，继续做"
-            lower.contains("stale") -> "结果：页面已切换，重新规划"
-            lower.contains("no stable") || lower.contains("screen unchanged") -> "结果：结构没变，往下划或换控件"
-            lower.contains("matches=") || lower.contains("already on screen") || lower.contains("found after") ->
-                "结果：查询到了控件，继续操作"
-            lower.contains("no match") || lower.contains("query not observed") || lower.contains("query_empty") ->
-                "结果：树上没找到，换查询或往下划"
-            progressed -> "结果：页面结构变了，继续"
-            value.any { it in '\u4e00'..'\u9fff' } -> "结果：${clip(value, 48)}"
-            else -> "结果：这一步没有推进"
-        }
     }
 
     private fun clip(value: String, max: Int = MAX_LINE_CHARS): String = value.trim().take(max)

@@ -89,6 +89,22 @@ class AgentAccessibilityService : AccessibilityService() {
         event?.packageName?.toString()?.let(AgentController::setCurrentPackage)
     }
 
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        if (event.action != KeyEvent.ACTION_DOWN) return false
+        if (AgentController.currentRunId() == null) return false
+        return when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                AgentController.togglePause()
+                true
+            }
+            KeyEvent.KEYCODE_VOLUME_UP -> {
+                AgentController.skipCurrentApproach()
+                true
+            }
+            else -> false
+        }
+    }
+
     /**
      * The framework calls this to tell a service to stop *announcing* feedback, not
      * to tear the service down. The binding stays alive and every node and gesture
@@ -428,13 +444,20 @@ class AgentAccessibilityService : AccessibilityService() {
     }.also { if (it == null) Log.w(TAG, "Screenshot timed out after ${SCREENSHOT_TIMEOUT_MS}ms") }
 
     private suspend fun clickResolvedTarget(resolvedTarget: ResolvedActionTarget?): Boolean {
-        if (resolvedTarget?.dispatchMode != ActionDispatchMode.ACCESSIBILITY_CLICK) return false
-        val snapshot = resolvedTarget?.effectiveActionNode ?: return false
-        val liveNode = findLiveNode(snapshot) ?: return false
-        if (!liveNode.isEnabled) return false
-        val bounds = Rect().also(liveNode::getBoundsInScreen)
-        val accessibilityClick = {
-            liveNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        val mode = resolvedTarget?.dispatchMode ?: return false
+        if (mode != ActionDispatchMode.ACCESSIBILITY_CLICK && mode != ActionDispatchMode.GESTURE_CLICK) return false
+        val snapshot = resolvedTarget.effectiveActionNode
+        val liveNode = findLiveNode(snapshot)
+        val bounds = if (liveNode != null) {
+            Rect().also(liveNode::getBoundsInScreen)
+        } else {
+            parseBounds(snapshot.bounds) ?: return false
+        }
+        if (liveNode != null && !liveNode.isEnabled) return false
+        val accessibilityClick = if (mode == ActionDispatchMode.ACCESSIBILITY_CLICK && liveNode != null) {
+            { liveNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
+        } else {
+            null
         }
         if (!NodeClickPolicy.isSafeBounds(
                 left = bounds.left,
@@ -443,8 +466,16 @@ class AgentAccessibilityService : AccessibilityService() {
                 bottom = bounds.bottom,
                 screenWidth = resources.displayMetrics.widthPixels,
                 screenHeight = resources.displayMetrics.heightPixels,
-            )) return accessibilityClick()
+            )) return accessibilityClick?.invoke() == true
         return tap(bounds.exactCenterX(), bounds.exactCenterY(), accessibilityClick)
+    }
+
+    private fun parseBounds(raw: String): Rect? {
+        val parts = raw.split(',')
+        if (parts.size != 4) return null
+        val values = parts.mapNotNull { it.toIntOrNull() }
+        if (values.size != 4 || values[2] <= values[0] || values[3] <= values[1]) return null
+        return Rect(values[0], values[1], values[2], values[3])
     }
 
     private fun findLiveNode(snapshot: UiNodeSnapshot): AccessibilityNodeInfo? {
@@ -477,7 +508,10 @@ class AgentAccessibilityService : AccessibilityService() {
                 }
             }
         }
-        return matches.singleOrNull()
+        return LiveNodeMatchPolicy.choose(matches, snapshot) { node ->
+            val rect = Rect().also(node::getBoundsInScreen)
+            "${rect.left},${rect.top},${rect.right},${rect.bottom}"
+        }
     }
 
     private fun liveNodeMatchesSnapshot(node: AccessibilityNodeInfo, snapshot: UiNodeSnapshot): Boolean {
@@ -499,7 +533,7 @@ class AgentAccessibilityService : AccessibilityService() {
         depth: Int,
         output: MutableList<AccessibilityNodeInfo>,
     ) {
-        if (depth > MAX_DEPTH || output.size > 1) return
+        if (depth > MAX_DEPTH || output.size >= 8) return
         val rect = Rect().also(node::getBoundsInScreen)
         val bounds = "${rect.left},${rect.top},${rect.right},${rect.bottom}"
         val text = if (node.isPassword) "" else node.text?.toString().orEmpty()
@@ -530,7 +564,7 @@ class AgentAccessibilityService : AccessibilityService() {
     private suspend fun tap(x: Float, y: Float, accessibilityClick: (() -> Boolean)? = null): Boolean {
         if (::overlayController.isInitialized) {
             withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(true) }
-            delay(32)
+            delay(80)
         }
         return try {
             // Prefer the live accessibility node. input tap reports success even

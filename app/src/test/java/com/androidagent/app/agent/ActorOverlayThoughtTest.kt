@@ -14,7 +14,8 @@ class ActorOverlayThoughtTest {
         )
         assertTrue(lines.size >= 2)
         assertTrue(lines[0].contains("热搜"))
-        assertTrue(lines.any { it.contains("打算") || it.contains("影之刃") })
+        assertTrue(lines.any { it.contains("影之刃") })
+        assertTrue(lines.any { it.contains("click_text") })
         lines.forEach { assertTrue(it.length <= ActorOverlayThought.MAX_LINE_CHARS) }
     }
 
@@ -25,18 +26,29 @@ class ActorOverlayThoughtTest {
             listOf(UiNodeSnapshot(1, "热搜", "", "Button", true, false, "0,0,80,40")),
         )
         val lines = ActorOverlayThought.decision("", "click_text(热搜)", screen)
-        assertTrue(lines[0].contains("热搜"))
-        assertTrue(lines.any { it.contains("打算：click_text(热搜)") })
+        assertTrue(lines.any { it.contains("click_text(热搜)") })
     }
 
     @Test
-    fun resultLineExplainsABlockedDetour() {
+    fun resultKeepsTheRawReason() {
         val lines = ActorOverlayThought.result(
             "click_node(#12, 9.1武侠)",
             "already followed 9.1武侠 and left that page",
             progressed = false,
         )
-        assertEquals("动作：click_node(#12, 9.1武侠)", lines[0])
-        assertEquals("结果：这个入口刚走过，换一条路", lines[1])
+        assertEquals("→ click_node(#12, 9.1武侠)", lines[0])
+        assertTrue(lines[1].contains("already followed 9.1武侠"))
+    }
+
+    @Test
+    fun keepsModelNewlinesInsteadOfRewritingThem() {
+        val lines = ActorOverlayThought.decision(
+            modelThought = "first line\nsecond line",
+            actionLabel = "find_nodes",
+            observation = Observation("app.example", emptyList()),
+        )
+        assertEquals("first line", lines[0])
+        assertEquals("second line", lines[1])
+        assertEquals("[find_nodes]", lines[2])
     }
 }

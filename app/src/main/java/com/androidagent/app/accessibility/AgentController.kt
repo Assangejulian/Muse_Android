@@ -54,6 +54,9 @@ object AgentController {
     private var activeRunId: String? = null
     @Volatile
     private var runGeneration: Long = 0
+    @Volatile
+    private var paused: Boolean = false
+    private val pendingDirectives = ArrayDeque<String>()
 
     fun setAccessibilityConnected(connected: Boolean) = update { copy(accessibilityConnected = connected) }
     fun setCurrentPackage(packageName: String) = update { copy(currentPackage = packageName) }
@@ -164,6 +167,8 @@ object AgentController {
                     onActionCount = { count ->
                         updateFor(generation) { copy(step = count.coerceAtMost(maxSteps)) }
                     },
+                    isPaused = { paused },
+                    pollDirectives = { drainDirectives() },
                     goalOverride = goalOverride,
                     runIdOverride = runId,
                     cancellationOutcomeProvider = { runResults.stopCauseFor(runId)?.runtimeOutcome() },
@@ -198,6 +203,8 @@ object AgentController {
                 completeRun(generation, runId, coroutineContext[Job])
             }
         }
+        paused = false
+        pendingDirectives.clear()
         runJob = job
         job.start()
         return AgentStartResult.Started(runId)
@@ -205,7 +212,39 @@ object AgentController {
 
     @Synchronized
     fun stop() {
+        paused = false
+        pendingDirectives.clear()
         cancelRun(AgentStopCause.USER_REQUEST, null, "Stopped by user")
+    }
+
+    @Synchronized
+    fun togglePause(): Boolean {
+        if (runJob == null) return false
+        paused = !paused
+        update { copy(paused = paused, status = if (paused) "Paused" else "Observing") }
+        log(if (paused) "Paused by user" else "Resumed by user")
+        return paused
+    }
+
+    @Synchronized
+    fun skipCurrentApproach() {
+        if (runJob == null) return
+        pendingDirectives.addLast(
+            "USER_SKIP: abandon the current approach and take a different live action. Do not repeat the last query or click.",
+        )
+        if (paused) {
+            paused = false
+            update { copy(paused = false, status = "Observing") }
+        }
+        log("User skipped the current approach")
+    }
+
+    @Synchronized
+    private fun drainDirectives(): List<String> {
+        if (pendingDirectives.isEmpty()) return emptyList()
+        val notes = pendingDirectives.toList()
+        pendingDirectives.clear()
+        return notes
     }
 
     @Synchronized
@@ -244,10 +283,12 @@ object AgentController {
         if (activeRunId != runId || runJob !== completedJob) return
         runJob = null
         activeRunId = null
+        paused = false
+        pendingDirectives.clear()
         if (generation == runGeneration) {
-            update { copy(running = false, currentAction = "") }
+            update { copy(running = false, currentAction = "", paused = false) }
         } else {
-            update { copy(running = false, currentAction = "", status = "Stopped") }
+            update { copy(running = false, currentAction = "", status = "Stopped", paused = false) }
         }
     }
 

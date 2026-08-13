@@ -94,7 +94,7 @@ internal object NativePlannerProtocol {
         add(
             tool(
                 "click_node",
-                "Click a node by id from Screen or find_nodes. Walks to a clickable parent when the leaf is not clickable.",
+                "Click the named node. If it is not itself clickable, Muse taps its bounds instead of a larger parent row.",
                 JSONObject()
                     .put("nodeId", intSchema("Required node id."))
                     .put("selector", selectorSchema())
@@ -427,7 +427,7 @@ internal object NativePlannerProtocol {
     }
 
     private fun thoughtSchema(): JSONObject =
-        stringSchema("Optional. One or two short Chinese sentences: what is on screen and why this action.")
+        stringSchema("Optional free-form thought. Shown to the user as-is.")
 
     private fun stringSchema(description: String, maxLength: Int? = null): JSONObject =
         JSONObject().put("type", "string").put("description", description).also { schema ->

@@ -7,6 +7,9 @@
     <string name="agent_overlay_operating">Muse is running</string>
     <string name="agent_overlay_budget_initial">00 / 50 · Preparing</string>
     <string name="agent_overlay_stop">ABORT</string>
+    <string name="agent_overlay_pause">PAUSE</string>
+    <string name="agent_overlay_resume">RESUME</string>
+    <string name="agent_overlay_skip">SKIP</string>
     <string name="agent_channel_name">Muse 任务执行中</string>
     <string name="agent_channel_description">Muse 正在通过无障碍与 Shizuku 操作设备时显示。</string>
     <string name="agent_notification_title">Muse 正在执行 · 第 %1$d 次动作</string>

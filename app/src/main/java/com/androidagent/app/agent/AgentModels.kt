@@ -707,6 +707,7 @@ internal object ObservationDispatchPolicy {
 
 enum class ActionDispatchMode {
     ACCESSIBILITY_CLICK,
+    GESTURE_CLICK,
     SET_TEXT,
     SET_TEXT_AND_SUBMIT,
     SUBMIT_INPUT,
@@ -738,10 +739,12 @@ object TargetResolver {
             is AgentAction.ClickText -> resolveClick(
                 semanticCandidates = clickableTextMatches(observation, action.text),
                 observation = observation,
+                walkClickableParent = true,
             )
             is AgentAction.ClickNode -> resolveClick(
                 semanticCandidates = nodeCandidates(observation, action.nodeId, action.selector),
                 observation = observation,
+                walkClickableParent = false,
             )
             is AgentAction.EnsureToggle -> {
                 val candidates = nodeCandidates(observation, action.nodeId, action.selector)
@@ -753,7 +756,7 @@ object TargetResolver {
                     if (current == action.desired) {
                         resolved(semantic, semantic, ActionDispatchMode.OBSERVATION_ONLY)
                     } else {
-                        resolveClick(listOf(semantic), observation)
+                        resolveClick(listOf(semantic), observation, walkClickableParent = true)
                     }
                 }
             }
@@ -818,30 +821,46 @@ object TargetResolver {
     private fun resolveClick(
         semanticCandidates: List<UiNodeSnapshot>,
         observation: Observation,
+        walkClickableParent: Boolean,
     ): ActionTargetResolution {
         val semantic = unique(semanticCandidates) ?: return failed(semanticCandidates)
         if (!semantic.enabled || semantic.password || semantic.isInputMethod) {
             return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
         }
         if (semantic.clickable) return resolved(semantic, semantic, ActionDispatchMode.ACCESSIBILITY_CLICK)
-        val path = semantic.treePath ?: return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
-        for (distance in 1..MAX_CLICKABLE_PARENT_DEPTH) {
-            if (path.size <= distance) break
-            val parentPath = path.dropLast(distance)
-            val candidates = observation.nodes.filter { candidate ->
-                candidate.treePath == parentPath &&
-                    candidate.packageName == semantic.packageName &&
-                    candidate.windowId == semantic.windowId
+        if (!walkClickableParent && hasPositiveBounds(semantic)) {
+            return resolved(semantic, semantic, ActionDispatchMode.GESTURE_CLICK)
+        }
+        val path = semantic.treePath
+        if (walkClickableParent && path != null) {
+            for (distance in 1..MAX_CLICKABLE_PARENT_DEPTH) {
+                if (path.size <= distance) break
+                val parentPath = path.dropLast(distance)
+                val candidates = observation.nodes.filter { candidate ->
+                    candidate.treePath == parentPath &&
+                        candidate.packageName == semantic.packageName &&
+                        candidate.windowId == semantic.windowId
+                }
+                if (candidates.size > 1) return ActionTargetResolution(failure = ActionTargetFailure.AMBIGUOUS)
+                val parent = candidates.singleOrNull() ?: continue
+                if (!parent.clickable) continue
+                if (!parent.enabled || parent.password || parent.isInputMethod) {
+                    return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
+                }
+                return resolved(semantic, parent, ActionDispatchMode.ACCESSIBILITY_CLICK)
             }
-            if (candidates.size > 1) return ActionTargetResolution(failure = ActionTargetFailure.AMBIGUOUS)
-            val parent = candidates.singleOrNull() ?: continue
-            if (!parent.clickable) continue
-            if (!parent.enabled || parent.password || parent.isInputMethod) {
-                return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
-            }
-            return resolved(semantic, parent, ActionDispatchMode.ACCESSIBILITY_CLICK)
+        }
+        if (hasPositiveBounds(semantic)) {
+            return resolved(semantic, semantic, ActionDispatchMode.GESTURE_CLICK)
         }
         return ActionTargetResolution(failure = ActionTargetFailure.NOT_ACTIONABLE)
+    }
+
+    private fun hasPositiveBounds(node: UiNodeSnapshot): Boolean {
+        val parts = node.bounds.split(',')
+        if (parts.size != 4) return false
+        val values = parts.mapNotNull { it.toIntOrNull() }
+        return values.size == 4 && values[2] > values[0] && values[3] > values[1]
     }
 
     private fun resolveEditableTarget(
@@ -952,9 +971,10 @@ data class AgentUiState(
     val currentAction: String = "",
     /** User-facing execution summaries only; never raw model reasoning. */
     val progressSummaries: List<String> = emptyList(),
-    /** Two Chinese overlay lines: what the Actor sees / decided / got back. */
+    /** Rolling raw model thought plus a short action tag. */
     val thoughtLines: List<String> = emptyList(),
     val outcome: String = "",
     val currentPackage: String = "",
     val logs: List<String> = emptyList(),
+    val paused: Boolean = false,
 )

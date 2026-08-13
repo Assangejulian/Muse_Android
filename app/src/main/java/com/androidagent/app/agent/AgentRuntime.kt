@@ -127,6 +127,8 @@ class AgentRuntime(
     private val onThought: (List<String>) -> Unit = {},
     private val onAction: (String) -> Unit = {},
     private val onActionCount: (Int) -> Unit = {},
+    private val isPaused: () -> Boolean = { false },
+    private val pollDirectives: () -> List<String> = { emptyList() },
     private val goalOverride: String? = null,
     private val runIdOverride: String? = null,
     private val cancellationOutcomeProvider: () -> RuntimeOutcome? = { null },
@@ -209,12 +211,22 @@ class AgentRuntime(
                 val toolTurns = mutableListOf<PlannerTurn>()
                 var modelFailures = 0
                 var effectiveActions = 0
+                var consecutiveQueries = 0
                 val evidenceCounters = StopGateEvidenceCounters()
 
                 traceStore.event(runId, "GOAL_READY", mapOf("goal" to plan.compactText(0)))
                 onLog("Goal ready; Actor owns the live execution route")
 
                 for (step in 1..MAX_CONTROL_CYCLES) {
+                    while (isPaused()) {
+                        onPhase(step, "Paused")
+                        delay(250)
+                    }
+                    pollDirectives().forEach { note ->
+                        history += note
+                        onThought(listOf(note))
+                        onLog(note)
+                    }
                     if (effectiveActions >= DEVICE_ACTION_TURN_LIMIT) {
                         return@withTimeout finish(
                             RuntimeOutcome.PERMANENT_PLAN_ERROR,
@@ -349,8 +361,9 @@ class AgentRuntime(
                             observation = before,
                             history = (history + executionHistory.promptLines()).takeLast(24),
                             screenshotDataUrl = screenshot,
-                            harnessState = "ADVISORY GOAL: ${milestone.objective}\n" +
+                            harnessState = "goal=${milestone.objective}\n" +
                                 "loopDetected=${ledger.cyclePeriod() != null || ledger.noProgressCount >= 2}\n" +
+                                "consecutiveQueries=$consecutiveQueries\n" +
                                 "avoidReopening=${sideEffects.exploredActivationLabels().takeLast(8).joinToString(" | ").ifBlank { "none" }}\n" +
                                 "recentActionTypes=${executionHistory.recentActionTypes()}\n" +
                                 "terminalReady=${PrivilegedBackendRouter.isReady()}",
@@ -391,7 +404,11 @@ class AgentRuntime(
                         continue
                     }
                     modelFailures = 0
-                    val plannedThought = planned?.thought.orEmpty().ifBlank { planned?.reasoningContent.orEmpty() }
+                    val plannedThought = listOf(
+                        planned?.reasoningContent.orEmpty(),
+                        planned?.thought.orEmpty(),
+                        planned?.assistantContent.orEmpty(),
+                    ).filter { it.isNotBlank() }.distinct().joinToString("\n")
                     onThought(
                         ActorOverlayThought.decision(
                             modelThought = plannedThought,
@@ -399,6 +416,26 @@ class AgentRuntime(
                             observation = before,
                         ),
                     )
+                    if (QueryLoopPolicy.shouldBlock(consecutiveQueries, proposed)) {
+                        val reason = QueryLoopPolicy.rejection(consecutiveQueries)
+                        val feedback = toolResultJson(false, proposed, before, before, "query_loop", reason)
+                        recordTurn(toolTurns, planned, feedback)
+                        history += "QUERY_LOOP: $reason"
+                        consecutiveQueries = QueryLoopPolicy.nextCount(consecutiveQueries, proposed)
+                        ledger.record(
+                            StepTrace(
+                                milestone.id,
+                                before.observationId,
+                                TraceSanitizer.action(proposed),
+                                before.observationId,
+                                TransitionJudgement.NO_PROGRESS,
+                                reason,
+                            ),
+                        )
+                        onThought(ActorOverlayThought.result(describeAction(proposed), reason, progressed = false))
+                        continue
+                    }
+                    consecutiveQueries = QueryLoopPolicy.nextCount(consecutiveQueries, proposed)
                     traceStore.event(
                         runId,
                         "TOOL_PROPOSED",
