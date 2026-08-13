@@ -240,6 +240,19 @@ class AgentRuntime(
                     val rawBefore = observeWithPackage(lockedPackage)
                     // The Actor chooses the next step directly from this fresh
                     // observation. No speculative Manager plan sits in front of it.
+                    if (lockedPackage == null) {
+                        ForegroundPackagePolicy.adopt(rawBefore.packageName, launchablePackages)?.let { adopted ->
+                            lockedPackage = adopted
+                            packagePolicy = packagePolicy.copy(
+                                allowedPackages = (packagePolicy.allowedPackages + adopted).toMutableSet(),
+                                primaryPackage = adopted,
+                            )
+                            targetHint = apps.firstOrNull { it.packageName == adopted }?.label ?: targetHint
+                            guard = ToolGuard(plan, packagePolicy)
+                            history += "ADOPTED_FOREGROUND: $adopted"
+                            traceStore.event(runId, "ADOPTED_FOREGROUND", mapOf("package" to adopted))
+                        }
+                    }
                     val packageFailure = packageBoundaryFailure(rawBefore, lockedPackage, packagePolicy)
                     if (packageFailure != null) {
                         history += "PACKAGE_BOUNDARY: $packageFailure; choose Back, launch_app, wait, finish, or fail"
@@ -250,12 +263,7 @@ class AgentRuntime(
                         )
                     }
 
-                    val privacy = if (lockedPackage == null) {
-                        // Until a target is selected, expose only the goal and installed app catalog to the model.
-                        PrivacyDecision(allowed = true, observation = Observation("", emptyList()))
-                    } else {
-                        PrivacyGuard.prepare(rawBefore)
-                    }
+                    val privacy = PrivacyGuard.prepare(rawBefore)
                     if (!privacy.allowed) {
                         val reason = "Privacy degraded before model access: ${privacy.reason}"
                         traceStore.event(runId, "PRIVACY_DEGRADED", mapOf("reason" to privacy.reason, "package" to rawBefore.packageName, "phase" to "before"))
@@ -336,9 +344,10 @@ class AgentRuntime(
                     onPhase(step, "Planning")
                     val cotBuffer = StringBuilder()
                     fun publishLive(extra: List<String> = emptyList()) {
-                        liveReasoning = cotBuffer.toString()
-                        val thinking = ActorOverlayThought.cot(liveReasoning)
-                        onThought((thinking.ifEmpty { listOf("模型正在思考…") } + extra).takeLast(16))
+                        val streamed = ActorOverlayThought.stream(cotBuffer.toString())
+                        if (streamed.isNotBlank()) liveReasoning = streamed
+                        val body = streamed.ifBlank { liveReasoning.ifBlank { "模型正在思考…" } }
+                        onThought(listOf(body) + extra)
                     }
                     publishLive()
                     val screenshotCapture = if (useVision && lockedPackage != null && packageFailure == null && privacy.allowed) {
@@ -450,7 +459,6 @@ class AgentRuntime(
                         continue
                     }
                     consecutiveQueries = QueryLoopPolicy.nextCount(consecutiveQueries, proposed)
-                    lastActionFingerprint = RepeatActionPolicy.fingerprint(proposed)
                     traceStore.event(
                         runId,
                         "TOOL_PROPOSED",
@@ -509,19 +517,6 @@ class AgentRuntime(
                         val reason = "Shizuku terminal disconnected before dispatch; replan with accessibility actions"
                         recordTurn(toolTurns, planned, toolResultJson(false, proposed, before, before, "terminal_unavailable", reason))
                         history += "PRE_TOOL_BLOCKED: $reason"
-                        continue
-                    }
-
-                    if (lockedPackage == null &&
-                        proposed !is AgentAction.LaunchApp &&
-                        proposed !is AgentAction.FindNodes &&
-                        proposed !is AgentAction.ReadNode
-                    ) {
-                        val reason = "launch_app must select one installed target before any screen-dependent tool"
-                        recordTurn(toolTurns, planned, toolResultJson(false, proposed, before, before, "target_required", reason))
-                        history += "PRE_TOOL_BLOCKED: $proposed because $reason"
-                        ledger.record(StepTrace(milestone.id, before.observationId, TraceSanitizer.action(proposed), before.observationId, TransitionJudgement.NO_PROGRESS, reason))
-                        history += "TARGET_FEEDBACK: $reason"
                         continue
                     }
 
@@ -610,6 +605,17 @@ class AgentRuntime(
                             mapOf("reason" to decision.reason.name, "action" to decision.action.name),
                         )
                     }
+                    if (engineResult.execution != null &&
+                        engineResult.status !in setOf(
+                            RuntimeStepStatus.STALE,
+                            RuntimeStepStatus.BLOCKED,
+                            RuntimeStepStatus.EXECUTION_FAILED,
+                            RuntimeStepStatus.RESULT_UNKNOWN,
+                            RuntimeStepStatus.ABORTED,
+                        )
+                    ) {
+                        lastActionFingerprint = RepeatActionPolicy.fingerprint(stepAction)
+                    }
                     if (stepAction is AgentAction.LaunchApp &&
                         engineResult.status !in setOf(
                             RuntimeStepStatus.STALE,
@@ -625,6 +631,17 @@ class AgentRuntime(
                         )
                         targetHint = apps.firstOrNull { it.packageName == lockedPackage }?.label ?: targetHint
                         guard = ToolGuard(plan, packagePolicy)
+                    } else if (lockedPackage == null) {
+                        ForegroundPackagePolicy.adopt(engineResult.after.packageName, launchablePackages)?.let { adopted ->
+                            lockedPackage = adopted
+                            packagePolicy = packagePolicy.copy(
+                                allowedPackages = (packagePolicy.allowedPackages + adopted).toMutableSet(),
+                                primaryPackage = adopted,
+                            )
+                            targetHint = apps.firstOrNull { it.packageName == adopted }?.label ?: targetHint
+                            guard = ToolGuard(plan, packagePolicy)
+                            history += "ADOPTED_FOREGROUND: $adopted"
+                        }
                     }
 
                     if (engineResult.status == RuntimeStepStatus.ABORTED) {
@@ -1071,8 +1088,8 @@ class AgentRuntime(
             else -> liveProblem(result.reason)
         }
         if (problem != null) {
-            val thinking = ActorOverlayThought.cot(liveReasoning)
-            onThought((thinking.ifEmpty { listOf("模型正在思考…") } + problem).takeLast(16))
+            val thinking = ActorOverlayThought.stream(liveReasoning).ifBlank { liveReasoning.ifBlank { "模型正在思考…" } }
+            onThought(listOf(thinking, problem))
         }
     }
 

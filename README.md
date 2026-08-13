@@ -1,4 +1,4 @@
-# Muse Android Agent 0.18.6
+# Muse Android Agent 0.18.7
 
 Muse is a private, sideloaded Android control agent. The model owns the live route: Accessibility provides fresh UI-tree observation and node actions, while Shizuku provides launch, package/device inspection, bounded shell tools, and the optional Ubuntu runtime. DeepSeek and other text models work without screenshots; vision stays off unless the user explicitly configures a vision provider.
 
@@ -27,7 +27,7 @@ Each device goal starts the hybrid `AgentRuntime` when Muse Accessibility is con
 
 The runtime uses one advisory goal instead of a speculative Manager plan. The Actor calls discrete tools (`find_nodes`, `read_node`, `scroll_until`, `click_*`, …) instead of a single scripted mega-action. Query tools search the full accessibility tree, including nodes covered by the progress overlay. `scroll_until` / `wait_until` loop locally so one model turn can cover many swipes. Same-page checked/selected changes count as progress; a click that does not leave the page stays retryable. Ordinary actions do not require predicate bindings, and local failures return as Actor feedback rather than triggering hidden Back, relaunch, or replan actions. Only safety, stale-target, privacy, installed-package, and unknown-side-effect boundaries remain deterministic.
 
-A compact dark progress overlay sits at the top of the screen (`TYPE_ACCESSIBILITY_OVERLAY`, no system blur). Reasoning streams in as the model thinks. Failures appear as live `问题：` lines so you can see why a step did not land. The current tool name stays on the small status line. Pause / Skip / Abort chips sit at the top-right. Volume down pauses or resumes; volume up skips the current approach. Changing accessibility flags may require toggling Muse in system accessibility settings once after install.
+A compact dark progress overlay sits at the top of the screen (`TYPE_ACCESSIBILITY_OVERLAY`, no system blur). Reasoning streams in as the model thinks and can be scrolled; Chat shows the same live stream. Failures appear as live `问题：` lines so you can see why a step did not land. The current tool name stays on the small status line. Pause / Skip / Abort chips sit at the top-right. Volume down pauses or resumes; volume up skips the current approach. Changing accessibility flags may require toggling Muse in system accessibility settings once after install.
 
 The 50-turn limit counts only mutating tool actions. `find_nodes` / `read_node` are observation-only and do not consume the displayed action budget. Planning, verification, and replanning use a separate internal control-cycle guard.
 
@@ -84,4 +84,4 @@ Do not use Muse for payments, purchases, account-security changes, verification 
 .\gradlew.bat assembleDebug --no-daemon --console=plain
 ```
 
-The application ID remains `com.androidagent.app`; version `0.18.6` uses versionCode `67` for in-place updates. Environment setup bootstraps `ca-certificates` over an APT-signed HTTP index before switching the selected mirror back to HTTPS for all remaining packages.
+The application ID remains `com.androidagent.app`; version `0.18.7` uses versionCode `68` for in-place updates. Environment setup bootstraps `ca-certificates` over an APT-signed HTTP index before switching the selected mirror back to HTTPS for all remaining packages.

@@ -10,7 +10,6 @@ import androidx.activity.compose.setContent
 import androidx.core.view.WindowCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -562,10 +561,14 @@ private fun MuseApp(
                         agentState.accessibilityConnected -> "A11Y NODE"
                         else -> "OFFLINE"
                     },
-                    progressLines = if (agentState.running) {
-                        agentState.thoughtLines.ifEmpty { agentState.progressSummaries }
+                    progressText = if (agentState.running) {
+                        agentState.thoughtText.ifBlank {
+                            agentState.thoughtLines.joinToString("\n")
+                        }.ifBlank {
+                            agentState.progressSummaries.joinToString("\n")
+                        }
                     } else {
-                        emptyList()
+                        ""
                     },
                     onSend = ::sendMessage,
                     onStop = {
@@ -775,7 +778,7 @@ private fun ChatWorkspace(
     shizukuConnected: Boolean,
     accessibilityConnected: Boolean,
     routeLabel: String,
-    progressLines: List<String>,
+    progressText: String,
     onSend: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -785,7 +788,7 @@ private fun ChatWorkspace(
     }
     Column(Modifier.fillMaxSize()) {
         AnimatedVisibility(runStatus.isNotBlank()) {
-            ExecutionStrip(runStatus, routeLabel, progressLines)
+            ExecutionStrip(runStatus, routeLabel, progressText)
         }
         LazyColumn(
             modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -841,19 +844,28 @@ private fun ChatWorkspace(
 }
 
 @Composable
-private fun ExecutionStrip(runStatus: String, routeLabel: String, progressLines: List<String>) {
+private fun ExecutionStrip(runStatus: String, routeLabel: String, progressText: String) {
     val budget = runStatus.substringBefore('·').trim()
     val maxSteps = budget.substringAfter('/', "50").trim().toIntOrNull()?.coerceAtLeast(1) ?: 50
     val step = budget.substringBefore('/').trim().toIntOrNull()?.coerceIn(0, maxSteps) ?: 0
     val fallback = runStatus.substringAfter('·', runStatus).trim()
-    val visibleLines = progressLines.filter { it.isNotBlank() }.takeLast(8).ifEmpty { listOf(fallback) }
+    val stream = progressText.trim().ifBlank { fallback }
+    val scrollState = rememberScrollState()
+    var followStream by remember { mutableStateOf(true) }
+    LaunchedEffect(stream, scrollState.maxValue) {
+        if (followStream) scrollState.animateScrollTo(scrollState.maxValue)
+    }
+    LaunchedEffect(scrollState.isScrollInProgress) {
+        if (!scrollState.isScrollInProgress) {
+            followStream = scrollState.value >= scrollState.maxValue - 24
+        }
+    }
     Column(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 8.dp)
             .background(SurfaceLow, CyberShape)
             .border(1.dp, Divider, CyberShape)
-            .animateContentSize(animationSpec = spring(dampingRatio = 0.78f))
             .padding(horizontal = 15.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
@@ -870,14 +882,16 @@ private fun ExecutionStrip(runStatus: String, routeLabel: String, progressLines:
                 fontFamily = FontFamily.Monospace,
             )
         }
-        visibleLines.forEach { line ->
-            Text(
-                line,
-                color = TextPrimary,
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-            )
-        }
+        Text(
+            stream,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 72.dp, max = 168.dp)
+                .verticalScroll(scrollState),
+            color = TextPrimary,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+        )
     }
 }
 

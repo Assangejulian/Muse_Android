@@ -805,18 +805,28 @@ class AgentAccessibilityService : AccessibilityService() {
             "right" -> listOf(width * .2f, height * .5f, width * .8f, height * .5f)
             else -> listOf(width * .5f, height * .75f, width * .5f, height * .3f)
         }
-        if (PrivilegedDeviceBackend.swipe(
-                startX.toInt(),
-                startY.toInt(),
-                endX.toInt(),
-                endY.toInt(),
-                450,
-            )) return true
-        val path = Path().apply { moveTo(startX, startY); lineTo(endX, endY) }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 450))
-            .build()
-        return dispatchGestureAwait(gesture, SWIPE_TIMEOUT_MS)
+        if (::overlayController.isInitialized) {
+            withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(true) }
+            delay(80)
+        }
+        return try {
+            if (PrivilegedDeviceBackend.swipe(
+                    startX.toInt(),
+                    startY.toInt(),
+                    endX.toInt(),
+                    endY.toInt(),
+                    450,
+                )) return true
+            val path = Path().apply { moveTo(startX, startY); lineTo(endX, endY) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 450))
+                .build()
+            dispatchGestureAwait(gesture, SWIPE_TIMEOUT_MS)
+        } finally {
+            if (::overlayController.isInitialized) {
+                withContext(Dispatchers.Main.immediate) { overlayController.setCaptureHidden(false) }
+            }
+        }
     }
 
     private suspend fun globalActionOrPrivileged(globalAction: Int, keyCode: Int): Boolean =

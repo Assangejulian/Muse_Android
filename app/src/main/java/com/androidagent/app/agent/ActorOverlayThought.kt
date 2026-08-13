@@ -8,9 +8,30 @@ package com.androidagent.app.agent
 internal object ActorOverlayThought {
     const val MAX_LINE_CHARS = 240
     const val MAX_STORED_LINES = 16
+    const val MAX_STREAM_CHARS = 8_000
 
     fun cot(modelThought: String): List<String> =
         splitThought(modelThought).filterNot(::isToolLog).map(::clip)
+
+    /**
+     * Live overlay/chat text. Keep the partial last line while tokens arrive,
+     * drop tool-log lines, and cap only the stored tail so the panel can scroll.
+     */
+    fun stream(modelThought: String): String {
+        val cleaned = modelThought.replace("\r\n", "\n").replace('\r', '\n')
+        if (cleaned.isBlank()) return ""
+        val lines = cleaned.split('\n')
+        val kept = lines.mapIndexedNotNull { index, raw ->
+            val line = raw.trimEnd()
+            when {
+                index == lines.lastIndex -> line
+                line.isBlank() -> ""
+                isToolLog(line.trim()) -> null
+                else -> line
+            }
+        }
+        return kept.joinToString("\n").trimStart('\n').takeLast(MAX_STREAM_CHARS)
+    }
 
     fun decision(modelThought: String, @Suppress("UNUSED_PARAMETER") actionLabel: String, @Suppress("UNUSED_PARAMETER") observation: Observation): List<String> =
         cot(modelThought)

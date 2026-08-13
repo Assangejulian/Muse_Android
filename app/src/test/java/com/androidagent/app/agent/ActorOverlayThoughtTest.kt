@@ -32,4 +32,24 @@ class ActorOverlayThoughtTest {
         assertEquals(listOf("先打开评论区", "点第一条下面的赞"), merged)
         assertFalse(merged.any { it.startsWith("→ ") })
     }
+
+    @Test
+    fun streamKeepsPartialLastLineAndDropsFinishedToolLogs() {
+        val text = ActorOverlayThought.stream(
+            "先看评论区\n[find_nodes(评论)]\n接下来点第一条下面的",
+        )
+        assertEquals("先看评论区\n接下来点第一条下面的", text)
+        assertTrue(ActorOverlayThought.stream("").isEmpty())
+    }
+
+    @Test
+    fun streamCapsOnlyTheTailSoThePanelCanScroll() {
+        val longThought = buildString {
+            repeat(400) { appendLine("这是第${it}段思考，模型还在继续往下写。") }
+        }
+        val streamed = ActorOverlayThought.stream(longThought)
+        assertTrue(streamed.length <= ActorOverlayThought.MAX_STREAM_CHARS)
+        assertTrue(streamed.contains("这是第399段思考"))
+        assertFalse(streamed.contains("这是第0段思考"))
+    }
 }

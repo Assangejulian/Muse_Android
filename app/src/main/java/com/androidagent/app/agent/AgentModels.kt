@@ -973,6 +973,8 @@ data class AgentUiState(
     val progressSummaries: List<String> = emptyList(),
     /** Rolling raw model thought plus a short action tag. */
     val thoughtLines: List<String> = emptyList(),
+    /** Continuous streaming chain of thought for the overlay and Chat panel. */
+    val thoughtText: String = "",
     val outcome: String = "",
     val currentPackage: String = "",
     val logs: List<String> = emptyList(),

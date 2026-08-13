@@ -5,7 +5,6 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -22,8 +21,9 @@ import com.androidagent.app.privileged.PrivilegedBackendRouter
 /**
  * Compact system-wide run monitor shown while Muse drives another app.
  *
- * Status text is a pass-through overlay so bottom app tabs stay tappable.
- * Only the control chips consume touches.
+ * The thought panel is touchable so the live chain of thought can be scrolled.
+ * Control chips stay in a separate window on top. Gestures hide this overlay
+ * before tapping so the agent still reaches the app underneath.
  */
 class AgentOverlayController(private val service: AccessibilityService) {
     private val windowManager = service.getSystemService(WindowManager::class.java)
@@ -36,6 +36,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
     private var chainText: TextView? = null
     private var lastSummary = ""
     private var lastPaused: Boolean? = null
+    private var followThought = true
 
     fun render(state: AgentUiState) {
         if (!state.running) {
@@ -53,12 +54,18 @@ class AgentOverlayController(private val service: AccessibilityService) {
             state.maxSteps,
             if (tool.isBlank()) phase else "$phase · $tool",
         )
-        val summary = state.thoughtLines.takeLast(16).joinToString("\n")
-            .ifBlank { "模型正在思考…" }
+        val summary = state.thoughtText.ifBlank {
+            state.thoughtLines.joinToString("\n")
+        }.ifBlank { "模型正在思考…" }
         if (summary.isNotBlank() && summary != lastSummary) {
             lastSummary = summary
             summaryText?.text = summary
-            thoughtScroll?.post { thoughtScroll?.fullScroll(View.FOCUS_DOWN) }
+            if (followThought) {
+                thoughtScroll?.post {
+                    thoughtScroll?.fullScroll(View.FOCUS_DOWN)
+                    followThought = true
+                }
+            }
         }
         if (lastPaused != state.paused) {
             lastPaused = state.paused
@@ -78,6 +85,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
         chainText = null
         lastSummary = ""
         lastPaused = null
+        followThought = true
     }
 
     fun setCaptureHidden(hidden: Boolean) {
@@ -125,25 +133,27 @@ class AgentOverlayController(private val service: AccessibilityService) {
             setTextColor(Color.rgb(205, 214, 244))
             textSize = 12.5f
             typeface = Typeface.SANS_SERIF
-            maxLines = 20
-            ellipsize = TextUtils.TruncateAt.END
             setLineSpacing(3f, 1.06f)
         }
         val scroll = ScrollView(service).apply {
-            isVerticalScrollBarEnabled = false
+            isVerticalScrollBarEnabled = true
             isFillViewport = false
-            overScrollMode = View.OVER_SCROLL_NEVER
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            isNestedScrollingEnabled = true
             addView(
                 summaryText,
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT),
             )
+            setOnScrollChangeListener { view, _, _, _, _ ->
+                followThought = !view.canScrollVertically(1)
+            }
         }
         thoughtScroll = scroll
         bar.addView(statusText)
         bar.addView(chainText)
         bar.addView(
             scroll,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (176 * density).toInt()),
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (132 * density).toInt()),
         )
         container.addView(
             bar,
@@ -154,7 +164,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
             width = WindowManager.LayoutParams.MATCH_PARENT,
             height = WindowManager.LayoutParams.WRAP_CONTENT,
             gravity = Gravity.TOP,
-            touchable = false,
+            touchable = true,
         )
         if (!runCatching { windowManager.addView(container, barParams) }.isSuccess) {
             statusBar = null

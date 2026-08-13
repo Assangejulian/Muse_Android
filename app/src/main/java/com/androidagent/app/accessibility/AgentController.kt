@@ -2,7 +2,6 @@ package com.androidagent.app.accessibility
 
 import android.content.Context
 import android.util.Log
-import com.androidagent.app.agent.ActorOverlayThought
 import com.androidagent.app.agent.AgentRuntime
 import com.androidagent.app.agent.AgentUiState
 import com.androidagent.app.agent.DEVICE_ACTION_TURN_LIMIT
@@ -124,6 +123,8 @@ object AgentController {
                 goal = effectiveGoal,
                 currentAction = "",
                 progressSummaries = listOf(progressForPhase("Preparing")),
+                thoughtLines = emptyList(),
+                thoughtText = "",
                 outcome = "",
                 logs = emptyList(),
             )
@@ -150,7 +151,10 @@ object AgentController {
                     },
                     onThought = { lines ->
                         updateFor(generation) {
-                            copy(thoughtLines = lines.takeLast(ActorOverlayThought.MAX_STORED_LINES))
+                            copy(
+                                thoughtText = lines.joinToString("\n"),
+                                thoughtLines = lines,
+                            )
                         }
                     },
                     onLog = { message ->
