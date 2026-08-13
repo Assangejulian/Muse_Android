@@ -336,10 +336,7 @@ internal object NativePlannerProtocol {
         val responseMessage = choice
             .optJSONObject("message")
             ?: throw InvalidNativeToolCallException("Native tool response did not contain a message")
-        val reasoning = listOf(
-            responseMessage.optString("reasoning_content"),
-            responseMessage.optString("reasoning"),
-        ).firstOrNull { it.isNotBlank() }.orEmpty()
+        val reasoning = extractReasoning(responseMessage, choice)
         val toolCalls = responseMessage.optJSONArray("tool_calls")
         if (toolCalls == null || toolCalls.length() == 0) {
             throw InvalidNativeToolCallException(
@@ -446,7 +443,7 @@ internal object NativePlannerProtocol {
     }
 
     private fun thoughtSchema(): JSONObject =
-        stringSchema("Optional free-form thought. Shown to the user as-is.")
+        stringSchema("Optional Chinese thinking process. Shown to the user as the chain of thought, not as a tool log.")
 
     private fun stringSchema(description: String, maxLength: Int? = null): JSONObject =
         JSONObject().put("type", "string").put("description", description).also { schema ->
@@ -491,6 +488,25 @@ internal object NativePlannerProtocol {
                 ),
             ),
         )
+
+    fun extractReasoning(message: JSONObject, choice: JSONObject? = null): String {
+        val parts = mutableListOf<String>()
+        fun collect(source: JSONObject?, vararg keys: String) {
+            if (source == null) return
+            keys.forEach { key ->
+                when (val value = source.opt(key)) {
+                    is String -> if (value.isNotBlank()) parts += value.trim()
+                    is JSONObject -> {
+                        value.optString("content").trim().takeIf { it.isNotBlank() }?.let(parts::add)
+                        value.optString("text").trim().takeIf { it.isNotBlank() }?.let(parts::add)
+                    }
+                }
+            }
+        }
+        collect(message, "reasoning_content", "reasoning", "thinking", "reasoning_text")
+        collect(choice, "reasoning_content", "reasoning", "thinking")
+        return parts.firstOrNull().orEmpty()
+    }
 
     fun extractThought(argumentsJson: String): String = runCatching {
         JSONObject(argumentsJson).optString("thought").trim()

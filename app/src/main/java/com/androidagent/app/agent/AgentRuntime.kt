@@ -226,7 +226,6 @@ class AgentRuntime(
                     }
                     pollDirectives().forEach { note ->
                         history += note
-                        onThought(listOf(note))
                         onLog(note)
                     }
                     if (effectiveActions >= DEVICE_ACTION_TURN_LIMIT) {
@@ -409,15 +408,9 @@ class AgentRuntime(
                     val plannedThought = listOf(
                         planned?.reasoningContent.orEmpty(),
                         planned?.thought.orEmpty(),
-                        planned?.assistantContent.orEmpty(),
                     ).filter { it.isNotBlank() }.distinct().joinToString("\n")
-                    onThought(
-                        ActorOverlayThought.decision(
-                            modelThought = plannedThought,
-                            actionLabel = describeAction(proposed, TargetResolver.resolve(proposed, before)),
-                            observation = before,
-                        ),
-                    )
+                    val cot = ActorOverlayThought.cot(plannedThought)
+                    if (cot.isNotEmpty()) onThought(cot)
                     if (QueryLoopPolicy.shouldBlock(consecutiveQueries, proposed, lastQueryFound) ||
                         RepeatActionPolicy.shouldBlock(lastActionFingerprint, proposed)
                     ) {
@@ -440,7 +433,6 @@ class AgentRuntime(
                                 reason,
                             ),
                         )
-                        onThought(ActorOverlayThought.result(describeAction(proposed), reason, progressed = false))
                         continue
                     }
                     consecutiveQueries = QueryLoopPolicy.nextCount(consecutiveQueries, proposed)
@@ -484,12 +476,10 @@ class AgentRuntime(
                         history += "STOP_GATE_REJECTED: ${verification.reason}"
                         ledger.record(StepTrace(milestone.id, before.observationId, proposed.toString(), before.observationId, TransitionJudgement.NO_PROGRESS, verification.reason))
                         onLog("Completion not yet proven: ${verification.reason.take(120)}")
-                        onThought(ActorOverlayThought.result("finish", verification.reason, progressed = false))
                         continue
                     }
 
                     if (proposed is AgentAction.Fail) {
-                        onThought(ActorOverlayThought.result("fail", proposed.reason, progressed = false))
                         val feedback = toolResultJson(false, proposed, before, before, "actor_blocked", proposed.reason)
                         recordTurn(toolTurns, planned, feedback)
                         history += "ACTOR_BLOCKED: ${proposed.reason}"
@@ -1060,15 +1050,8 @@ class AgentRuntime(
     }
 
     private fun publishResultThought(action: AgentAction, result: RuntimeStepEngineResult) {
-        onThought(
-            ActorOverlayThought.result(
-                actionLabel = describeAction(action, result.resolvedTarget?.semanticNode),
-                reason = result.reason,
-                progressed = result.status == RuntimeStepStatus.PROGRESS ||
-                    result.status == RuntimeStepStatus.MILESTONE_COMPLETE ||
-                    result.status == RuntimeStepStatus.OBSERVATION_ONLY,
-            ),
-        )
+        onAction(describeAction(action, result.resolvedTarget?.semanticNode))
+        onLog("Result: ${result.reason.take(200)}")
     }
 
     private fun describeAction(action: AgentAction, target: UiNodeSnapshot? = null): String =

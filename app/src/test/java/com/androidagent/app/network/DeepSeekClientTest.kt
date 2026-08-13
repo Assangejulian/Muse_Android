@@ -90,6 +90,35 @@ class DeepSeekClientTest {
     }
 
     @Test
+    fun extractsNestedReasoningObjectAsChainOfThought() {
+        val response = JSONObject().put(
+            "choices",
+            JSONArray().put(
+                JSONObject().put(
+                    "message",
+                    JSONObject()
+                        .put("reasoning", JSONObject().put("content", "先看评论区再点赞"))
+                        .put(
+                            "tool_calls",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("id", "call_r")
+                                    .put("type", "function")
+                                    .put(
+                                        "function",
+                                        JSONObject().put("name", "click_node").put("arguments", """{"nodeId":3}"""),
+                                    ),
+                            ),
+                        ),
+                ),
+            ),
+        )
+        val planned = NativePlannerProtocol.parseActionResponse(response.toString())
+        assertEquals("先看评论区再点赞", planned.reasoningContent)
+        assertEquals(AgentAction.ClickNode(3), planned.action)
+    }
+
+    @Test
     fun ignoresUnknownNativeArgumentFieldsThroughActionParser() {
         val response = """
             {

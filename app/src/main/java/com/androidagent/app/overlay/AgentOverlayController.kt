@@ -45,15 +45,16 @@ class AgentOverlayController(private val service: AccessibilityService) {
         if (statusBar == null) show()
         val route = if (PrivilegedBackendRouter.isReady()) "SHIZUKU PRIMARY" else "A11Y NODE"
         statusText?.text = service.getString(R.string.agent_overlay_status, route)
+        val phase = statusLabel(state.status)
+        val tool = state.currentAction.substringBefore('(').trim().take(24)
         chainText?.text = service.getString(
             R.string.agent_overlay_budget,
             state.step,
             state.maxSteps,
-            statusLabel(state.status),
+            if (tool.isBlank()) phase else "$phase · $tool",
         )
         val summary = state.thoughtLines.takeLast(16).joinToString("\n")
-            .ifBlank { state.progressSummaries.takeLast(6).joinToString("\n") }
-            .ifBlank { state.currentAction.ifBlank { "正在准备任务环境" } }
+            .ifBlank { "模型正在思考…" }
         if (summary.isNotBlank() && summary != lastSummary) {
             lastSummary = summary
             summaryText?.text = summary

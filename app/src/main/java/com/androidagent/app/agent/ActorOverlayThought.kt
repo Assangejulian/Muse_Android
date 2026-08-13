@@ -1,40 +1,29 @@
 package com.androidagent.app.agent
 
 /**
- * Overlay / chat COT. Pass the model text through. Do not rewrite it into a
- * scripted 看见/打算/结果 template — that hid the real chain of thought.
+ * Overlay COT is the model's reasoning only — the same kind of thinking
+ * stream a chat UI shows before a tool runs. Tool names, REPEAT lines, and
+ * dispatch English are not thought.
  */
 internal object ActorOverlayThought {
     const val MAX_LINE_CHARS = 240
     const val MAX_STORED_LINES = 16
 
-    fun decision(modelThought: String, actionLabel: String, observation: Observation): List<String> {
-        val thoughtLines = splitThought(modelThought)
-        val action = actionLabel.trim()
-        return when {
-            thoughtLines.isNotEmpty() && action.isNotBlank() ->
-                (thoughtLines + "[$action]").distinct().map(::clip)
-            thoughtLines.isNotEmpty() -> thoughtLines.map(::clip)
-            action.isNotBlank() -> listOf("[no model thought]", "[$action]")
-            else -> {
-                val hint = screenHint(observation)
-                listOf(if (hint.isBlank()) "[no model thought]" else hint)
-            }
-        }
-    }
+    fun cot(modelThought: String): List<String> =
+        splitThought(modelThought).filterNot(::isToolLog).map(::clip)
 
-    fun result(actionLabel: String, reason: String, @Suppress("UNUSED_PARAMETER") progressed: Boolean): List<String> {
-        val action = actionLabel.trim()
-        val raw = reason.trim()
-        return buildList {
-            if (action.isNotBlank()) add("→ $action")
-            if (raw.isNotBlank()) addAll(splitThought(raw))
-        }.map(::clip)
-    }
+    fun decision(modelThought: String, @Suppress("UNUSED_PARAMETER") actionLabel: String, @Suppress("UNUSED_PARAMETER") observation: Observation): List<String> =
+        cot(modelThought)
+
+    fun result(
+        @Suppress("UNUSED_PARAMETER") actionLabel: String,
+        @Suppress("UNUSED_PARAMETER") reason: String,
+        @Suppress("UNUSED_PARAMETER") progressed: Boolean,
+    ): List<String> = emptyList()
 
     fun merge(existing: List<String>, incoming: List<String>): List<String> {
         val next = existing.toMutableList()
-        incoming.map { it.trim() }.filter { it.isNotBlank() }.forEach { line ->
+        incoming.map { it.trim() }.filter { it.isNotBlank() }.filterNot(::isToolLog).forEach { line ->
             if (next.lastOrNull() != line) next += line
         }
         return next.takeLast(MAX_STORED_LINES)
@@ -44,20 +33,27 @@ internal object ActorOverlayThought {
         val cleaned = raw.replace("\r\n", "\n").replace('\r', '\n').trim()
         if (cleaned.isBlank()) return emptyList()
         val lines = cleaned.split('\n').map { it.trim() }.filter { it.isNotBlank() }
-        if (lines.size > 1) return lines.map(::clip)
-        return listOf(clip(cleaned))
+        if (lines.size > 1) return lines
+        return listOf(cleaned)
     }
 
-    internal fun screenHint(observation: Observation): String {
-        val labels = observation.nodes.asSequence()
-            .filter { !it.password && !it.isInputMethod }
-            .map { it.text.ifBlank { it.description }.trim() }
-            .filter { it.isNotBlank() && it.length in 1..16 }
-            .distinct()
-            .take(5)
-            .joinToString(" / ")
-        val pkg = observation.packageName.substringAfterLast('.').take(16)
-        return listOf(pkg, labels).filter { it.isNotBlank() }.joinToString(" · ")
+    internal fun isToolLog(line: String): Boolean {
+        val value = line.trim()
+        if (value.isEmpty()) return true
+        val lower = value.lowercase()
+        return value.startsWith("→ ") ||
+            value.startsWith("[") && value.endsWith("]") ||
+            lower.startsWith("repeat:") ||
+            lower.startsWith("query_loop:") ||
+            lower.startsWith("user_skip:") ||
+            lower.contains("no model thought") ||
+            lower.contains("previous dispatch") ||
+            lower.contains("just ran") ||
+            lower.startsWith("find_nodes") ||
+            lower.startsWith("click_node") ||
+            lower.startsWith("click_text") ||
+            lower.startsWith("scroll_until") ||
+            lower.startsWith("read_node")
     }
 
     private fun clip(value: String, max: Int = MAX_LINE_CHARS): String = value.trim().take(max)
