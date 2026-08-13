@@ -212,6 +212,8 @@ class AgentRuntime(
                 var modelFailures = 0
                 var effectiveActions = 0
                 var consecutiveQueries = 0
+                var lastQueryFound = false
+                var lastActionFingerprint: String? = null
                 val evidenceCounters = StopGateEvidenceCounters()
 
                 traceStore.event(runId, "GOAL_READY", mapOf("goal" to plan.compactText(0)))
@@ -416,11 +418,17 @@ class AgentRuntime(
                             observation = before,
                         ),
                     )
-                    if (QueryLoopPolicy.shouldBlock(consecutiveQueries, proposed)) {
-                        val reason = QueryLoopPolicy.rejection(consecutiveQueries)
-                        val feedback = toolResultJson(false, proposed, before, before, "query_loop", reason)
+                    if (QueryLoopPolicy.shouldBlock(consecutiveQueries, proposed, lastQueryFound) ||
+                        RepeatActionPolicy.shouldBlock(lastActionFingerprint, proposed)
+                    ) {
+                        val reason = if (RepeatActionPolicy.shouldBlock(lastActionFingerprint, proposed)) {
+                            RepeatActionPolicy.rejection(proposed)
+                        } else {
+                            QueryLoopPolicy.rejection(consecutiveQueries)
+                        }
+                        val feedback = toolResultJson(false, proposed, before, before, "repeat_or_query_loop", reason)
                         recordTurn(toolTurns, planned, feedback)
-                        history += "QUERY_LOOP: $reason"
+                        history += reason
                         consecutiveQueries = QueryLoopPolicy.nextCount(consecutiveQueries, proposed)
                         ledger.record(
                             StepTrace(
@@ -436,6 +444,7 @@ class AgentRuntime(
                         continue
                     }
                     consecutiveQueries = QueryLoopPolicy.nextCount(consecutiveQueries, proposed)
+                    lastActionFingerprint = RepeatActionPolicy.fingerprint(proposed)
                     traceStore.event(
                         runId,
                         "TOOL_PROPOSED",
@@ -569,6 +578,14 @@ class AgentRuntime(
                         ),
                     )
                     val stepAction = engineResult.action ?: proposed
+                    lastQueryFound = if (QueryLoopPolicy.isQuery(stepAction)) {
+                        engineResult.execution?.success == true &&
+                            QueryLoopPolicy.foundMatches(
+                                listOfNotNull(engineResult.reason, engineResult.execution?.detail).joinToString("\n"),
+                            )
+                    } else {
+                        false
+                    }
                     if (engineResult.execution != null &&
                         stepAction !is AgentAction.FindNodes &&
                         stepAction !is AgentAction.ReadNode

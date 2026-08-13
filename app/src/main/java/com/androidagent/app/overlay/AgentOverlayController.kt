@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
@@ -98,14 +99,14 @@ class AgentOverlayController(private val service: AccessibilityService) {
             gravity = Gravity.CENTER_VERTICAL
             setPadding((14 * density).toInt(), (9 * density).toInt(), (14 * density).toInt(), (9 * density).toInt())
             background = GradientDrawable().apply {
-                cornerRadius = 18 * density
-                setColor(Color.rgb(24, 24, 37))
-                setStroke((1f * density).toInt(), Color.rgb(69, 71, 90))
+                cornerRadius = 22 * density
+                setColor(Color.argb(0x72, 248, 250, 252))
+                setStroke((1f * density).toInt(), Color.argb(0x88, 255, 255, 255))
             }
         }
         statusText = TextView(service).apply {
             setText(R.string.agent_overlay_operating)
-            setTextColor(Color.rgb(180, 190, 254))
+            setTextColor(Color.argb(0xCC, 30, 30, 46))
             textSize = 11f
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             maxLines = 1
@@ -113,7 +114,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
         }
         chainText = TextView(service).apply {
             setText(R.string.agent_overlay_budget_initial)
-            setTextColor(Color.rgb(203, 166, 247))
+            setTextColor(Color.argb(0xBB, 88, 91, 112))
             textSize = 10f
             typeface = Typeface.MONOSPACE
             maxLines = 1
@@ -121,7 +122,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
         }
         summaryText = TextView(service).apply {
             text = "正在准备任务环境"
-            setTextColor(Color.rgb(205, 214, 244))
+            setTextColor(Color.rgb(24, 24, 37))
             textSize = 12.5f
             typeface = Typeface.SANS_SERIF
             maxLines = 20
@@ -142,7 +143,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
         bar.addView(chainText)
         bar.addView(
             scroll,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (200 * density).toInt()),
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (176 * density).toInt()),
         )
         container.addView(
             bar,
@@ -154,7 +155,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
             overlayParams(
                 width = WindowManager.LayoutParams.MATCH_PARENT,
                 height = WindowManager.LayoutParams.WRAP_CONTENT,
-                gravity = Gravity.BOTTOM,
+                gravity = Gravity.TOP,
                 touchable = false,
             ),
         )
@@ -187,7 +188,7 @@ class AgentOverlayController(private val service: AccessibilityService) {
             overlayParams(
                 width = chipWidth,
                 height = WindowManager.LayoutParams.WRAP_CONTENT,
-                gravity = Gravity.BOTTOM or Gravity.END,
+                gravity = Gravity.TOP or Gravity.END,
                 touchable = true,
             ).apply {
                 x = (10 * density).toInt()
@@ -202,16 +203,24 @@ class AgentOverlayController(private val service: AccessibilityService) {
         gravity: Int,
         touchable: Boolean,
     ): WindowManager.LayoutParams {
-        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+        var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             if (touchable) 0 else WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        if (Build.VERSION.SDK_INT >= 31) {
+            flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+        }
         return WindowManager.LayoutParams(
             width,
             height,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             flags,
             PixelFormat.TRANSLUCENT,
-        ).apply { this.gravity = gravity }
+        ).apply {
+            this.gravity = gravity
+            if (Build.VERSION.SDK_INT >= 31) {
+                blurBehindRadius = 48
+            }
+        }
     }
 
     private fun statusLabel(status: String): String = when (status) {

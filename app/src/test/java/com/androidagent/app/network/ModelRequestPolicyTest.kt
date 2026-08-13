@@ -34,7 +34,7 @@ class ModelRequestPolicyTest {
             model = "deepseek-v4-pro",
             allowThinking = true,
         )
-        assertFalse(body.has("thinking"))
+        assertEquals("enabled", body.getJSONObject("thinking").getString("type"))
     }
 
     @Test
@@ -51,7 +51,7 @@ class ModelRequestPolicyTest {
     }
 
     @Test
-    fun deepseekFlashNeverKeepsThinkingEvenWhenManagerAllowsIt() {
+    fun deepseekFlashKeepsThinkingWhenTheActorAllowsIt() {
         val body = JSONObject()
         ProviderRequestPolicy.configure(
             body = body,
@@ -60,6 +60,6 @@ class ModelRequestPolicyTest {
             model = "deepseek-v4-flash",
             allowThinking = true,
         )
-        assertEquals("disabled", body.getJSONObject("thinking").getString("type"))
+        assertEquals("enabled", body.getJSONObject("thinking").getString("type"))
     }
 }

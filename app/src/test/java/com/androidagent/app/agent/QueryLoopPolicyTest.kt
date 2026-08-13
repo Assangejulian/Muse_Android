@@ -13,6 +13,7 @@ class QueryLoopPolicyTest {
         assertFalse(QueryLoopPolicy.shouldBlock(0, find))
         assertFalse(QueryLoopPolicy.shouldBlock(1, find))
         assertTrue(QueryLoopPolicy.shouldBlock(2, find))
+        assertTrue(QueryLoopPolicy.shouldBlock(0, find, lastQueryFound = true))
         assertFalse(QueryLoopPolicy.shouldBlock(2, click))
         assertEquals(1, QueryLoopPolicy.nextCount(0, find))
         assertEquals(0, QueryLoopPolicy.nextCount(2, click))

@@ -202,7 +202,7 @@ class DeepSeekClientTest {
     }
 
     @Test
-    fun rejectsParallelNativeToolCalls() {
+    fun takesTheFirstOfMultipleNativeToolCalls() {
         val toolCall = { id: String ->
             JSONObject()
                 .put("id", id)
@@ -224,7 +224,9 @@ class DeepSeekClientTest {
             ),
         )
 
-        assertTrue(runCatching { NativePlannerProtocol.parseActionResponse(response.toString()) }.isFailure)
+        val planned = NativePlannerProtocol.parseActionResponse(response.toString())
+        assertEquals(AgentAction.Back, planned.action)
+        assertEquals("call_1", planned.callId)
     }
 
     @Test

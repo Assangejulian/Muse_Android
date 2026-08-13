@@ -336,14 +336,29 @@ internal object NativePlannerProtocol {
         val responseMessage = choice
             .optJSONObject("message")
             ?: throw InvalidNativeToolCallException("Native tool response did not contain a message")
+        val reasoning = listOf(
+            responseMessage.optString("reasoning_content"),
+            responseMessage.optString("reasoning"),
+        ).firstOrNull { it.isNotBlank() }.orEmpty()
         val toolCalls = responseMessage.optJSONArray("tool_calls")
-            ?: throw InvalidNativeToolCallException("Model did not return a native tool call")
-        if (toolCalls.length() != 1) {
-            throw InvalidNativeToolCallException("Model must return exactly one native tool call")
+        if (toolCalls == null || toolCalls.length() == 0) {
+            throw InvalidNativeToolCallException(
+                if (reasoning.isNotBlank()) {
+                    "Model thought without a tool call"
+                } else {
+                    "Model did not return a native tool call"
+                },
+            )
         }
-        val toolCall = toolCalls.optJSONObject(0)
+        val toolCall = (0 until toolCalls.length())
+            .mapNotNull { toolCalls.optJSONObject(it) }
+            .firstOrNull { call ->
+                call.optString("type").ifBlank { "function" } == "function" &&
+                    call.optJSONObject("function")?.optString("name").orEmpty() in knownToolNames()
+            }
             ?: throw InvalidNativeToolCallException("Native tool call was not an object")
-        if (toolCall.optString("type") != "function") {
+        val callType = toolCall.optString("type").ifBlank { "function" }
+        if (callType != "function") {
             throw InvalidNativeToolCallException("Native tool call had an unexpected type")
         }
         val callId = toolCall.optString("id")
@@ -354,8 +369,12 @@ internal object NativePlannerProtocol {
         if (toolName !in knownToolNames()) {
             throw InvalidNativeToolCallException("Model called an unexpected tool")
         }
-        val arguments = function.opt("arguments")
-        if (arguments !is String || arguments.isBlank()) {
+        val arguments = when (val raw = function.opt("arguments")) {
+            is String -> raw
+            is JSONObject -> raw.toString()
+            else -> ""
+        }
+        if (arguments.isBlank()) {
             throw InvalidNativeToolCallException("Native tool call arguments were not a JSON string")
         }
 
@@ -368,7 +387,7 @@ internal object NativePlannerProtocol {
             action = action,
             callId = callId,
             argumentsJson = arguments,
-            reasoningContent = responseMessage.optString("reasoning_content"),
+            reasoningContent = reasoning,
             assistantContent = responseMessage.opt("content") as? String,
             native = true,
             thought = extractThought(arguments),

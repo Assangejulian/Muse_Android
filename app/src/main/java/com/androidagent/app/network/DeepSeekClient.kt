@@ -148,10 +148,8 @@ class DeepSeekClient(
                 // Cache a per-run compatibility fallback so every step does not repeat a rejected native request.
                 legacyPlannerModels += capabilityKey
             } catch (_: InvalidNativeToolCallException) {
-                // Flash-class models often emit one malformed tool call and then
-                // keep doing it. Falling back once for the rest of the process
-                // avoids a 30s native retry on every subsequent step.
-                legacyPlannerModels += capabilityKey
+                // One bad turn (think-only, extra tool call) must not disable
+                // native tools for the rest of the run.
             }
         }
 
@@ -493,6 +491,11 @@ class DeepSeekClient(
             } catch (invalidCall: InvalidNativeToolCallException) {
                 lastInvalidCall = invalidCall
                 lastError = invalidCall.message.orEmpty()
+                if (invalidCall.message.orEmpty().contains("without a tool call", ignoreCase = true) ||
+                    invalidCall.message.orEmpty().contains("did not return a native tool call", ignoreCase = true)
+                ) {
+                    messages.put(message("user", "Call exactly one tool now. Thinking alone is not enough."))
+                }
             } catch (networkError: IOException) {
                 lastInvalidCall = null
                 lastError = "planner-native ($serviceLabel) network error: ${networkError.message.orEmpty()}"
@@ -653,9 +656,10 @@ class DeepSeekClient(
         model: String,
         purpose: String,
     ) {
-        // Manager/replan may use provider thinking for stronger multi-step scaffolds.
-        // Actor/router/critic/verifier stay non-thinking for low per-step latency.
-        val allowThinking = purpose.equals("manager", ignoreCase = true)
+        // Actor native calls keep thinking on so the overlay can show the raw
+        // Chinese chain of thought. Verifier/JSON paths stay non-thinking.
+        val allowThinking = purpose.equals("planner-native", ignoreCase = true) ||
+            purpose.equals("manager", ignoreCase = true)
         ProviderRequestPolicy.configure(
             body = body,
             baseUrl = baseUrl,

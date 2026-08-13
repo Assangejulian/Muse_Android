@@ -13,9 +13,8 @@ internal object ModelRetryPolicy {
 
 internal object ProviderRequestPolicy {
     /**
-     * @param allowThinking When true and the provider is DeepSeek V4 Pro, leave
-     * thinking enabled for stronger multi-step planning. Other paths stay non-thinking
-     * for latency and cost.
+     * @param allowThinking When true, leave provider thinking on so the Actor
+     * can show a raw Chinese chain of thought. Other paths stay non-thinking.
      */
     fun configure(
         body: JSONObject,
@@ -29,10 +28,11 @@ internal object ProviderRequestPolicy {
         val qwen = provider.equals("qwen", true) ||
             (provider.isBlank() && baseUrl.contains("aliyuncs.com", true))
         when {
-            qwen -> body.put("enable_thinking", false)
+            qwen -> body.put("enable_thinking", allowThinking)
             deepseek -> {
-                val proThinking = allowThinking && model.contains("deepseek-v4-pro", ignoreCase = true)
-                if (!proThinking) {
+                if (allowThinking) {
+                    body.put("thinking", JSONObject().put("type", "enabled"))
+                } else {
                     body.put("thinking", JSONObject().put("type", "disabled"))
                 }
             }
