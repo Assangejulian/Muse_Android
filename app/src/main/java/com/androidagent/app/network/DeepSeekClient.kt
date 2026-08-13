@@ -115,6 +115,7 @@ class DeepSeekClient(
         currentPackage: String? = observation.packageName,
         allowedPackages: Set<String> = allowedPackage?.let(::setOf) ?: emptySet(),
         terminalAvailable: Boolean = false,
+        onReasoning: (String) -> Unit = {},
     ): PlannedAction {
         SensitiveOperationPolicy.validateGoal(goal).getOrThrow()
         requireCompatibleModel(model)
@@ -141,6 +142,7 @@ class DeepSeekClient(
                     messages = messages,
                     provider = provider,
                     terminalAvailable = terminalAvailable,
+                    onReasoning = onReasoning,
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -449,10 +451,12 @@ class DeepSeekClient(
         messages: JSONArray,
         provider: String = "",
         terminalAvailable: Boolean = false,
+        onReasoning: (String) -> Unit = {},
     ): PlannedAction {
         val serviceLabel = provider.ifBlank { "model-service" }
         var lastError = "planner-native ($serviceLabel) returned no usable tool call"
         var lastInvalidCall: InvalidNativeToolCallException? = null
+        var useStream = true
         repeat(MAX_ATTEMPTS) { attempt ->
             val bodyJson = JSONObject()
                 .put("model", model)
@@ -461,6 +465,7 @@ class DeepSeekClient(
                 .put("messages", JSONArray(messages.toString()))
                 .put("tools", NativePlannerProtocol.toolDefinitions(terminalAvailable))
                 .put("tool_choice", NativePlannerProtocol.toolChoice())
+                .put("stream", useStream)
             configureRequestMode(bodyJson, baseUrl, provider, model, purpose = "planner-native")
             val request = Request.Builder()
                 .url(completionsUrl(baseUrl))
@@ -468,34 +473,31 @@ class DeepSeekClient(
                 .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
                 .build()
             try {
-                val response = client.newCall(request).awaitResponseBodyWithinDeadline("planner-native")
-                val responseBody = response.body
-                if (!response.isSuccessful) {
-                    val apiMessage = runCatching {
-                        JSONObject(responseBody).optJSONObject("error")?.optString("message")
-                    }.getOrNull().orEmpty()
-                    val httpError = "planner-native ($serviceLabel) HTTP ${response.code}${if (apiMessage.isBlank()) "" else ": $apiMessage"}"
-                    if (ModelRetryPolicy.shouldRetryStatus(response.code)) {
-                        lastError = httpError
-                        lastInvalidCall = null
-                    } else if ((response.code == 400 || response.code == 422) && toolsAreUnsupported(httpError)) {
-                        throw NativeToolsUnsupportedException(httpError)
-                    } else if (response.code == 400 || response.code == 422) {
-                        lastError = httpError
-                        lastInvalidCall = InvalidNativeToolCallException(httpError)
-                    } else {
-                        error(httpError)
+                return if (useStream) {
+                    withContext(Dispatchers.IO) {
+                        withTimeoutOrNull(NATIVE_PLANNER_DEADLINE_MS) {
+                            executeNativeStream(request, serviceLabel, onReasoning)
+                        } ?: throw SocketTimeoutException(
+                            "planner-native ($serviceLabel) stream exceeded ${NATIVE_PLANNER_DEADLINE_MS}ms",
+                        )
                     }
                 } else {
-                    return NativePlannerProtocol.parseActionResponse(responseBody)
+                    val response = client.newCall(request).awaitResponseBodyWithinDeadline("planner-native")
+                    if (!response.isSuccessful) throw nativeHttpError(serviceLabel, response.code, response.body)
+                    NativePlannerProtocol.parseActionResponse(response.body)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
+            } catch (unsupported: NativeToolsUnsupportedException) {
+                throw unsupported
             } catch (invalidCall: InvalidNativeToolCallException) {
                 lastInvalidCall = invalidCall
                 lastError = invalidCall.message.orEmpty()
-                if (invalidCall.message.orEmpty().contains("without a tool call", ignoreCase = true) ||
-                    invalidCall.message.orEmpty().contains("did not return a native tool call", ignoreCase = true)
+                if (lastError.contains("stream", true) && useStream) {
+                    useStream = false
+                }
+                if (lastError.contains("without a tool call", ignoreCase = true) ||
+                    lastError.contains("did not return a native tool call", ignoreCase = true)
                 ) {
                     messages.put(message("user", "Call exactly one tool now. Thinking alone is not enough."))
                 }
@@ -503,11 +505,67 @@ class DeepSeekClient(
                 lastInvalidCall = null
                 lastError = "planner-native ($serviceLabel) network error: ${networkError.message.orEmpty()}"
                 if (attempt + 1 >= MAX_ATTEMPTS) throw networkError
+            } catch (error: IllegalStateException) {
+                lastError = error.message.orEmpty()
+                if ((lastError.contains("HTTP 400") || lastError.contains("HTTP 422")) && toolsAreUnsupported(lastError)) {
+                    throw NativeToolsUnsupportedException(lastError)
+                }
+                if (useStream && (lastError.contains("stream", true) || lastError.contains("HTTP 400"))) {
+                    useStream = false
+                    lastInvalidCall = InvalidNativeToolCallException(lastError)
+                } else {
+                    lastInvalidCall = InvalidNativeToolCallException(lastError)
+                }
             }
             if (attempt + 1 < MAX_ATTEMPTS) delay(ModelRetryPolicy.delayMillis(attempt))
         }
         lastInvalidCall?.let { throw it }
         throw IOException(lastError)
+    }
+
+    private fun executeNativeStream(
+        request: Request,
+        serviceLabel: String,
+        onReasoning: (String) -> Unit,
+    ): PlannedAction {
+        client.newCall(request).execute().use { response ->
+            val body = response.body ?: throw IOException("planner-native ($serviceLabel) empty body")
+            if (!response.isSuccessful) {
+                throw nativeHttpError(serviceLabel, response.code, body.string())
+            }
+            val source = body.source()
+            val first = source.readUtf8Line()
+            if (first == null) throw InvalidNativeToolCallException("planner-native ($serviceLabel) empty stream")
+            if (first.trimStart().startsWith("{")) {
+                val rest = source.readUtf8()
+                return NativePlannerProtocol.parseActionResponse(first + rest)
+            }
+            val assembler = ChatCompletionStreamAssembler()
+            fun handleLine(line: String) {
+                val trimmed = line.trim()
+                if (!trimmed.startsWith("data:")) return
+                val added = assembler.acceptData(trimmed.removePrefix("data:").trim())
+                if (added.isNotEmpty()) onReasoning(added)
+            }
+            handleLine(first)
+            while (!source.exhausted()) {
+                val line = source.readUtf8Line() ?: break
+                handleLine(line)
+            }
+            return assembler.toPlannedAction()
+        }
+    }
+
+    private fun nativeHttpError(serviceLabel: String, code: Int, body: String): Throwable {
+        val apiMessage = runCatching {
+            JSONObject(body).optJSONObject("error")?.optString("message")
+        }.getOrNull().orEmpty()
+        val httpError = "planner-native ($serviceLabel) HTTP $code${if (apiMessage.isBlank()) "" else ": $apiMessage"}"
+        return if ((code == 400 || code == 422) && toolsAreUnsupported(httpError)) {
+            NativeToolsUnsupportedException(httpError)
+        } else {
+            IllegalStateException(httpError)
+        }
     }
 
     private suspend fun executeStructuredRequest(

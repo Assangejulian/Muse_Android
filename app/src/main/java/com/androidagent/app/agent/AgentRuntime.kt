@@ -139,6 +139,7 @@ class AgentRuntime(
     private var cachedOcrFingerprint: String? = null
     private var cachedOcrText: String = ""
     private var cachedOcrAtMillis: Long = 0L
+    private var liveReasoning: String = ""
 
     suspend fun run(): RuntimeResult {
         val immutableGoal = goalOverride?.trim().takeUnless { it.isNullOrBlank() } ?: settings.taskGoal
@@ -333,6 +334,13 @@ class AgentRuntime(
                     }
 
                     onPhase(step, "Planning")
+                    val cotBuffer = StringBuilder()
+                    fun publishLive(extra: List<String> = emptyList()) {
+                        liveReasoning = cotBuffer.toString()
+                        val thinking = ActorOverlayThought.cot(liveReasoning)
+                        onThought((thinking.ifEmpty { listOf("模型正在思考…") } + extra).takeLast(16))
+                    }
+                    publishLive()
                     val screenshotCapture = if (useVision && lockedPackage != null && packageFailure == null && privacy.allowed) {
                         captureBoundScreenshot(before, lockedPackage, packagePolicy)
                     } else {
@@ -374,12 +382,17 @@ class AgentRuntime(
                             currentPackage = before.packageName,
                             allowedPackages = packagePolicy.allowedPackages,
                             terminalAvailable = PrivilegedBackendRouter.isReady(),
+                            onReasoning = { chunk ->
+                                cotBuffer.append(chunk)
+                                publishLive()
+                            },
                         ).also { planned = it }.action
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (error: Throwable) {
                         modelFailures += 1
                         val reason = "planner error: ${error.message.orEmpty()}"
+                        publishLive(listOf(liveProblem(reason)))
                         history += "MODEL_ERROR: $reason"
                         onLog(reason)
                         traceStore.event(runId, "MODEL_ERROR", mapOf("reason" to reason))
@@ -405,12 +418,12 @@ class AgentRuntime(
                         continue
                     }
                     modelFailures = 0
-                    val plannedThought = listOf(
-                        planned?.reasoningContent.orEmpty(),
-                        planned?.thought.orEmpty(),
-                    ).filter { it.isNotBlank() }.distinct().joinToString("\n")
-                    val cot = ActorOverlayThought.cot(plannedThought)
-                    if (cot.isNotEmpty()) onThought(cot)
+                    if (cotBuffer.isBlank()) {
+                        listOf(planned?.reasoningContent.orEmpty(), planned?.thought.orEmpty())
+                            .filter { it.isNotBlank() }
+                            .forEach { cotBuffer.append(it).append('\n') }
+                    }
+                    publishLive()
                     if (QueryLoopPolicy.shouldBlock(consecutiveQueries, proposed, lastQueryFound) ||
                         RepeatActionPolicy.shouldBlock(lastActionFingerprint, proposed)
                     ) {
@@ -422,6 +435,7 @@ class AgentRuntime(
                         val feedback = toolResultJson(false, proposed, before, before, "repeat_or_query_loop", reason)
                         recordTurn(toolTurns, planned, feedback)
                         history += reason
+                        publishLive(listOf(liveProblem(reason)))
                         consecutiveQueries = QueryLoopPolicy.nextCount(consecutiveQueries, proposed)
                         ledger.record(
                             StepTrace(
@@ -1052,6 +1066,27 @@ class AgentRuntime(
     private fun publishResultThought(action: AgentAction, result: RuntimeStepEngineResult) {
         onAction(describeAction(action, result.resolvedTarget?.semanticNode))
         onLog("Result: ${result.reason.take(200)}")
+        val problem = when (result.status) {
+            RuntimeStepStatus.PROGRESS, RuntimeStepStatus.MILESTONE_COMPLETE, RuntimeStepStatus.OBSERVATION_ONLY -> null
+            else -> liveProblem(result.reason)
+        }
+        if (problem != null) {
+            val thinking = ActorOverlayThought.cot(liveReasoning)
+            onThought((thinking.ifEmpty { listOf("模型正在思考…") } + problem).takeLast(16))
+        }
+    }
+
+    private fun liveProblem(reason: String): String {
+        val lower = reason.lowercase()
+        return when {
+            lower.contains("repeat") -> "问题：同样的动作刚做过，必须换一条路"
+            lower.contains("query_loop") -> "问题：已经定位过了，还在反复查找"
+            lower.contains("planner error") || lower.contains("http") -> "问题：模型请求失败 ${reason.take(80)}"
+            lower.contains("unknown") -> "问题：点击结果不确定，可能没点中"
+            lower.contains("missing") -> "问题：当前页找不到要点的控件"
+            lower.contains("timeout") -> "问题：模型响应超时"
+            else -> "问题：${reason.take(100)}"
+        }
     }
 
     private fun describeAction(action: AgentAction, target: UiNodeSnapshot? = null): String =

@@ -150,7 +150,7 @@ object AgentController {
                     },
                     onThought = { lines ->
                         updateFor(generation) {
-                            copy(thoughtLines = ActorOverlayThought.merge(thoughtLines, lines))
+                            copy(thoughtLines = lines.takeLast(ActorOverlayThought.MAX_STORED_LINES))
                         }
                     },
                     onLog = { message ->
