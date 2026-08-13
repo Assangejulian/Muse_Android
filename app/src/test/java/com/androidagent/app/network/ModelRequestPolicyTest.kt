@@ -34,7 +34,7 @@ class ModelRequestPolicyTest {
             model = "deepseek-v4-pro",
             allowThinking = true,
         )
-        assertEquals("enabled", body.getJSONObject("thinking").getString("type"))
+        assertFalse(body.has("thinking"))
     }
 
     @Test
@@ -60,6 +60,6 @@ class ModelRequestPolicyTest {
             model = "deepseek-v4-flash",
             allowThinking = true,
         )
-        assertEquals("enabled", body.getJSONObject("thinking").getString("type"))
+        assertFalse(body.has("thinking"))
     }
 }

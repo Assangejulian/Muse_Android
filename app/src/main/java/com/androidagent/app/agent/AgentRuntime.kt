@@ -1080,7 +1080,7 @@ class AgentRuntime(
 
     private fun isFatalModelError(error: Throwable): Boolean {
         val message = error.message.orEmpty().lowercase()
-        return listOf("http 400", "http 401", "http 403", "invalid api key", "base url").any(message::contains)
+        return listOf("http 401", "http 403", "invalid api key", "base url").any(message::contains)
     }
 
     private fun translateJudgement(judgement: TransitionJudgement): String = when (judgement) {

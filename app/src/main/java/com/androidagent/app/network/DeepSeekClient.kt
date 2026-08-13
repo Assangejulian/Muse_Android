@@ -480,6 +480,9 @@ class DeepSeekClient(
                         lastInvalidCall = null
                     } else if ((response.code == 400 || response.code == 422) && toolsAreUnsupported(httpError)) {
                         throw NativeToolsUnsupportedException(httpError)
+                    } else if (response.code == 400 || response.code == 422) {
+                        lastError = httpError
+                        lastInvalidCall = InvalidNativeToolCallException(httpError)
                     } else {
                         error(httpError)
                     }
@@ -606,10 +609,10 @@ class DeepSeekClient(
     }
 
     private suspend fun Call.awaitResponseBodyWithinDeadline(purpose: String): HttpResponse {
-        val deadlineMillis = if (purpose.equals("manager", ignoreCase = true)) {
-            MANAGER_RESPONSE_DEADLINE_MS
-        } else {
-            MODEL_RESPONSE_DEADLINE_MS
+        val deadlineMillis = when {
+            purpose.equals("manager", ignoreCase = true) -> MANAGER_RESPONSE_DEADLINE_MS
+            purpose.equals("planner-native", ignoreCase = true) -> NATIVE_PLANNER_DEADLINE_MS
+            else -> MODEL_RESPONSE_DEADLINE_MS
         }
         return withTimeoutOrNull(deadlineMillis) { awaitResponseBody() }
             ?: throw SocketTimeoutException("$purpose model response exceeded ${deadlineMillis}ms")
@@ -700,7 +703,7 @@ class DeepSeekClient(
     private companion object {
         val sharedClient: OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(50, TimeUnit.SECONDS)
+            .readTimeout(90, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
             .build()
         const val ROUTE_OUTPUT_TOKENS = 2_048
@@ -708,6 +711,7 @@ class DeepSeekClient(
         const val MAX_ATTEMPTS = 2
         const val MAX_MANAGER_PLAN_ATTEMPTS = 2
         const val MODEL_RESPONSE_DEADLINE_MS = 35_000L
+        const val NATIVE_PLANNER_DEADLINE_MS = 80_000L
         const val MANAGER_RESPONSE_DEADLINE_MS = 45_000L
     }
 }

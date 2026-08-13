@@ -1580,6 +1580,6 @@ private fun runtimeFailureMessage(outcome: RuntimeOutcome, reason: String): Stri
             "模型服务暂时不可用，本次任务未继续执行。"
         outcome == RuntimeOutcome.TIMEOUT ->
             "任务运行超时，Muse 已停止当前执行。"
-        else -> "任务未完成，Muse 已安全停止。可在运行记录中查看诊断信息。"
+        else -> "任务未完成：${reason.trim().ifBlank { outcome.name }.take(240)}"
     }
 }

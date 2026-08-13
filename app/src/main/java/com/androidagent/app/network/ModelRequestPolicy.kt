@@ -30,9 +30,10 @@ internal object ProviderRequestPolicy {
         when {
             qwen -> body.put("enable_thinking", allowThinking)
             deepseek -> {
-                if (allowThinking) {
-                    body.put("thinking", JSONObject().put("type", "enabled"))
-                } else {
+                // V4 thinking is on by default. Do not send type=enabled as a
+                // top-level field — some gateways reject it with HTTP 400 and
+                // the Actor used to treat that as a fatal stop.
+                if (!allowThinking) {
                     body.put("thinking", JSONObject().put("type", "disabled"))
                 }
             }
